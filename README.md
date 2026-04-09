@@ -14,13 +14,13 @@ Valve patched the (sinful) thing SteamTools did to sync saves. Specifically, Ste
 
 It also did not support Steam AutoCloud games at all. It would simply show a fake success message for those games.
 
-What _this_ tool does is redirect Steam Cloud requests for games that are injected to Google Drive/OneDrive/a local folder. Everything is native inside the Steam Client, but the actual data is read/written from your cloud account. This was much harder to do than just redirecting read/write to an AppID that your account owns, but it was fun to make. It also is less likely to piss off Valve.
+What _this_ tool does is redirect Steam Cloud requests for games that are injected to Google Drive/OneDrive/a local folder, including AutoCloud games. Everything is native inside the Steam Client, but the actual data is read/written from your cloud account. This was much harder to do than just redirecting read/write to an AppID that your account owns, but it was fun to make. It also is less likely to piss off Valve.
 
 This isn't uploading your save files manually or something silly like that. It's the real deal. Steam Cloud, but going to a cloud provider and not Valve.
 
-It also has a function to reset the progress of games (useful for auto cloud games that you want to start over in) and a tool to scan SteamTools games for the pollution described above. ****DO NOT USE THAT FUNCTION IF YOU DO NOT KNOW WHAT YOU ARE DOING. YOU WILL END UP DELETING YOUR SAVE. WHILE THE TOOL DOES TAKE A BACKUP AND CAN EASILY RESTORE IT, YOU STILL SHOULD NOT USE THAT TOOL UNLESS YOU KNOW WHAT YOU ARE DOING.****
+The tool also has a function to reset the progress of games (useful for auto cloud games that you want to start over in) and a tool to scan SteamTools games for the pollution described above. ****DO NOT USE THOSE FUNCTIONS IF YOU DO NOT KNOW WHAT YOU ARE DOING. YOU WILL END UP DELETING YOUR SAVE. WHILE THE TOOL DOES TAKE A BACKUP AND CAN EASILY RESTORE IT, YOU STILL SHOULD NOT USE THAT TOOL UNLESS YOU KNOW WHAT YOU ARE DOING.****
 
-Please treat the cloud 'folder' the same way you would treat Steam Cloud itself. If you delete that folder from Google Drive/OneDrive without disabling the provider in CloudRedirect, expect bad things to happen.
+Please treat the cloud 'folder' on your cloud provider the same way you would treat Steam Cloud itself. If you delete that folder from Google Drive/OneDrive without disabling the provider in CloudRedirect, expect bad things to happen.
 
 CloudRedirect is good software. It's clever.
 
