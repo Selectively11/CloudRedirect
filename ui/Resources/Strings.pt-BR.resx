@@ -44,7 +44,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Build #1</value>
+    <value>CloudRedirect - Public Test Build #2</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Painel</value>
@@ -1081,7 +1081,7 @@ Os arquivos podem ser restaurados pela aba Restaurar. Continuar?</value>
   </data>
 
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Build #1)</value>
+    <value>{0}.{1}.{2} (Public Test Build #2)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Verificando...</value>
@@ -1134,7 +1134,7 @@ Tem certeza?</value>
     <value>AVISO</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Build #1</value>
+    <value>CloudRedirect - Public Test Build #2</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  RISCO  DE  PERDA  DE  DADOS  !</value>

@@ -12,6 +12,7 @@ public partial class CloudProviderPage : Page
     private Services.OAuthService? _oauth;
     private CancellationTokenSource? _authCts;
     private bool _isAuthenticating;
+    private bool _loading;
     private readonly StringBuilder _logBuffer = new();
 
     public CloudProviderPage()
@@ -33,7 +34,8 @@ public partial class CloudProviderPage : Page
 
         try
         {
-            // Select matching provider in combo
+            _loading = true;
+
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
             {
                 if (ProviderCombo.Items[i] is ComboBoxItem item && item.Tag as string == config.Provider)
@@ -43,7 +45,6 @@ public partial class CloudProviderPage : Page
                 }
             }
 
-            // Populate path box from token_path or sync_path
             if (config.TokenPath != null)
                 TokenPathBox.Text = config.TokenPath;
             else if (config.SyncPath != null)
@@ -51,12 +52,16 @@ public partial class CloudProviderPage : Page
             else if (config.IsLocal || config.IsFolder)
                 SetDefaultLocalPath();
 
-            // Check if tokens file exists
+            UpdateProviderUI();
             UpdateAuthStatus();
         }
         catch (Exception ex)
         {
             AuthStatus.Text = S.Format("CloudProvider_ErrorReadingConfig", ex.Message);
+        }
+        finally
+        {
+            _loading = false;
         }
     }
 
@@ -72,50 +77,13 @@ public partial class CloudProviderPage : Page
 
     private void ProviderCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_loading) return;
+
+        UpdateProviderUI();
+
         if (ProviderCombo.SelectedItem is ComboBoxItem item)
         {
             var tag = item.Tag as string;
-            bool needsTokens = tag is "gdrive" or "onedrive";
-            bool isFolder = tag == "folder";
-            bool isLocal = tag == "local";
-            bool needsPath = needsTokens || isFolder;
-
-            // Show/hide path controls and sign in button
-            TokenPathBox.IsEnabled = needsPath;
-            BrowseButton.IsEnabled = needsPath;
-            SignInButton.Visibility = needsTokens ? Visibility.Visible : Visibility.Collapsed;
-
-            // Update labels based on provider type
-            if (isFolder)
-            {
-                PathLabel.Text = S.Get("CloudProvider_SyncFolderPath");
-                TokenPathBox.PlaceholderText = S.Get("CloudProvider_SyncFolderPlaceholder");
-                PathHint.Text = S.Get("CloudProvider_SyncFolderHint");
-            }
-            else if (isLocal)
-            {
-                PathLabel.Text = S.Get("CloudProvider_LocalStoragePath");
-                TokenPathBox.PlaceholderText = "";
-                PathHint.Text = S.Get("CloudProvider_LocalStorageHint");
-                TokenPathBox.IsEnabled = false;
-                BrowseButton.IsEnabled = false;
-            }
-            else if (needsTokens)
-            {
-                PathLabel.Text = S.Get("CloudProvider_TokenFilePath");
-                TokenPathBox.PlaceholderText = S.Get("CloudProvider_TokenPlaceholder");
-                PathHint.Text = "";
-            }
-            else
-            {
-                PathLabel.Text = S.Get("CloudProvider_TokenFilePath");
-                TokenPathBox.PlaceholderText = "";
-                PathHint.Text = "";
-            }
-
-            // Always reset the path when switching provider type, so stale
-            // paths from a different provider don't carry over (e.g. local path
-            // used as token save path for gdrive).
             if (tag == "gdrive")
             {
                 TokenPathBox.Text = Path.Combine(
@@ -128,13 +96,59 @@ public partial class CloudProviderPage : Page
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "CloudRedirect", "onedrive_tokens.json");
             }
-            else if (isLocal || isFolder)
+            else if (tag is "local" or "folder")
             {
                 SetDefaultLocalPath();
             }
         }
 
         UpdateAuthStatus();
+    }
+
+    /// <summary>
+    /// Updates labels, enabled state, and hints for the selected provider.
+    /// </summary>
+    private void UpdateProviderUI()
+    {
+        if (ProviderCombo.SelectedItem is not ComboBoxItem item) return;
+
+        var tag = item.Tag as string;
+        bool needsTokens = tag is "gdrive" or "onedrive";
+        bool isFolder = tag == "folder";
+        bool isLocal = tag == "local";
+        bool needsPath = needsTokens || isFolder;
+
+        TokenPathBox.IsEnabled = needsPath;
+        BrowseButton.IsEnabled = needsPath;
+        SignInButton.Visibility = needsTokens ? Visibility.Visible : Visibility.Collapsed;
+
+        // Update labels based on provider type
+        if (isFolder)
+        {
+            PathLabel.Text = S.Get("CloudProvider_SyncFolderPath");
+            TokenPathBox.PlaceholderText = S.Get("CloudProvider_SyncFolderPlaceholder");
+            PathHint.Text = S.Get("CloudProvider_SyncFolderHint");
+        }
+        else if (isLocal)
+        {
+            PathLabel.Text = S.Get("CloudProvider_LocalStoragePath");
+            TokenPathBox.PlaceholderText = "";
+            PathHint.Text = S.Get("CloudProvider_LocalStorageHint");
+            TokenPathBox.IsEnabled = false;
+            BrowseButton.IsEnabled = false;
+        }
+        else if (needsTokens)
+        {
+            PathLabel.Text = S.Get("CloudProvider_TokenFilePath");
+            TokenPathBox.PlaceholderText = S.Get("CloudProvider_TokenPlaceholder");
+            PathHint.Text = "";
+        }
+        else
+        {
+            PathLabel.Text = S.Get("CloudProvider_TokenFilePath");
+            TokenPathBox.PlaceholderText = "";
+            PathHint.Text = "";
+        }
     }
 
     private void BrowseToken_Click(object sender, RoutedEventArgs e)

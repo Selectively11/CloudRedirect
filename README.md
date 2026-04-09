@@ -37,11 +37,15 @@ CloudRedirect consists of a C++ DLL and a WPF companion app:
 - **OneDrive**
 - **Local folder / mapped drive** -- by request of literally one user.
 
-## Download
+## Usage
+
+Make sure you are on Steam version 1773426488. That is the only supported version of Steam.
 
 Grab the latest release from the [Releases page](https://github.com/Selectively11/CloudRedirect/releases).
 
-The download is a single `CloudRedirect.exe` with the DLL embedded inside.
+Run the EXE. In Setup, hit 'Run All Patches'. Go to the Cloud Provider tab, select your provider. If it is a cloud provider, hit 'Sign In' and sign in. 
+
+That's it. Go launch Steam. Your games should start syncing now. You may have errors if your userdata folder was filled with garbage by SteamTools and the game is a Steam AutoCloud save. In that case, you need to identify which files belong in that folder and which files belong to another game and clean it up. 
 
 ## Building from source
 
