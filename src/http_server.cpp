@@ -3,6 +3,8 @@
 #include "file_util.h"
 #include "log.h"
 
+#include "miniz.h"
+
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <iphlpapi.h>
@@ -45,6 +47,55 @@ struct ClientSlot {
 };
 static std::vector<ClientSlot> g_clientSlots;
 
+// Try to decompress a ZIP archive produced by Steam's cloud compression.
+// Returns true if the data was a ZIP and was successfully decompressed (output in 'out').
+// Returns false if the data is not a ZIP or decompression fails; caller should store as-is.
+static bool TryDecompressZip(const std::vector<uint8_t>& data, std::vector<uint8_t>& out) {
+    if (data.size() < 4) return false;
+    if (data[0] != 0x50 || data[1] != 0x4B || data[2] != 0x03 || data[3] != 0x04)
+        return false;
+
+    mz_zip_archive zip{};
+    if (!mz_zip_reader_init_mem(&zip, data.data(), data.size(), 0)) {
+        LOG("[HTTP] ZIP init failed: %s", mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
+        return false;
+    }
+
+    // Steam's cloud compression always produces a single-entry ZIP with
+    // inner filename "z". Reject anything else to avoid decompressing
+    // game saves that are natively ZIP archives.
+    if (mz_zip_reader_get_num_files(&zip) != 1) {
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+    mz_zip_archive_file_stat fstat;
+    if (!mz_zip_reader_file_stat(&zip, 0, &fstat) ||
+        strcmp(fstat.m_filename, "z") != 0) {
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    // Reject if declared uncompressed size exceeds 512 MB
+    if (fstat.m_uncomp_size > 512ULL * 1024 * 1024) {
+        LOG("[HTTP] ZIP rejected: declared size %llu", (unsigned long long)fstat.m_uncomp_size);
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    size_t uncompSize = 0;
+    void* p = mz_zip_reader_extract_to_heap(&zip, 0, &uncompSize, 0);
+    mz_zip_reader_end(&zip);
+
+    if (!p) {
+        LOG("[HTTP] ZIP extract failed");
+        return false;
+    }
+
+    out.assign(static_cast<uint8_t*>(p), static_cast<uint8_t*>(p) + uncompSize);
+    mz_free(p);
+    return true;
+}
+
 // Remove finished client threads (call with g_clientMtx held)
 static void PruneClientThreads() {
     std::vector<ClientSlot> alive;
@@ -83,7 +134,11 @@ static bool ParseBlobPath(const char* path, const char* prefix,
     if (!slash || *slash != '/' || id == 0) return false;
 
     appId = (uint32_t)id;
-    filename = HttpUtil::UrlDecode(std::string(slash + 1));
+    std::string rawPath(slash + 1);
+    // Strip query string (e.g. ?raw=12345)
+    auto qpos = rawPath.find('?');
+    if (qpos != std::string::npos) rawPath.resize(qpos);
+    filename = HttpUtil::UrlDecode(rawPath);
     if (filename.empty()) return false;
 
     // Validate: resolved blob path must stay within the blob root.
@@ -205,6 +260,15 @@ static void HandleClient(SOCKET client) {
                 shutdown(client, SD_SEND);
                 closesocket(client);
                 return;
+            }
+
+            // Steam may send compressed (ZIP) data. Decompress before storing
+            // so blob storage always contains raw file content.
+            std::vector<uint8_t> decompressed;
+            if (TryDecompressZip(bodyData, decompressed)) {
+                LOG("[HTTP] PUT %s -> decompressed %zu -> %zu bytes",
+                    path, bodyData.size(), decompressed.size());
+                bodyData = std::move(decompressed);
             }
 
             // write blob to disk

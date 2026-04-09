@@ -178,8 +178,6 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     LOG("[NS-CL] GetAppFileChangelist app=%u clientCN=%llu serverCN=%llu files=%zu",
         appId, clientChangeNumber, serverChangeNumber, files.size());
 
-    uint64_t responseCN = serverChangeNumber;
-
     // build path_prefix table and file entries
     std::unordered_map<std::string, uint32_t> prefixMap;
     std::vector<std::string> prefixList;
@@ -296,7 +294,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     }
 
     PB::Writer body;
-    body.WriteVarint(1, responseCN);                            // current_change_number (possibly bumped)
+    body.WriteVarint(1, serverChangeNumber);                     // current_change_number
     // is_only_delta: false = full listing (simplest, always correct)
     body.WriteVarint(3, 0);
 
@@ -326,8 +324,8 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     // app_buildid_hwm (field 6) -- not critical, set to 0
     body.WriteVarint(6, 0);
 
-    LOG("[NS-CL] Response: %zu files, %zu prefixes, CN=%llu (stored=%llu)",
-        prepared.size(), prefixList.size(), responseCN, serverChangeNumber);
+    LOG("[NS-CL] Response: %zu files, %zu prefixes, CN=%llu",
+        prepared.size(), prefixList.size(), serverChangeNumber);
 
     // Hex dump our generated response for comparison with real Steam
 #ifdef DEBUG_HEX_DUMP
@@ -450,6 +448,10 @@ PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     LOG("[NS-UP] BeginFileUpload app=%u file=%s (clean=%s) size=%llu rawSize=%llu -> %s%s",
         appId, filename.c_str(), cleanName.c_str(), fileSize, rawFileSize, urlHost.c_str(), urlPath.c_str());
 
+    // Steam has the data at fileSize bytes (possibly ZIP-compressed).
+    // Request exactly that many bytes so the PUT actually happens.
+    uint64_t blockLen = fileSize > 0 ? fileSize : rawFileSize;
+
     // build block request submessage (ClientCloudFileUploadBlockDetails)
     PB::Writer blockReq;
     blockReq.WriteString(1, urlHost);                // url_host
@@ -458,11 +460,31 @@ PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     blockReq.WriteVarint(4, 4);                      // http_method = PUT (EHTTPMethod: 4)
     // no request_headers needed for our simple server
     blockReq.WriteVarint(6, 0);                      // block_offset = 0
-    blockReq.WriteVarint(7, fileSize > 0 ? fileSize : rawFileSize); // block_length
+    blockReq.WriteVarint(7, blockLen);               // block_length
 
     PB::Writer body;
     body.WriteVarint(1, 0);                          // encrypt_file = false
     body.WriteSubmessage(2, blockReq);               // block_requests (repeated, just 1)
+
+    // hex dump response for debugging upload failures
+#ifdef DEBUG_HEX_DUMP
+    {
+        auto& d = body.Data();
+        std::string hex;
+        for (size_t i = 0; i < d.size(); i++) {
+            char tmp[4]; snprintf(tmp, sizeof(tmp), "%02X ", d[i]);
+            hex += tmp;
+        }
+        LOG("[NS-UP] Response hex (%zu bytes): %s", d.size(), hex.c_str());
+        auto& bd = blockReq.Data();
+        std::string bhex;
+        for (size_t i = 0; i < bd.size(); i++) {
+            char tmp[4]; snprintf(tmp, sizeof(tmp), "%02X ", bd[i]);
+            bhex += tmp;
+        }
+        LOG("[NS-UP] BlockReq hex (%zu bytes): %s", bd.size(), bhex.c_str());
+    }
+#endif
 
     return body;
 }
