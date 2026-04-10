@@ -2,162 +2,159 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-      xmlns:res="clr-namespace:CloudRedirect.Resources">
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      ScrollViewer.CanContentScroll="False">
 
-    <Grid Margin="24">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel>
 
-        <TextBlock Grid.Row="0"
-                   Text="{res:Loc Apps_Title}"
-                   FontSize="28" FontWeight="SemiBold"
-                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                   Margin="0,0,0,8" />
+            <TextBlock Text="{res:Loc Apps_Title}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,8" />
 
-        <TextBlock Grid.Row="1"
-                   Text="{res:Loc Apps_Description}"
-                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                   Margin="0,0,0,16" />
-
-        <WrapPanel x:Name="ActionBar" Grid.Row="2" Margin="0,0,0,16">
-            <ui:Button x:Name="RestoreSavesButton"
-                       Content="{res:Loc Apps_RestoreSaves}"
-                       Icon="{ui:SymbolIcon ArrowUndo24}"
-                       Click="RestoreSavesButton_Click"
-                       Margin="0,0,8,0" />
-            <ui:TextBox x:Name="AppSearchBox"
-                        PlaceholderText="{res:Loc Search_Placeholder}"
-                        Width="250"
-                        TextChanged="AppSearchBox_TextChanged"
-                        Margin="0,0,0,0" />
-        </WrapPanel>
-
-        <ScrollViewer x:Name="AppListPanel" Grid.Row="3"
-                      VerticalScrollBarVisibility="Auto">
-            <ItemsControl x:Name="AppList">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <ui:CardControl Margin="0,0,0,8">
-                            <ui:CardControl.Header>
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="Auto" />
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-
-                                    <Border Grid.Column="0"
-                                            Width="92" Height="43"
-                                            CornerRadius="4"
-                                            Margin="0,0,12,0"
-                                            VerticalAlignment="Center"
-                                            ClipToBounds="True">
-                                        <Border.Background>
-                                            <ImageBrush ImageSource="{Binding HeaderUrl}"
-                                                        Stretch="UniformToFill"
-                                                        RenderOptions.BitmapScalingMode="HighQuality" />
-                                        </Border.Background>
-                                    </Border>
-
-                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                        <TextBlock Text="{Binding DisplayName}"
-                                                   FontSize="15" FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                                                   TextTrimming="CharacterEllipsis" />
-                                        <WrapPanel Margin="0,3,0,0">
-                                            <TextBlock Text="{Binding AppId}"
-                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                       FontSize="12"
-                                                       Margin="0,0,12,0" />
-                                            <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                       FontSize="12"
-                                                       Margin="0,0,12,0">
-                                                <Run Text="{Binding FileCount, Mode=OneWay}" />
-                                                <Run Text="{res:Loc Apps_Files}" />
-                                            </TextBlock>
-                                            <TextBlock Text="{Binding TotalSize}"
-                                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                       FontSize="12"
-                                                       Margin="0,0,12,0" />
-                                            <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                       FontSize="12"
-                                                       Margin="0,0,12,0">
-                                                <Run Text="{res:Loc Apps_ChangeNumber}" />
-                                                <Run Text="{Binding ChangeNumber, Mode=OneWay}" />
-                                            </TextBlock>
-                                            <TextBlock Text="{Binding RootTokens}"
-                                                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                                                       FontSize="12" />
-                                        </WrapPanel>
-                                    </StackPanel>
-
-                                    <StackPanel Grid.Column="2"
-                                                Orientation="Horizontal"
-                                                VerticalAlignment="Center">
-                                        <Button Click="DeleteApp_Click"
-                                                ToolTip="{res:Loc Apps_DeleteTooltip}"
-                                                Padding="8,6"
-                                                Margin="4,0,0,0"
-                                                Background="Transparent"
-                                                BorderBrush="Transparent">
-                                            <ui:SymbolIcon Symbol="Delete24"
-                                                           FontSize="18"
-                                                           Foreground="#E74C3C" />
-                                        </Button>
-                                    </StackPanel>
-                                </Grid>
-                            </ui:CardControl.Header>
-                        </ui:CardControl>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
-
-        <StackPanel x:Name="RestorePanel" Grid.Row="2" Grid.RowSpan="2" Visibility="Collapsed">
-
-            <WrapPanel Margin="0,0,0,16">
-                <ui:Button x:Name="BackButton"
-                           Content="{res:Loc Apps_Back}"
-                           Icon="{ui:SymbolIcon ArrowLeft24}"
-                           Click="BackToApps_Click"
-                           Margin="0,0,8,0" />
-                <ui:Button x:Name="RefreshBackupsButton"
-                           Content="{res:Loc Apps_Refresh}"
-                           Icon="{ui:SymbolIcon ArrowSync24}"
-                           Click="RefreshBackupsButton_Click"
-                           Margin="0,0,8,0" />
-                <ui:TextBox x:Name="RestoreSearchBox"
-                            PlaceholderText="{res:Loc Search_Placeholder}"
-                            Width="250"
-                            TextChanged="RestoreSearchBox_TextChanged"
-                            Margin="0,0,8,0" />
-                <TextBlock x:Name="RestoreStatus"
-                           Text=""
-                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                           VerticalAlignment="Center" />
-            </WrapPanel>
-
-            <TextBlock Text="{res:Loc Apps_RestoreDescription}"
-                       Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                       TextWrapping="Wrap"
+            <TextBlock Text="{res:Loc Apps_Description}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
                        Margin="0,0,0,16" />
 
-            <StackPanel x:Name="RestoreLoadingPanel"
-                        Visibility="Collapsed"
-                        HorizontalAlignment="Center"
-                        Margin="0,40,0,40">
-                <ui:ProgressRing IsIndeterminate="True" Width="48" Height="48" Margin="0,0,0,12" />
-                <TextBlock Text="{res:Loc Apps_LoadingBackups}"
-                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                           HorizontalAlignment="Center" />
+            <StackPanel x:Name="AppListPanel">
+
+                <WrapPanel x:Name="ActionBar" Margin="0,0,0,16">
+                    <ui:Button x:Name="RestoreSavesButton"
+                               Content="{res:Loc Apps_RestoreSaves}"
+                               Icon="{ui:SymbolIcon ArrowUndo24}"
+                               Click="RestoreSavesButton_Click"
+                               Margin="0,0,8,0" />
+                    <ui:TextBox x:Name="AppSearchBox"
+                                PlaceholderText="{res:Loc Search_Placeholder}"
+                                Width="250"
+                                TextChanged="AppSearchBox_TextChanged"
+                                Margin="0,0,0,0" />
+                </WrapPanel>
+
+                <ItemsControl x:Name="AppList">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <ui:CardControl Margin="0,0,0,8">
+                                <ui:CardControl.Header>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+
+                                        <Border Grid.Column="0"
+                                                Width="92" Height="43"
+                                                CornerRadius="4"
+                                                Margin="0,0,12,0"
+                                                VerticalAlignment="Center"
+                                                ClipToBounds="True">
+                                            <Border.Background>
+                                                <ImageBrush ImageSource="{Binding HeaderUrl}"
+                                                            Stretch="UniformToFill"
+                                                            RenderOptions.BitmapScalingMode="HighQuality" />
+                                            </Border.Background>
+                                        </Border>
+
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding DisplayName}"
+                                                       FontSize="15" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                            <WrapPanel Margin="0,3,0,0">
+                                                <TextBlock Text="{Binding AppId}"
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,0,12,0" />
+                                                <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,0,12,0">
+                                                    <Run Text="{Binding FileCount, Mode=OneWay}" />
+                                                    <Run Text="{res:Loc Apps_Files}" />
+                                                </TextBlock>
+                                                <TextBlock Text="{Binding TotalSize}"
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,0,12,0" />
+                                                <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,0,12,0">
+                                                    <Run Text="{res:Loc Apps_ChangeNumber}" />
+                                                    <Run Text="{Binding ChangeNumber, Mode=OneWay}" />
+                                                </TextBlock>
+                                                <TextBlock Text="{Binding RootTokens}"
+                                                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                                                           FontSize="12" />
+                                            </WrapPanel>
+                                        </StackPanel>
+
+                                        <StackPanel Grid.Column="2"
+                                                    Orientation="Horizontal"
+                                                    VerticalAlignment="Center">
+                                            <Button Click="DeleteApp_Click"
+                                                    ToolTip="{res:Loc Apps_DeleteTooltip}"
+                                                    Padding="8,6"
+                                                    Margin="4,0,0,0"
+                                                    Background="Transparent"
+                                                    BorderBrush="Transparent">
+                                                <ui:SymbolIcon Symbol="Delete24"
+                                                               FontSize="18"
+                                                               Foreground="#E74C3C" />
+                                            </Button>
+                                        </StackPanel>
+                                    </Grid>
+                                </ui:CardControl.Header>
+                            </ui:CardControl>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
             </StackPanel>
 
-            <StackPanel x:Name="BackupListPanel" />
+            <StackPanel x:Name="RestorePanel" Visibility="Collapsed">
+
+                <WrapPanel Margin="0,0,0,16">
+                    <ui:Button x:Name="BackButton"
+                               Content="{res:Loc Apps_Back}"
+                               Icon="{ui:SymbolIcon ArrowLeft24}"
+                               Click="BackToApps_Click"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="RefreshBackupsButton"
+                               Content="{res:Loc Apps_Refresh}"
+                               Icon="{ui:SymbolIcon ArrowSync24}"
+                               Click="RefreshBackupsButton_Click"
+                               Margin="0,0,8,0" />
+                    <ui:TextBox x:Name="RestoreSearchBox"
+                                PlaceholderText="{res:Loc Search_Placeholder}"
+                                Width="250"
+                                TextChanged="RestoreSearchBox_TextChanged"
+                                Margin="0,0,8,0" />
+                    <TextBlock x:Name="RestoreStatus"
+                               Text=""
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               VerticalAlignment="Center" />
+                </WrapPanel>
+
+                <TextBlock Text="{res:Loc Apps_RestoreDescription}"
+                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,16" />
+
+                <StackPanel x:Name="RestoreLoadingPanel"
+                            Visibility="Collapsed"
+                            HorizontalAlignment="Center"
+                            Margin="0,40,0,40">
+                    <ui:ProgressRing IsIndeterminate="True" Width="48" Height="48" Margin="0,0,0,12" />
+                    <TextBlock Text="{res:Loc Apps_LoadingBackups}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+
+                <StackPanel x:Name="BackupListPanel" />
+
+            </StackPanel>
 
         </StackPanel>
-    </Grid>
+    </ScrollViewer>
 </Page>

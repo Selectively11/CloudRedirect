@@ -38,7 +38,6 @@ public partial class AppsPage : Page
 
     private void RestoreSavesButton_Click(object sender, RoutedEventArgs e)
     {
-        ActionBar.Visibility = Visibility.Collapsed;
         AppListPanel.Visibility = Visibility.Collapsed;
         RestorePanel.Visibility = Visibility.Visible;
 
@@ -49,7 +48,6 @@ public partial class AppsPage : Page
     private void BackToApps_Click(object sender, RoutedEventArgs e)
     {
         RestorePanel.Visibility = Visibility.Collapsed;
-        ActionBar.Visibility = Visibility.Visible;
         AppListPanel.Visibility = Visibility.Visible;
     }
 
