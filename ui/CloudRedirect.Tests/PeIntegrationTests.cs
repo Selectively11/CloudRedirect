@@ -122,7 +122,126 @@ public class PeIntegrationTests
         }
     }
 
+    // ── CloudRedirect hook finders (payload_new.dll) ──────────────────
+
+    private const string PayloadPath = @"C:\Users\Justin\Projects\CloudFix\ExtractTool\payload_new.dll";
+
+    private (byte[] data, PeSection[] sections, int tStart, int tEnd, int gStart, int gEnd)
+        LoadPayloadSections()
+    {
+        var data = File.ReadAllBytes(PayloadPath);
+        var sections = PeSection.Parse(data);
+
+        var textSec = PeSection.Find(sections, ".text");
+        Assert.NotNull(textSec);
+
+        var knownNames = new HashSet<string> { ".text", ".rdata", ".data", ".pdata", ".fptable", ".rsrc", ".reloc" };
+        PeSection? obfSec = null;
+        foreach (var sec in sections)
+        {
+            if (!knownNames.Contains(sec.Name)) { obfSec = sec; break; }
+        }
+        Assert.NotNull(obfSec);
+
+        int tStart = (int)textSec.Value.RawOffset;
+        int tEnd = Math.Min(tStart + (int)textSec.Value.RawSize, data.Length);
+        int gStart = (int)obfSec.Value.RawOffset;
+        int gEnd = Math.Min(gStart + (int)obfSec.Value.RawSize, data.Length);
+
+        return (data, sections, tStart, tEnd, gStart, gEnd);
+    }
+
+    [Fact]
+    public void FindSendPktFunction_ReturnsExpectedOffset()
+    {
+        if (!File.Exists(PayloadPath)) return;
+        var (data, _, tStart, tEnd, _, _) = LoadPayloadSections();
+
+        int result = Signatures.FindSendPktFunction(data, tStart, tEnd);
+        Assert.Equal(0xCF50, result);
+    }
+
+    [Fact]
+    public void FindCodeCave_ReturnsValidCave()
+    {
+        if (!File.Exists(PayloadPath)) return;
+        var (data, sections, _, _, _, _) = LoadPayloadSections();
+
+        int result = Signatures.FindCodeCave(data, sections, 144);
+        Assert.True(result > 0, $"Expected positive cave offset, got {result}");
+
+        // verify the cave region is actually zeroed
+        for (int i = 0; i < 144; i++)
+            Assert.Equal(0, data[result + i]);
+    }
+
+    [Fact]
+    public void FindRecvPktGlobalRva_ReturnsExpectedRva()
+    {
+        if (!File.Exists(PayloadPath)) return;
+        var (data, sections, tStart, tEnd, gStart, gEnd) = LoadPayloadSections();
+
+        int sendPkt = Signatures.FindSendPktFunction(data, tStart, tEnd);
+        Assert.Equal(0xCF50, sendPkt);
+
+        int sendPktRva = PeSection.FileOffsetToRva(sections, sendPkt);
+        Assert.True(sendPktRva > 0);
+
+        int rva = Signatures.FindRecvPktGlobalRva(data, sections, sendPktRva, gStart, gEnd);
+        Assert.Equal(0x1CAB48, rva);
+    }
+
+    [Fact]
+    public void PayloadP123Defs_ResolveAgainstPayload()
+    {
+        if (!File.Exists(PayloadPath)) return;
+        var (data, _, tStart, tEnd, gStart, gEnd) = LoadPayloadSections();
+
+        var result = Signatures.ResolvePatternGroup(data, Signatures.PayloadP123Defs,
+            tStart, tEnd, gStart, gEnd);
+        Assert.NotNull(result);
+        Assert.Equal(3, result.Length);
+
+        // P1 should be in the text section
+        Assert.True(result[0].Offset >= tStart && result[0].Offset < tEnd,
+            $"P1 offset 0x{result[0].Offset:X} should be in text section [{tStart:X}..{tEnd:X})");
+        // P2 should be in the text section
+        Assert.True(result[1].Offset >= tStart && result[1].Offset < tEnd,
+            $"P2 offset 0x{result[1].Offset:X} should be in text section [{tStart:X}..{tEnd:X})");
+        // P3 should be in the obfuscated section
+        Assert.True(result[2].Offset >= gStart && result[2].Offset < gEnd,
+            $"P3 offset 0x{result[2].Offset:X} should be in obfuscated section [{gStart:X}..{gEnd:X})");
+
+        // Verify exact file offsets match known values
+        Assert.Equal(0x00D4CF, result[0].Offset);
+        Assert.Equal(0x00D7D9, result[1].Offset);
+        Assert.Equal(0x1D555A, result[2].Offset);
+    }
+
     // ── user32.dll sanity check (should always exist on Windows) ─────
+
+    [Fact]
+    public void PayloadSetupDefs_ResolveAgainstPayload()
+    {
+        if (!File.Exists(PayloadPath)) return;
+        var (data, _, tStart, tEnd, gStart, gEnd) = LoadPayloadSections();
+
+        var result = Signatures.ResolvePatternGroup(data, Signatures.PayloadSetupDefs,
+            tStart, tEnd, gStart, gEnd);
+        Assert.NotNull(result);
+        Assert.Equal(2, result.Length);
+
+        // P4 should be in the obfuscated section
+        Assert.True(result[0].Offset >= gStart && result[0].Offset < gEnd,
+            $"P4 offset 0x{result[0].Offset:X} should be in obfuscated section [{gStart:X}..{gEnd:X})");
+        // P5 should be in the text section
+        Assert.True(result[1].Offset >= tStart && result[1].Offset < tEnd,
+            $"P5 offset 0x{result[1].Offset:X} should be in text section [{tStart:X}..{tEnd:X})");
+
+        // Verify exact file offsets
+        Assert.Equal(0x1E0A15, result[0].Offset);
+        Assert.Equal(0x03BAE0, result[1].Offset);
+    }
 
     [Fact]
     public void Parse_User32Dll_HasTextSection()

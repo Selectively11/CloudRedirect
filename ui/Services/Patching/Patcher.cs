@@ -20,40 +20,7 @@ namespace CloudRedirect.Services.Patching
 
         static readonly byte[] AesKey = SteamToolsCrypto.AesKey;
 
-        // hardcoded offsets for current known version - sig scan fallback if these miss
-        static readonly PatchEntry[] CorePatches =
-        {
-            new PatchEntry(0x272F,
-                new byte[] { 0xE8, 0x7C, 0xF5, 0xFF, 0xFF },
-                new byte[] { 0xB8, 0x01, 0x00, 0x00, 0x00 }),
-            new PatchEntry(0x28B5,
-                new byte[] { 0x74 },
-                new byte[] { 0xEB }),
-        };
-
-        static readonly PatchEntry[] PayloadPatches =
-        {
-            new PatchEntry(0x0D4CF,
-                new byte[] { 0x0F, 0x84, 0x3B, 0x01, 0x00, 0x00 },
-                new byte[] { 0x90, 0xE9, 0x3B, 0x01, 0x00, 0x00 }),
-            new PatchEntry(0x0D7D9,
-                new byte[] { 0x8B, 0x0D, 0x7D, 0xCA, 0x1B, 0x00 },
-                new byte[] { 0x31, 0xC9, 0x90, 0x90, 0x90, 0x90 }),
-            new PatchEntry(0x1D555A,
-                new byte[] { 0x89, 0x3D, 0x28, 0xD5, 0xFE, 0xFF },
-                new byte[] { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }),
-            new PatchEntry(0x1E0A15,
-                new byte[] { 0xC6, 0x05, 0xC6, 0x20, 0xFE, 0xFF, 0x00 },
-                new byte[] { 0xC6, 0x05, 0xC6, 0x20, 0xFE, 0xFF, 0x01 }),
-            new PatchEntry(0x3BAE0,
-                new byte[] { 0x75 },
-                new byte[] { 0xEB }),
-        };
-
-        // cloud redirect code cave: in .Y_H section at file offset 0x1F3EEA (278 bytes available)
-        // overwrites first 5 bytes of sub_18000DB50 (SendPkt hook) with JMP to cave entry
-        const int CloudRedirectCaveFileOffset = 0x1F3EEA;
-        const int SendPktHookFileOffset = 0xCF50; // sub_18000DB50 in .text
+        const int CloudRedirectCaveMinSize = 144; // CloudRedirectCaveContent.Length
 
         static readonly byte[] CloudRedirectCaveContent =
         {
@@ -748,23 +715,6 @@ namespace CloudRedirect.Services.Patching
             return BitConverter.ToString(data, offset, available);
         }
 
-        static PatchEntry SnapshotPatch(byte[] data, int offset, PatchEntry template,
-            int wildcardStart = 0, int wildcardLen = 0)
-        {
-            int len = template.Original.Length;
-            var orig = (byte[])template.Original.Clone();
-            var repl = (byte[])template.Replacement.Clone();
-
-            if (wildcardLen > 0 && wildcardStart + wildcardLen <= len
-                && offset + wildcardStart + wildcardLen <= data.Length)
-            {
-                Buffer.BlockCopy(data, offset + wildcardStart, orig, wildcardStart, wildcardLen);
-                Buffer.BlockCopy(data, offset + wildcardStart, repl, wildcardStart, wildcardLen);
-            }
-
-            return new PatchEntry(offset, orig, repl);
-        }
-
         static (byte[] data, int applied, int skipped, List<string> errors) CheckPatches(byte[] data, PatchEntry[] patches)
         {
             int applied = 0, skipped = 0;
@@ -835,20 +785,6 @@ namespace CloudRedirect.Services.Patching
             return (buf, reverted, skipped, errors);
         }
 
-        int TryHardcodedOrScan(byte[] data, int hardcoded,
-            byte[] original, byte[] replacement, Func<int> scanFunc)
-        {
-            if (hardcoded >= 0 && hardcoded + original.Length <= data.Length)
-            {
-                if (BytesMatch(data, hardcoded, original, 0, original.Length) ||
-                    BytesMatch(data, hardcoded, replacement, 0, replacement.Length))
-                    return hardcoded;
-            }
-
-            Log("    Hardcoded offset miss, scanning..");
-            return scanFunc();
-        }
-
         PatchEntry[] ResolveCorePatchOffsets(byte[] dll)
         {
             var sections = PeSection.Parse(dll);
@@ -879,32 +815,8 @@ namespace CloudRedirect.Services.Patching
             int tStart = (int)textSec.Value.RawOffset;
             int tEnd = Math.Min(tStart + (int)textSec.Value.RawSize, dll.Length);
 
-            int p1 = TryHardcodedOrScan(dll, CorePatches[0].Offset,
-                CorePatches[0].Original, CorePatches[0].Replacement,
-                () => Signatures.FindCorePatch1(dll, tStart, tEnd));
-
-            if (p1 < 0)
-            {
-                Log("  Core.dll: could not locate patch 1 (download call)");
-                return null;
-            }
-
-            int p2 = TryHardcodedOrScan(dll, CorePatches[1].Offset,
-                CorePatches[1].Original, CorePatches[1].Replacement,
-                () => Signatures.FindCorePatch2(dll, p1, Math.Min(p1 + 0x300, tEnd)));
-
-            if (p2 < 0)
-            {
-                Log("  Core.dll: could not locate patch 2 (hash check jump)");
-                return null;
-            }
-
-            Log($"  Core patches at 0x{p1:X}, 0x{p2:X}");
-            return new PatchEntry[]
-            {
-                SnapshotPatch(dll, p1, CorePatches[0]),
-                SnapshotPatch(dll, p2, CorePatches[1]),
-            };
+            return Signatures.ResolvePatternGroup(dll, Signatures.CorePatchDefs,
+                tStart, tEnd, 0, 0, _verbose ? _log : null);
         }
 
         bool ResolvePayloadSections(byte[] payload, out PeSection[] sections,
@@ -948,40 +860,8 @@ namespace CloudRedirect.Services.Patching
             if (!ResolvePayloadSections(payload, out _, out int tStart, out int tEnd, out int gStart, out int gEnd))
                 return null;
 
-            int p1 = TryHardcodedOrScan(payload, PayloadPatches[0].Offset,
-                PayloadPatches[0].Original, PayloadPatches[0].Replacement,
-                () => Signatures.FindPayloadPatch1(payload, tStart, tEnd));
-            if (p1 < 0)
-            {
-                Log("  Payload: could not locate patch 1 (cloud rewrite skip)");
-                return null;
-            }
-
-            int p2 = TryHardcodedOrScan(payload, PayloadPatches[1].Offset,
-                PayloadPatches[1].Original, PayloadPatches[1].Replacement,
-                () => Signatures.FindPayloadPatch2(payload, p1, Math.Min(p1 + 0x500, tEnd)));
-            if (p2 < 0)
-            {
-                Log("  Payload: could not locate patch 2 (proxy appid zero)");
-                return null;
-            }
-
-            int p3 = TryHardcodedOrScan(payload, PayloadPatches[2].Offset,
-                PayloadPatches[2].Original, PayloadPatches[2].Replacement,
-                () => Signatures.FindPayloadPatch3(payload, gStart, gEnd));
-            if (p3 < 0)
-            {
-                Log("  Payload: could not locate patch 3 (IPC appid preserve)");
-                return null;
-            }
-
-            Log($"  Payload patches at 0x{p1:X}, 0x{p2:X}, 0x{p3:X}");
-            return new PatchEntry[]
-            {
-                SnapshotPatch(payload, p1, PayloadPatches[0], wildcardStart: 2, wildcardLen: 4),
-                SnapshotPatch(payload, p2, PayloadPatches[1]),
-                SnapshotPatch(payload, p3, PayloadPatches[2]),
-            };
+            return Signatures.ResolvePatternGroup(payload, Signatures.PayloadP123Defs,
+                tStart, tEnd, gStart, gEnd, _verbose ? _log : null);
         }
 
         PatchEntry[] ResolveSetupPatchOffsets(byte[] payload)
@@ -989,41 +869,19 @@ namespace CloudRedirect.Services.Patching
             if (!ResolvePayloadSections(payload, out _, out int tStart, out int tEnd, out int gStart, out int gEnd))
                 return null;
 
-            int p4 = TryHardcodedOrScan(payload, PayloadPatches[3].Offset,
-                PayloadPatches[3].Original, PayloadPatches[3].Replacement,
-                () => Signatures.FindPayloadPatch4(payload, gStart, gEnd));
-            if (p4 < 0)
-            {
-                Log("  Payload: could not locate activation flag patch");
-                return null;
-            }
-
-            int p5 = TryHardcodedOrScan(payload, PayloadPatches[4].Offset,
-                PayloadPatches[4].Original, PayloadPatches[4].Replacement,
-                () => Signatures.FindPayloadPatch5(payload, tStart, tEnd));
-            if (p5 < 0)
-            {
-                Log("  Payload: could not locate GetCookie retry patch");
-                return null;
-            }
-
-            Log($"  Setup patches at 0x{p4:X}, 0x{p5:X}");
-            return new PatchEntry[]
-            {
-                SnapshotPatch(payload, p4, PayloadPatches[3], wildcardStart: 2, wildcardLen: 4),
-                SnapshotPatch(payload, p5, PayloadPatches[4]),
-            };
+            return Signatures.ResolvePatternGroup(payload, Signatures.PayloadSetupDefs,
+                tStart, tEnd, gStart, gEnd, _verbose ? _log : null);
         }
 
         CloudRedirectResolveResult ResolveCloudRedirectPatchOffsets(byte[] payload)
         {
-            if (!ResolvePayloadSections(payload, out var sections, out int tStart, out int tEnd, out _, out _))
+            if (!ResolvePayloadSections(payload, out var sections, out int tStart, out int tEnd, out int gStart, out int gEnd))
                 return null;
 
-            int sendPkt = SendPktHookFileOffset;
-            if (sendPkt + 5 > payload.Length)
+            int sendPkt = Signatures.FindSendPktFunction(payload, tStart, tEnd);
+            if (sendPkt < 0)
             {
-                Log("  Payload: SendPkt hook offset out of range");
+                Log("  Payload: could not locate SendPkt function by pattern");
                 return null;
             }
 
@@ -1037,10 +895,10 @@ namespace CloudRedirect.Services.Patching
                 return null;
             }
 
-            int caveFileOffset = CloudRedirectCaveFileOffset;
-            if (caveFileOffset + CloudRedirectCaveContent.Length > payload.Length)
+            int caveFileOffset = Signatures.FindCodeCave(payload, sections, CloudRedirectCaveContent.Length);
+            if (caveFileOffset < 0)
             {
-                Log("  Payload: not enough space for cloud redirect cave");
+                Log("  Payload: could not find code cave in any executable section");
                 return null;
             }
 
@@ -1053,18 +911,6 @@ namespace CloudRedirect.Services.Patching
                 return null;
             }
 
-            var caveSec = PeSection.FindByFileOffset(sections, caveFileOffset);
-            if (caveSec == null)
-            {
-                Log($"  Payload: cave offset 0x{caveFileOffset:X} not within any PE section");
-                return null;
-            }
-            if (!caveSec.Value.IsExecutable)
-            {
-                Log($"  WARNING: code cave section '{caveSec.Value.Name}' is not executable " +
-                    $"(Characteristics=0x{caveSec.Value.Characteristics:X8}). Hook may crash at runtime.");
-            }
-
             var (loadLibIatRva, getProcIatRva) = PeImportParser.FindKernel32IatEntries(payload, sections);
             if (loadLibIatRva < 0 || getProcIatRva < 0)
             {
@@ -1072,37 +918,25 @@ namespace CloudRedirect.Services.Patching
                 return null;
             }
 
-            int recvPktGlobalRva = 0x1CAB48;
+            // recvPktGlobal: scan obfuscated section for the hook installer's
+            // lea rcx, sub_SendPkt -> then find mov cs:qword, rcx nearby
+            int recvPktGlobalRva = Signatures.FindRecvPktGlobalRva(payload, sections,
+                sendPktRva, gStart, gEnd);
+            if (recvPktGlobalRva < 0)
+            {
+                Log("  Payload: could not locate recvPktGlobal by pattern");
+                return null;
+            }
 
-            // M14: Validate recvPktGlobalRva — ensure it maps to a valid PE section.
-            // This global is typically in a BSS region (VirtualSize > RawSize) so it has
-            // no file backing — RvaToFileOffset correctly returns -1 for BSS. We only
-            // need to confirm the RVA falls within some section's virtual range, since
-            // at runtime the loader zero-initializes BSS memory and it becomes writable.
             var recvPktSec = PeSection.FindByRva(sections, recvPktGlobalRva);
             if (recvPktSec == null)
             {
-                // Log all sections to help diagnose
                 Log($"  Payload: recvPktGlobalRva 0x{recvPktGlobalRva:X} does not map to any PE section");
                 foreach (var sec in sections)
                     Log($"    Section '{sec.Name}': VA=0x{sec.VirtualAddress:X} VSize=0x{sec.VirtualSize:X} Raw=0x{sec.RawOffset:X} RawSize=0x{sec.RawSize:X}");
                 return null;
             }
-            else
-            {
-                Log($"  recvPktGlobal RVA 0x{recvPktGlobalRva:X} -> section '{recvPktSec.Value.Name}' " +
-                    $"(VA=0x{recvPktSec.Value.VirtualAddress:X}, VSize=0x{recvPktSec.Value.VirtualSize:X}, RawSize=0x{recvPktSec.Value.RawSize:X})");
-
-                // If the global has file backing, optionally check it's zero-initialized
-                int recvPktFileOff = PeSection.RvaToFileOffset(sections, recvPktGlobalRva);
-                if (recvPktFileOff >= 0 && recvPktFileOff + 8 <= payload.Length)
-                {
-                    long val = BitConverter.ToInt64(payload, recvPktFileOff);
-                    if (val != 0)
-                        Log($"  WARNING: recvPktGlobal at RVA 0x{recvPktGlobalRva:X} is non-zero (0x{val:X}) — may be wrong address");
-                }
-                // If in BSS (no file backing), it will be zero at runtime — that's expected
-            }
+            Log($"  recvPktGlobal RVA 0x{recvPktGlobalRva:X} -> section '{recvPktSec.Value.Name}'");
 
             var sendPktOrig = new byte[5];
             if (isOriginal)

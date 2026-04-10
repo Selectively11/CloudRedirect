@@ -19,6 +19,48 @@ namespace CloudRedirect.Services.Patching
 
     internal record PatchEntry(int Offset, byte[] Original, byte[] Replacement);
 
+    internal enum ScanRegion
+    {
+        Text,       // .text section only
+        Obfuscated, // first non-standard section (the obfuscated code section)
+        All,        // entire file
+    }
+
+    /// <summary>
+    /// Declarative patch definition: pattern + mask to locate the patch site,
+    /// with optional post-match validator for complex signatures.
+    /// </summary>
+    internal class PatternPatch
+    {
+        public string Name { get; init; }
+        public byte[] Pattern { get; init; }
+        public byte[] Mask { get; init; }
+        public int PatchOffset { get; init; }
+        public byte[] Original { get; init; }
+        public byte[] Replacement { get; init; }
+        public ScanRegion Region { get; init; }
+
+        // wildcard bytes in Original/Replacement that get snapshotted from actual data
+        public int WildcardStart { get; init; }
+        public int WildcardLen { get; init; }
+
+        // optional: if the pattern is too generic, this callback validates a candidate match.
+        // receives (fileData, matchOffset) and returns true if this is the right match.
+        public Func<byte[], int, bool> Validator { get; init; }
+
+        // optional: when the patch site isn't at a fixed offset from the pattern match,
+        // this callback resolves the actual patch offset given (fileData, matchOffset).
+        // returns the file offset of the patch site, or -1 if not found.
+        public Func<byte[], int, int> PatchSiteResolver { get; init; }
+
+        // optional: scan relative to a previous patch's resolved offset instead of section start.
+        // when set, scanning starts at (previousOffset + RelativeStart) and ends at
+        // (previousOffset + RelativeEnd). the int[] index refers to earlier patches in the group.
+        public int? RelativeToPatchIndex { get; init; }
+        public int RelativeStart { get; init; }
+        public int RelativeEnd { get; init; }
+    }
+
     internal enum PatchState
     {
         NotInstalled,
