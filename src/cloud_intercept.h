@@ -36,6 +36,14 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size);
 // get the 32-bit account ID from the captured SteamID
 uint32_t GetAccountId();
 
+// get the Steam installation path (with trailing backslash)
+const std::string& GetSteamPath();
+
+// sync toggles
+bool SyncAchievementsEnabled();
+bool SyncPlaytimeEnabled();
+bool SyncLuasEnabled();
+
 // signal shutdown
 void Shutdown();
 

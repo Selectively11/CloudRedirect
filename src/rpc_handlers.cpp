@@ -4,12 +4,16 @@
 #include "http_server.h"
 #include "http_util.h"
 #include "cloud_storage.h"
+#include "file_util.h"
+#include "vdf.h"
 #include "log.h"
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 
 namespace CloudIntercept {
 
@@ -347,6 +351,303 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     return body;
 }
 
+// --- Binary KV reader/writer for UserGameStats merge ---
+
+enum BkvType : uint8_t {
+    BKV_SECTION   = 0x00,
+    BKV_STRING    = 0x01,
+    BKV_INT       = 0x02,
+    BKV_FLOAT     = 0x03,
+    BKV_UINT64    = 0x07,
+    BKV_END       = 0x08,
+    BKV_INT64     = 0x0A,
+};
+
+struct BkvNode {
+    BkvType type;
+    std::string name;
+    // value storage (union-like, depends on type)
+    uint32_t intVal = 0;
+    float floatVal = 0.0f;
+    uint64_t uint64Val = 0;
+    int64_t int64Val = 0;
+    std::string strVal;
+    std::vector<BkvNode> children; // for BKV_SECTION
+};
+
+static constexpr int BKV_MAX_DEPTH = 128;
+static constexpr size_t BKV_MAX_NODES = 100000;
+
+static bool BkvRead(const uint8_t* data, size_t len, size_t& pos, std::vector<BkvNode>& out, int depth, size_t& totalNodes) {
+    if (depth > BKV_MAX_DEPTH) {
+        LOG("[Stats] BKV nesting too deep (%d), aborting parse", depth);
+        return false;
+    }
+    while (pos < len) {
+        uint8_t tag = data[pos++];
+        if (tag == BKV_END)
+            return true;
+
+        BkvNode node;
+        node.type = static_cast<BkvType>(tag);
+
+        // read null-terminated name
+        const char* nameStart = reinterpret_cast<const char*>(data + pos);
+        size_t nameEnd = pos;
+        while (nameEnd < len && data[nameEnd] != 0) nameEnd++;
+        if (nameEnd >= len) return false;
+        node.name.assign(nameStart, nameEnd - pos);
+        pos = nameEnd + 1;
+
+        switch (node.type) {
+        case BKV_SECTION:
+            if (!BkvRead(data, len, pos, node.children, depth + 1, totalNodes))
+                return false;
+            break;
+        case BKV_STRING: {
+            const char* s = reinterpret_cast<const char*>(data + pos);
+            size_t end = pos;
+            while (end < len && data[end] != 0) end++;
+            if (end >= len) return false;
+            node.strVal.assign(s, end - pos);
+            pos = end + 1;
+            break;
+        }
+        case BKV_INT:
+        case BKV_FLOAT:
+            if (pos + 4 > len) return false;
+            if (node.type == BKV_INT)
+                memcpy(&node.intVal, data + pos, 4);
+            else
+                memcpy(&node.floatVal, data + pos, 4);
+            pos += 4;
+            break;
+        case BKV_UINT64:
+            if (pos + 8 > len) return false;
+            memcpy(&node.uint64Val, data + pos, 8);
+            pos += 8;
+            break;
+        case BKV_INT64:
+            if (pos + 8 > len) return false;
+            memcpy(&node.int64Val, data + pos, 8);
+            pos += 8;
+            break;
+        default:
+            LOG("[Stats] Unknown BKV tag 0x%02X at offset %zu", tag, pos - 1);
+            return false;
+        }
+        if (++totalNodes > BKV_MAX_NODES) {
+            LOG("[Stats] BKV node limit exceeded (%zu), aborting parse", totalNodes);
+            return false;
+        }
+        out.push_back(std::move(node));
+    }
+    return depth == 0;
+}
+
+static void BkvWrite(const std::vector<BkvNode>& nodes, std::vector<uint8_t>& out) {
+    for (auto& n : nodes) {
+        out.push_back(static_cast<uint8_t>(n.type));
+        out.insert(out.end(), n.name.begin(), n.name.end());
+        out.push_back(0);
+
+        switch (n.type) {
+        case BKV_SECTION:
+            BkvWrite(n.children, out);
+            out.push_back(BKV_END);
+            break;
+        case BKV_STRING:
+            out.insert(out.end(), n.strVal.begin(), n.strVal.end());
+            out.push_back(0);
+            break;
+        case BKV_INT:
+            out.insert(out.end(), reinterpret_cast<const uint8_t*>(&n.intVal),
+                       reinterpret_cast<const uint8_t*>(&n.intVal) + 4);
+            break;
+        case BKV_FLOAT:
+            out.insert(out.end(), reinterpret_cast<const uint8_t*>(&n.floatVal),
+                       reinterpret_cast<const uint8_t*>(&n.floatVal) + 4);
+            break;
+        case BKV_UINT64:
+            out.insert(out.end(), reinterpret_cast<const uint8_t*>(&n.uint64Val),
+                       reinterpret_cast<const uint8_t*>(&n.uint64Val) + 8);
+            break;
+        case BKV_INT64:
+            out.insert(out.end(), reinterpret_cast<const uint8_t*>(&n.int64Val),
+                       reinterpret_cast<const uint8_t*>(&n.int64Val) + 8);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static BkvNode* BkvFind(std::vector<BkvNode>& nodes, const std::string& name) {
+    for (auto& n : nodes)
+        if (n.name == name) return &n;
+    return nullptr;
+}
+
+// Merge cloud stats into local stats (monotonic: more achievements/stats wins).
+// Returns merged node tree ready to write.
+static std::vector<BkvNode> MergeStats(
+    std::vector<BkvNode>& local, std::vector<BkvNode>& cloud)
+{
+    // Top level should be a single "cache" section in each
+    BkvNode* localCache = BkvFind(local, "cache");
+    BkvNode* cloudCache = BkvFind(cloud, "cache");
+    if (!localCache || !cloudCache) {
+        // If either is missing/malformed, prefer whichever has a cache section
+        if (cloudCache) return cloud;
+        return local;
+    }
+
+    // Walk cloud stat sections and merge into local
+    for (auto& cloudStat : cloudCache->children) {
+        if (cloudStat.type != BKV_SECTION) continue;
+        // skip non-stat sections (crc, PendingChanges are INT not SECTION)
+
+        BkvNode* localStat = BkvFind(localCache->children, cloudStat.name);
+        if (!localStat) {
+            // stat exists in cloud but not locally -- take it
+            localCache->children.push_back(cloudStat);
+            continue;
+        }
+
+        BkvNode* localData = BkvFind(localStat->children, "data");
+        BkvNode* cloudData = BkvFind(cloudStat.children, "data");
+        if (!localData || !cloudData) continue;
+
+        BkvNode* cloudAchTimes = BkvFind(cloudStat.children, "AchievementTimes");
+        BkvNode* localAchTimes = BkvFind(localStat->children, "AchievementTimes");
+
+        if (cloudAchTimes || localAchTimes) {
+            // Achievement stat: OR the bitfields
+            localData->intVal |= cloudData->intVal;
+
+            // Ensure local has an AchievementTimes section
+            if (!localAchTimes) {
+                localStat->children.push_back(BkvNode{BKV_SECTION, "AchievementTimes"});
+                localAchTimes = &localStat->children.back();
+            }
+
+            // Merge timestamps: for each bit index, keep earliest nonzero
+            if (cloudAchTimes) {
+                for (auto& ct : cloudAchTimes->children) {
+                    if (ct.type != BKV_INT) continue;
+                    BkvNode* lt = BkvFind(localAchTimes->children, ct.name);
+                    if (!lt) {
+                        localAchTimes->children.push_back(ct);
+                    } else if (ct.intVal != 0 && (lt->intVal == 0 || ct.intVal < lt->intVal)) {
+                        lt->intVal = ct.intVal;
+                    }
+                }
+            }
+        } else {
+            // Regular stat: take max
+            if (localData->type == BKV_INT && cloudData->type == BKV_INT) {
+                if (cloudData->intVal > localData->intVal)
+                    localData->intVal = cloudData->intVal;
+            } else if (localData->type == BKV_FLOAT && cloudData->type == BKV_FLOAT) {
+                if (cloudData->floatVal > localData->floatVal)
+                    localData->floatVal = cloudData->floatVal;
+            } else if (localData->type == BKV_UINT64 && cloudData->type == BKV_UINT64) {
+                if (cloudData->uint64Val > localData->uint64Val)
+                    localData->uint64Val = cloudData->uint64Val;
+            } else if (localData->type == BKV_INT64 && cloudData->type == BKV_INT64) {
+                if (cloudData->int64Val > localData->int64Val)
+                    localData->int64Val = cloudData->int64Val;
+            }
+        }
+    }
+
+    // Recalculate CRC: set to 0 so Steam recalculates on load
+    BkvNode* crc = BkvFind(localCache->children, "crc");
+    if (crc && crc->type == BKV_INT)
+        crc->intVal = 0;
+
+    return local;
+}
+
+// Merge cloud stats into the local stats file on disk.
+static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
+                           const std::vector<uint8_t>& cloudData)
+{
+    std::string statsPath = GetSteamPath() + "appcache\\stats\\UserGameStats_"
+        + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin";
+
+    // Parse cloud data
+    size_t cloudPos = 0;
+    size_t cloudNodeCount = 0;
+    std::vector<BkvNode> cloudNodes;
+    if (!BkvRead(cloudData.data(), cloudData.size(), cloudPos, cloudNodes, 0, cloudNodeCount)) {
+        LOG("[Stats] Failed to parse cloud stats for app %u, skipping merge", appId);
+        return false;
+    }
+
+    // Read local file
+    std::ifstream localFile(statsPath, std::ios::binary | std::ios::ate);
+    if (!localFile.is_open()) {
+        // No local file -- parse and rewrite cloud data to strip junk
+        std::vector<uint8_t> outBuf;
+        BkvWrite(cloudNodes, outBuf);
+        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) {
+            LOG("[Stats] Failed to create stats file for app %u", appId);
+            return false;
+        }
+        f.write(reinterpret_cast<const char*>(outBuf.data()), outBuf.size());
+        LOG("[Stats] No local stats, wrote cloud stats for app %u (%zu bytes)", appId, outBuf.size());
+        return true;
+    }
+
+    auto localSize = localFile.tellg();
+    if (localSize <= 0) {
+        localFile.close();
+        std::vector<uint8_t> outBuf;
+        BkvWrite(cloudNodes, outBuf);
+        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) return false;
+        f.write(reinterpret_cast<const char*>(outBuf.data()), outBuf.size());
+        LOG("[Stats] Local stats empty, wrote cloud stats for app %u (%zu bytes)", appId, outBuf.size());
+        return true;
+    }
+
+    std::vector<uint8_t> localData(static_cast<size_t>(localSize));
+    localFile.seekg(0);
+    localFile.read(reinterpret_cast<char*>(localData.data()), localSize);
+    localFile.close();
+
+    // Parse local data
+    size_t localPos = 0;
+    size_t localNodeCount = 0;
+    std::vector<BkvNode> localNodes;
+    if (!BkvRead(localData.data(), localData.size(), localPos, localNodes, 0, localNodeCount)) {
+        LOG("[Stats] Failed to parse local stats for app %u, overwriting with cloud", appId);
+        std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) return false;
+        f.write(reinterpret_cast<const char*>(cloudData.data()), cloudData.size());
+        return true;
+    }
+
+    // Merge
+    auto merged = MergeStats(localNodes, cloudNodes);
+
+    // Serialize
+    std::vector<uint8_t> outBuf;
+    BkvWrite(merged, outBuf);
+
+    // Write atomically (tmp + rename) to avoid partial reads on crash
+    if (!FileUtil::AtomicWriteBinary(statsPath, outBuf.data(), outBuf.size())) {
+        LOG("[Stats] Failed to write merged stats for app %u", appId);
+        return false;
+    }
+
+    LOG("[Stats] Merged stats for app %u (local=%zu cloud=%zu merged=%zu bytes)",
+        appId, localData.size(), cloudData.size(), outBuf.size());
+    return true;
+}
+
 // SignalAppLaunchIntent
 // Steam calls this before sync. We respond with empty pending_remote_operations.
 PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBody) {
@@ -360,6 +661,111 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
             appId, CloudStorage::ProviderName());
         bool hadNewer = CloudStorage::SyncFromCloud(accountId, appId);
         LOG("[NS] Cloud sync complete for app %u (hadNewer=%d)", appId, hadNewer);
+
+        // Merge achievement/stats data from cloud with local
+        if (SyncAchievementsEnabled()) {
+            auto statsData = CloudStorage::RetrieveBlob(accountId, appId, "UserGameStats.bin");
+            if (!statsData.empty()) {
+                MergeStatsFile(appId, accountId, statsData);
+            }
+        }
+
+        // Restore playtime from cloud
+        if (SyncPlaytimeEnabled()) {
+            auto ptData = CloudStorage::RetrieveBlob(accountId, appId, "Playtime.bin");
+            if (!ptData.empty()) {
+                // Parse the blob: tab-separated key/value pairs, one per line
+                std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
+                uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
+                std::istringstream blobStream(blob);
+                std::string blobLine;
+                while (std::getline(blobStream, blobLine)) {
+                    size_t tab = blobLine.find('\t');
+                    if (tab == std::string::npos) continue;
+                    std::string key = blobLine.substr(0, tab);
+                    std::string val = blobLine.substr(tab + 1);
+                    if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
+                    else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
+                }
+
+                if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
+                    LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
+                } else {
+                    // Read localconfig.vdf and merge playtime (take max)
+                    std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
+                        + "\\config\\localconfig.vdf";
+
+                    std::ifstream vdfIn(vdfPath);
+                    if (vdfIn.is_open()) {
+                        std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
+                        vdfIn.close();
+
+                        // Find the app section and read current values
+                        std::string appIdStr = std::to_string(appId);
+                        const char* sections[] = { "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+                        uint64_t localLastPlayed = 0, localPlaytime = 0;
+
+                        struct FieldLoc { size_t valStart; size_t valEnd; };
+                        FieldLoc lpLoc = {0, 0}, ptLoc = {0, 0};
+
+                        bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 5,
+                            [&](const VdfUtil::FieldInfo& fi) {
+                                if (fi.key == "LastPlayed") {
+                                    localLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                                    lpLoc = { fi.valStart, fi.valEnd };
+                                } else if (fi.key == "Playtime") {
+                                    localPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                                    ptLoc = { fi.valStart, fi.valEnd };
+                                }
+                                return true;
+                            });
+
+                        if (!found) {
+                            LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
+                        } else {
+                            uint64_t mergedLP = (cloudLastPlayed > localLastPlayed) ? cloudLastPlayed : localLastPlayed;
+                            uint64_t mergedPT = (cloudPlaytime > localPlaytime) ? cloudPlaytime : localPlaytime;
+
+                            bool needWrite = (mergedLP != localLastPlayed || mergedPT != localPlaytime);
+                            if (needWrite) {
+                                // Replace the later field first so earlier offsets stay valid
+                                std::string newLP = std::to_string(mergedLP);
+                                std::string newPT = std::to_string(mergedPT);
+                                bool lpValid = lpLoc.valEnd > lpLoc.valStart;
+                                bool ptValid = ptLoc.valEnd > ptLoc.valStart;
+
+                                if (lpValid && ptValid) {
+                                    if (lpLoc.valStart > ptLoc.valStart) {
+                                        vdfContent.replace(lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP);
+                                        vdfContent.replace(ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT);
+                                    } else {
+                                        vdfContent.replace(ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT);
+                                        vdfContent.replace(lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP);
+                                    }
+                                } else if (lpValid) {
+                                    vdfContent.replace(lpLoc.valStart, lpLoc.valEnd - lpLoc.valStart, newLP);
+                                } else if (ptValid) {
+                                    vdfContent.replace(ptLoc.valStart, ptLoc.valEnd - ptLoc.valStart, newPT);
+                                } else {
+                                    LOG("[Playtime] App %u section has no LastPlayed/Playtime fields, skipping write", appId);
+                                }
+
+                                if (FileUtil::AtomicWriteText(vdfPath, vdfContent)) {
+                                    LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu",
+                                        appId, localLastPlayed, mergedLP, localPlaytime, mergedPT);
+                                } else {
+                                    LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+                                }
+                            } else {
+                                LOG("[Playtime] Local playtime already up-to-date for app %u", appId);
+                            }
+                        }
+                    } else {
+                        LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
+                    }
+                }
+            }
+        }
     }
 
     PB::Writer body; // empty = no pending remote operations

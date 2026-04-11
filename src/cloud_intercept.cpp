@@ -3,11 +3,14 @@
 #include "protobuf.h"
 #include "log.h"
 #include "http_server.h"
+#include "vdf.h"
 #include "http_util.h"
 #include "local_storage.h"
 #include "cloud_storage.h"
 #include "cloud_provider.h"
 #include "json.h"
+#include "miniz.h"
+#include "miniz_zip.h"
 #include <shlobj.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,6 +21,7 @@
 #include <queue>
 #include <fstream>
 #include <optional>
+#include <chrono>
 
 namespace CloudIntercept {
 
@@ -25,6 +29,7 @@ static constexpr uint32_t PROTO_FLAG = 0x80000000;
 static constexpr uint32_t EMSG_MASK = 0x7FFFFFFF;
 static constexpr uint32_t EMSG_SERVICE_METHOD = 151;
 static constexpr uint32_t EMSG_SERVICE_METHOD_RESP = 147;
+static constexpr uint32_t EMSG_SERVICE_METHOD_SEND = 152;
 static constexpr uint64_t JOBID_NONE = 0xFFFFFFFFFFFFFFFFULL;
 
 static constexpr uint32_t HDR_STEAMID = 1;
@@ -159,6 +164,7 @@ static thread_local uintptr_t s_crashFaultAddr = 0;
 
 // Forward declarations
 static void InstallServiceMethodHook();
+static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId);
 static bool __fastcall NotificationWrapperHook(void* thisptr, const char* methodName, void* request);
 static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodName, void* bodyObj, int* flags);
 
@@ -193,6 +199,12 @@ static RecvPktFn g_originalRecvPkt = nullptr;
 static void* g_cmInterface = nullptr;             // real CCMInterface* (found via CSteamEngine)
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<bool> g_cmInterfaceFound{false}; // whether we've found the real CCMInterface
+static std::thread g_luaSyncThread;                  // deferred lua sync (waits for accountId)
+
+// Sync toggles (all default OFF, read from config.json at init)
+static bool g_syncAchievements = false;
+static bool g_syncPlaytime = false;
+static bool g_syncLuas = false;
 
 // BRouteMsgToJob bypass function pointers (resolved once from steamclient64.dll)
 static WrapPacketFn g_wrapPacket = nullptr;
@@ -224,6 +236,22 @@ struct HookGuard {
 
 // namespace state (auto-detected from stplug-in directory)
 static std::unordered_set<uint32_t> g_namespaceApps;
+static std::mutex g_namespaceAppsMutex;
+
+static bool IsNamespaceApp(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
+    return g_namespaceApps.count(appId) > 0;
+}
+
+static bool HasNamespaceApps() {
+    std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
+    return !g_namespaceApps.empty();
+}
+
+static void AddNamespaceApp(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
+    g_namespaceApps.insert(appId);
+}
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
 
@@ -465,7 +493,7 @@ static void TryFindCCMInterface() {
     }
 
     // Install service-method vtable hook (Approach E) now that we have steamclient base
-    if (!g_vtableHookInstalled.load(std::memory_order_acquire) && !g_namespaceApps.empty()) {
+    if (!g_vtableHookInstalled.load(std::memory_order_acquire) && HasNamespaceApps()) {
         InstallServiceMethodHook();
     }
 }
@@ -484,6 +512,7 @@ struct QueuedInjection {
     uint32_t pktSize;
     CNetPacket* pktStruct; // malloc'd CNetPacket
     uint64_t jobIdTarget;  // job to route the response to
+    uint32_t emsg;         // EMsg type (147 = response, 152 = send-to-client)
     char methodName[128];
 };
 
@@ -565,7 +594,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     JobRouteInfo route;
     route.jobidSource = -1;
     route.jobidTarget = (int64_t)ctx->jobIdTarget;
-    route.emsg = EMSG_SERVICE_METHOD_RESP;  // 147
+    route.emsg = (int32_t)ctx->emsg;
     route.flags = -3;
 
     LOG("[INJECT]   jobMgr=%p route: tgt=%llu emsg=%d flags=%d",
@@ -692,6 +721,7 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     ctx->pktSize = (uint32_t)pktData.size();
     ctx->pktStruct = fakePkt;
     ctx->jobIdTarget = jobIdTarget;
+    ctx->emsg = EMSG_SERVICE_METHOD_RESP;
     strncpy(ctx->methodName, methodName.c_str(), sizeof(ctx->methodName) - 1);
     ctx->methodName[sizeof(ctx->methodName) - 1] = '\0';
 
@@ -705,9 +735,19 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     return true;
 }
 
+
+
 uint32_t GetAccountId() {
     return (uint32_t)(g_steamId.load() & 0xFFFFFFFF);
 }
+
+const std::string& GetSteamPath() {
+    return g_steamPath;
+}
+
+bool SyncAchievementsEnabled() { return g_syncAchievements; }
+bool SyncPlaytimeEnabled() { return g_syncPlaytime; }
+bool SyncLuasEnabled() { return g_syncLuas; }
 
 // Service-method vtable hook (Approach E)
 //
@@ -873,7 +913,7 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     uint32_t realAppId = 0;
     bool isNamespace = false;
 
-    if (g_namespaceApps.count(appId)) {
+    if (IsNamespaceApp(appId)) {
         realAppId = appId;
         isNamespace = true;
     }
@@ -983,7 +1023,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     uint32_t realAppId = 0;
     bool isNamespace = false;
 
-    if (g_namespaceApps.count(appId)) {
+    if (IsNamespaceApp(appId)) {
         realAppId = appId;
         isNamespace = true;
     }
@@ -1129,11 +1169,95 @@ static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* body
     uint32_t appId = (uint32_t)appField->varintVal;
 
     // Check if namespace app (same logic as ServiceMethodHook)
-    if (g_namespaceApps.count(appId)) {
+    if (IsNamespaceApp(appId)) {
         return appId;
     }
 
     return 0;
+}
+
+// Upload achievement/stats data to cloud when a namespace app exits.
+// Reads UserGameStats_{accountId}_{appId}.bin from appcache/stats/ and stores
+// it as a blob so it can be restored on another machine at launch time.
+static void UploadStatsOnExit(uint32_t appId) {
+    if (!CloudStorage::IsCloudActive()) return;
+
+    uint32_t accountId = GetAccountId();
+    if (!accountId) return;
+
+    std::string statsFile = g_steamPath + "appcache\\stats\\UserGameStats_"
+        + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin";
+
+    std::ifstream f(statsFile, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) {
+        LOG("[Stats] No stats file for app %u, skipping upload", appId);
+        return;
+    }
+
+    auto size = f.tellg();
+    if (size <= 0 || size > 50 * 1024 * 1024) {
+        LOG("[Stats] Stats file empty or too large for app %u (%lld bytes), skipping upload", appId, (long long)size);
+        return;
+    }
+
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    f.seekg(0);
+    f.read(reinterpret_cast<char*>(data.data()), size);
+    f.close();
+
+    bool ok = CloudStorage::StoreBlob(accountId, appId,
+        "UserGameStats.bin", data.data(), data.size());
+    LOG("[Stats] Uploaded stats for app %u (%zu bytes, ok=%d)", appId, data.size(), ok);
+}
+
+// Extract LastPlayed and Playtime from localconfig.vdf for a specific app.
+// The file is a text VDF with nested sections; we need to navigate:
+// Software > Valve > Steam > Apps > <appId>
+// and read the LastPlayed/Playtime values from that section.
+static void UploadPlaytimeOnExit(uint32_t appId) {
+    if (!CloudStorage::IsCloudActive()) return;
+
+    uint32_t accountId = GetAccountId();
+    if (!accountId) return;
+
+    std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
+        + "\\config\\localconfig.vdf";
+
+    std::ifstream vdfIn(vdfPath);
+    if (!vdfIn.is_open()) {
+        LOG("[Playtime] Cannot open localconfig.vdf for app %u", appId);
+        return;
+    }
+    std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
+    vdfIn.close();
+
+    std::string appIdStr = std::to_string(appId);
+    const char* sections[] = { "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+    std::string lastPlayed, playtime;
+
+    bool found = VdfUtil::ForEachFieldInSection(vdfContent, sections, 5,
+        [&](const VdfUtil::FieldInfo& fi) {
+            if (fi.key == "LastPlayed") lastPlayed = std::string(fi.value);
+            else if (fi.key == "Playtime") playtime = std::string(fi.value);
+            return true;
+        });
+
+    if (!found || (lastPlayed.empty() && playtime.empty())) {
+        LOG("[Playtime] No playtime data found for app %u", appId);
+        return;
+    }
+
+    // Build a simple text blob
+    std::string blob;
+    if (!lastPlayed.empty())
+        blob += "LastPlayed\t" + lastPlayed + "\n";
+    if (!playtime.empty())
+        blob += "Playtime\t" + playtime + "\n";
+
+    bool ok = CloudStorage::StoreBlob(accountId, appId,
+        "Playtime.bin", reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
+    LOG("[Playtime] Uploaded playtime for app %u (LastPlayed=%s, Playtime=%s, ok=%d)",
+        appId, lastPlayed.c_str(), playtime.c_str(), ok);
 }
 
 // Slot 8 hook — Notification wrapper (e.g. SignalAppExitSyncDone)
@@ -1159,6 +1283,15 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
         // Not a namespace app — pass through to real Steam
         LOG("[VtHook-Notif] %s: not namespace, passing through", methodName);
         return g_originalSlot8(thisptr, methodName, request);
+    }
+
+    // On ExitSyncDone, upload stats and playtime to cloud before suppressing
+    if (strcmp(methodName, RPC_EXIT_SYNC) == 0) {
+        uint32_t capturedAppId = realAppId;
+        std::thread([capturedAppId] {
+            if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
+            if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
+        }).detach();
     }
 
     // Namespace app — suppress the notification (don't send to Steam servers)
@@ -1187,6 +1320,15 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
         // Not a namespace app — pass through to real Steam
         LOG("[VtHook-Notif] %s (direct): not namespace, passing through", methodName);
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
+    }
+
+    // On ExitSyncDone, upload stats and playtime to cloud before suppressing
+    if (strcmp(methodName, RPC_EXIT_SYNC) == 0) {
+        uint32_t capturedAppId = realAppId;
+        std::thread([capturedAppId] {
+            if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
+            if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
+        }).detach();
     }
 
     // Namespace app — suppress the notification
@@ -1458,6 +1600,508 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     return g_originalRecvPkt(thisptr, pkt);
 }
 
+// ── Lua file sync ───────────────────────────────────────────────────────
+// Syncs the stplug-in/*.lua collection between machines via cloud storage.
+// Uses a zip archive (LuaArchive.zip) and a manifest (LuaManifest.json)
+// stored under appId=0 as account-level blobs.
+//
+// Manifest format: { "file.lua": { "mod": <unix_ts>, "del": <unix_ts> }, ... }
+// A file with "del" > "mod" is considered deleted. Deletion timestamps let
+// removals propagate across machines without ping-pong.
+//
+// .sync_state format: first line is lastSyncTime (unix seconds), remaining
+// lines are filenames this machine knows about.
+
+static constexpr uint32_t LUA_SYNC_APPID = 0;
+
+struct SyncState {
+    uint64_t lastSyncTime = 0;
+    std::unordered_set<std::string> files;
+};
+
+static std::string GetLuaSyncStatePath() {
+    return g_steamPath + "config\\stplug-in\\.sync_state";
+}
+
+static SyncState ReadSyncState() {
+    SyncState state;
+    std::ifstream f(GetLuaSyncStatePath());
+    if (!f.is_open()) return state;
+    std::string line;
+    // First line is the timestamp
+    if (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        state.lastSyncTime = strtoull(line.c_str(), nullptr, 10);
+    }
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (!line.empty()) state.files.insert(line);
+    }
+    return state;
+}
+
+static void WriteSyncState(uint64_t syncTime, const std::unordered_set<std::string>& files) {
+    std::string path = GetLuaSyncStatePath();
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::ofstream f(path, std::ios::trunc);
+    if (!f.is_open()) {
+        LOG("[LuaSync] Failed to write .sync_state");
+        return;
+    }
+    f << syncTime << "\n";
+    for (auto& s : files) f << s << "\n";
+}
+
+struct LuaFile {
+    std::string filename;           // e.g. "1229490.lua"
+    std::vector<uint8_t> content;
+    uint64_t modTime;               // file modification time (unix seconds)
+};
+
+// Only allow plain "name.lua" filenames (no paths, no ..)
+static bool IsValidLuaFilename(const std::string& name) {
+    if (name.empty()) return false;
+    if (name.find('/') != std::string::npos) return false;
+    if (name.find('\\') != std::string::npos) return false;
+    if (name.find("..") != std::string::npos) return false;
+    if (name.find('\n') != std::string::npos) return false;
+    if (name.find('\r') != std::string::npos) return false;
+    if (name.size() < 5) return false; // minimum: "X.lua"
+    if (name.compare(name.size() - 4, 4, ".lua") != 0) return false;
+
+    // Block Windows reserved device names (CON.lua, NUL.lua, etc.)
+    std::string stem = name.substr(0, name.size() - 4);
+    // Strip trailing dot for things like "CON..lua" edge cases
+    while (!stem.empty() && stem.back() == '.') stem.pop_back();
+    if (!stem.empty()) {
+        static const char* reserved[] = {
+            "CON","PRN","AUX","NUL",
+            "COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9",
+            "LPT1","LPT2","LPT3","LPT4","LPT5","LPT6","LPT7","LPT8","LPT9"
+        };
+        for (auto r : reserved) {
+            if (_stricmp(stem.c_str(), r) == 0) return false;
+        }
+    }
+    return true;
+}
+
+static std::vector<LuaFile> ReadLocalLuaFiles() {
+    std::vector<LuaFile> files;
+    std::string dir = g_steamPath + "config\\stplug-in\\";
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA((dir + "*.lua").c_str(), &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return files;
+    do {
+        std::string name = fd.cFileName;
+        std::string path = dir + name;
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) continue;
+        auto size = f.tellg();
+        if (size <= 0 || size > 10 * 1024 * 1024) continue; // 10 MB per-file limit
+        LuaFile lf;
+        lf.filename = name;
+        lf.content.resize(static_cast<size_t>(size));
+        f.seekg(0);
+        f.read(reinterpret_cast<char*>(lf.content.data()), size);
+
+        ULARGE_INTEGER uli;
+        uli.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+        uli.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+        lf.modTime = (uli.QuadPart - 116444736000000000ULL) / 10000000ULL;
+        files.push_back(std::move(lf));
+    } while (FindNextFileA(hFind, &fd));
+    FindClose(hFind);
+    return files;
+}
+
+static std::vector<uint8_t> CreateLuaZip(const std::vector<LuaFile>& files) {
+    mz_zip_archive zip{};
+    if (!mz_zip_writer_init_heap(&zip, 0, 0)) {
+        LOG("[LuaSync] Failed to init zip writer");
+        return {};
+    }
+    for (auto& lf : files) {
+        if (!mz_zip_writer_add_mem(&zip, lf.filename.c_str(),
+                lf.content.data(), lf.content.size(), MZ_DEFAULT_COMPRESSION)) {
+            LOG("[LuaSync] Failed to add %s to zip", lf.filename.c_str());
+            mz_zip_writer_end(&zip);
+            return {};
+        }
+    }
+    void* buf = nullptr;
+    size_t bufSize = 0;
+    if (!mz_zip_writer_finalize_heap_archive(&zip, &buf, &bufSize)) {
+        LOG("[LuaSync] Failed to get heap archive");
+        mz_zip_writer_end(&zip);
+        return {};
+    }
+    std::vector<uint8_t> result(static_cast<uint8_t*>(buf),
+                                 static_cast<uint8_t*>(buf) + bufSize);
+    mz_free(buf);
+    mz_zip_writer_end(&zip);
+    return result;
+}
+
+// Per-file manifest entry: mod time + optional deletion time
+struct ManifestEntry {
+    uint64_t mod = 0;
+    uint64_t del = 0;   // 0 means not deleted; del > mod means deleted
+    bool isDeleted() const { return del > mod; }
+};
+
+using CloudManifest = std::unordered_map<std::string, ManifestEntry>;
+
+// Parse manifest JSON. Handles both new format ({ "f.lua": { "mod": N, "del": N } })
+// and old format ({ "f.lua": N }) for migration.
+static CloudManifest ParseManifest(const std::vector<uint8_t>& data) {
+    CloudManifest manifest;
+    if (data.empty()) return manifest;
+    std::string mstr(reinterpret_cast<const char*>(data.data()), data.size());
+    auto parsed = Json::Parse(mstr);
+    if (parsed.type != Json::Type::Object) return manifest;
+    for (auto& [key, val] : parsed.objVal) {
+        ManifestEntry entry;
+        if (val.type == Json::Type::Number) {
+            // Old format: bare number is mod time
+            entry.mod = static_cast<uint64_t>(val.numVal);
+        } else if (val.type == Json::Type::Object) {
+            if (val.has("mod") && val["mod"].type == Json::Type::Number)
+                entry.mod = static_cast<uint64_t>(val["mod"].numVal);
+            if (val.has("del") && val["del"].type == Json::Type::Number)
+                entry.del = static_cast<uint64_t>(val["del"].numVal);
+        }
+        manifest[key] = entry;
+    }
+    return manifest;
+}
+
+static std::string SerializeManifest(const CloudManifest& manifest) {
+    Json::Value root = Json::Object();
+    for (auto& [filename, entry] : manifest) {
+        Json::Value obj = Json::Object();
+        obj.objVal["mod"] = Json::Number(static_cast<double>(entry.mod));
+        if (entry.del > 0)
+            obj.objVal["del"] = Json::Number(static_cast<double>(entry.del));
+        root.objVal[filename] = obj;
+    }
+    return Json::Stringify(root);
+}
+
+static uint64_t NowUnix() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+static void SyncLuaFiles() {
+    if (!CloudStorage::IsCloudActive()) {
+        LOG("[LuaSync] Cloud not active, skipping lua sync");
+        return;
+    }
+    uint32_t accountId = GetAccountId();
+    if (!accountId) {
+        LOG("[LuaSync] No account ID yet, skipping lua sync");
+        return;
+    }
+
+    std::string luaDir = g_steamPath + "config\\stplug-in\\";
+    uint64_t now = NowUnix();
+
+    // 1. Download + parse cloud manifest
+    auto manifestData = CloudStorage::RetrieveBlob(accountId, LUA_SYNC_APPID, "LuaManifest.json");
+    auto cloudManifest = ParseManifest(manifestData);
+
+    // 2. Download cloud archive if there are alive entries
+    bool hasAlive = false;
+    for (auto& [f, e] : cloudManifest) { if (!e.isDeleted()) { hasAlive = true; break; } }
+    std::vector<uint8_t> archiveData;
+    if (hasAlive)
+        archiveData = CloudStorage::RetrieveBlob(accountId, LUA_SYNC_APPID, "LuaArchive.zip");
+
+    // Parse archive into a map
+    std::unordered_map<std::string, std::vector<uint8_t>> cloudFiles;
+    if (!archiveData.empty()) {
+        mz_zip_archive zip{};
+        if (mz_zip_reader_init_mem(&zip, archiveData.data(), archiveData.size(), 0)) {
+            mz_uint numFiles = mz_zip_reader_get_num_files(&zip);
+            constexpr mz_uint MAX_ZIP_ENTRIES = 10000;
+            if (numFiles > MAX_ZIP_ENTRIES) {
+                LOG("[LuaSync] Archive has too many entries (%u), skipping", numFiles);
+                mz_zip_reader_end(&zip);
+            } else {
+            size_t totalExtracted = 0;
+            constexpr size_t MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100 MB aggregate
+            for (mz_uint i = 0; i < numFiles; i++) {
+                char fname[256];
+                mz_zip_reader_get_filename(&zip, i, fname, sizeof(fname));
+                if (!IsValidLuaFilename(fname)) {
+                    LOG("[LuaSync] Skipping invalid zip entry: %s", fname);
+                    continue;
+                }
+                size_t uncompSize = 0;
+                void* p = mz_zip_reader_extract_to_heap(&zip, i, &uncompSize, 0);
+                if (p) {
+                    constexpr size_t MAX_LUA_SIZE = 10 * 1024 * 1024; // 10 MB
+                    if (uncompSize > MAX_LUA_SIZE) {
+                        LOG("[LuaSync] Skipping oversized zip entry: %s (%zu bytes)", fname, uncompSize);
+                        mz_free(p);
+                        continue;
+                    }
+                    totalExtracted += uncompSize;
+                    if (totalExtracted > MAX_TOTAL_SIZE) {
+                        LOG("[LuaSync] Total extracted size exceeds %zuMB limit, stopping", MAX_TOTAL_SIZE / (1024*1024));
+                        mz_free(p);
+                        break;
+                    }
+                    cloudFiles[fname] = std::vector<uint8_t>(
+                        static_cast<uint8_t*>(p), static_cast<uint8_t*>(p) + uncompSize);
+                    mz_free(p);
+                }
+            }
+            mz_zip_reader_end(&zip);
+            }
+        } else {
+            LOG("[LuaSync] Failed to open cloud archive: %s",
+                mz_zip_get_error_string(mz_zip_get_last_error(&zip)));
+        }
+    }
+
+    // 3. Read local sync state
+    auto syncState = ReadSyncState();
+    uint64_t lastSync = syncState.lastSyncTime;
+
+    // 4. Read local lua files
+    auto localFiles = ReadLocalLuaFiles();
+    std::unordered_map<std::string, uint64_t> localByName; // filename -> modTime
+    for (auto& lf : localFiles) localByName[lf.filename] = lf.modTime;
+
+    int extracted = 0, deletedLocally = 0, addedToCloud = 0, markedDeleted = 0;
+    bool manifestChanged = false;
+
+    // 5. Process cloud manifest entries
+    for (auto& [filename, entry] : cloudManifest) {
+        if (!IsValidLuaFilename(filename)) {
+            LOG("[LuaSync] Skipping invalid manifest entry: %s", filename.c_str());
+            continue;
+        }
+        bool onDisk = localByName.count(filename) > 0;
+        bool inSyncState = syncState.files.count(filename) > 0;
+
+        if (entry.isDeleted()) {
+            // Cloud says deleted
+            if (onDisk && lastSync > 0 && entry.del > lastSync) {
+                // Deleted on another machine after our last sync -- delete locally
+                std::string path = luaDir + filename;
+                if (DeleteFileA(path.c_str())) {
+                    deletedLocally++;
+                    localByName.erase(filename);
+                    LOG("[LuaSync] Deleted locally (remote deletion): %s", filename.c_str());
+                }
+            }
+            // If not on disk or deletion is old, no action
+        } else {
+            // Cloud says alive
+            if (!onDisk && !inSyncState) {
+                // New file for this machine
+                auto it = cloudFiles.find(filename);
+                if (it != cloudFiles.end()) {
+                    std::error_code ec;
+                    std::filesystem::create_directories(luaDir, ec);
+                    std::string destPath = luaDir + filename;
+                    std::ofstream out(destPath, std::ios::binary | std::ios::trunc);
+                    if (out.is_open()) {
+                        out.write(reinterpret_cast<const char*>(it->second.data()), it->second.size());
+                        out.close();
+                        localByName[filename] = entry.mod;
+                        extracted++;
+                        LOG("[LuaSync] Extracted new lua: %s (%zu bytes)", filename.c_str(), it->second.size());
+                    }
+                }
+            } else if (!onDisk && inSyncState) {
+                // User deleted locally -- mark as deleted in cloud
+                entry.del = now;
+                markedDeleted++;
+                manifestChanged = true;
+                LOG("[LuaSync] User deleted %s, marking deleted in cloud", filename.c_str());
+            }
+        }
+    }
+
+    // 6. Re-read local files if we extracted or deleted anything
+    if (extracted > 0 || deletedLocally > 0) {
+        localFiles = ReadLocalLuaFiles();
+        localByName.clear();
+        for (auto& lf : localFiles) localByName[lf.filename] = lf.modTime;
+
+        if (extracted > 0) {
+            for (auto& lf : localFiles) {
+                auto dot = lf.filename.rfind('.');
+                if (dot != std::string::npos) {
+                    uint32_t appId = (uint32_t)strtoul(lf.filename.substr(0, dot).c_str(), nullptr, 10);
+                    if (appId) {
+                        std::string luaPath = g_steamPath + "config\\stplug-in\\" + lf.filename;
+                        if (IsSelfUnlockingLua(luaPath, appId))
+                            AddNamespaceApp(appId);
+                    }
+                }
+            }
+
+            // If vtable hook wasn't installed during init (no namespace apps at the time),
+            // install it now that we have namespace apps from cloud sync.
+            if (!g_vtableHookInstalled.load(std::memory_order_acquire) &&
+                g_cmInterfaceFound.load(std::memory_order_acquire) &&
+                HasNamespaceApps()) {
+                InstallServiceMethodHook();
+            }
+        }
+    }
+
+    // 7. Add new local files to manifest
+    for (auto& [filename, modTime] : localByName) {
+        auto it = cloudManifest.find(filename);
+        if (it == cloudManifest.end()) {
+            cloudManifest[filename] = { modTime, 0 };
+            addedToCloud++;
+            manifestChanged = true;
+        } else if (it->second.isDeleted()) {
+            // File exists locally but cloud says deleted -- local wins (re-added)
+            it->second.mod = modTime;
+            it->second.del = 0;
+            addedToCloud++;
+            manifestChanged = true;
+            LOG("[LuaSync] Re-added %s (was deleted in cloud)", filename.c_str());
+        }
+    }
+
+    // 8. Upload if anything changed
+    bool needUpload = manifestChanged || extracted > 0 || deletedLocally > 0;
+    if (!needUpload && cloudManifest.empty() && !localFiles.empty()) {
+        needUpload = true;
+        LOG("[LuaSync] Cloud empty, seeding %zu lua files", localFiles.size());
+        for (auto& lf : localFiles)
+            cloudManifest[lf.filename] = { lf.modTime, 0 };
+    }
+
+    if (needUpload) {
+        // Build archive from alive files only
+        std::vector<LuaFile> aliveFiles;
+        for (auto& lf : localFiles) {
+            auto it = cloudManifest.find(lf.filename);
+            if (it != cloudManifest.end() && !it->second.isDeleted())
+                aliveFiles.push_back(lf);
+        }
+
+        if (!aliveFiles.empty()) {
+            auto zipData = CreateLuaZip(aliveFiles);
+            if (!zipData.empty()) {
+                CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID,
+                    "LuaArchive.zip", zipData.data(), zipData.size());
+                LOG("[LuaSync] Uploaded archive: %zu files, %zu bytes zip",
+                    aliveFiles.size(), zipData.size());
+            }
+        } else {
+            CloudStorage::DeleteBlob(accountId, LUA_SYNC_APPID, "LuaArchive.zip");
+        }
+
+        std::string manifestStr = SerializeManifest(cloudManifest);
+        CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID, "LuaManifest.json",
+            reinterpret_cast<const uint8_t*>(manifestStr.data()), manifestStr.size());
+    }
+
+    // 9. Update sync state
+    std::unordered_set<std::string> newFiles;
+    for (auto& [filename, entry] : cloudManifest) {
+        if (!entry.isDeleted()) newFiles.insert(filename);
+    }
+    WriteSyncState(now, newFiles);
+
+    LOG("[LuaSync] Sync complete: %d extracted, %d deleted locally, %d added to cloud, %d marked deleted",
+        extracted, deletedLocally, addedToCloud, markedDeleted);
+}
+
+// Shutdown upload: captures local changes (additions + deletions) to cloud.
+// Downloads manifest first to detect local deletions and set timestamps.
+static void UploadLuaOnShutdown() {
+    if (!CloudStorage::IsCloudActive()) return;
+    uint32_t accountId = GetAccountId();
+    if (!accountId) return;
+
+    uint64_t now = NowUnix();
+
+    // Download current cloud manifest to compare against
+    auto manifestData = CloudStorage::RetrieveBlob(accountId, LUA_SYNC_APPID, "LuaManifest.json");
+    auto cloudManifest = ParseManifest(manifestData);
+
+    auto localFiles = ReadLocalLuaFiles();
+    std::unordered_map<std::string, uint64_t> localByName;
+    for (auto& lf : localFiles) localByName[lf.filename] = lf.modTime;
+
+    bool changed = false;
+
+    // Mark cloud-alive files that are no longer on disk as deleted
+    for (auto& [filename, entry] : cloudManifest) {
+        if (!entry.isDeleted() && localByName.count(filename) == 0) {
+            entry.del = now;
+            changed = true;
+            LOG("[LuaSync] Shutdown: marking %s as deleted", filename.c_str());
+        }
+    }
+
+    // Add new local files
+    for (auto& [filename, modTime] : localByName) {
+        auto it = cloudManifest.find(filename);
+        if (it == cloudManifest.end()) {
+            cloudManifest[filename] = { modTime, 0 };
+            changed = true;
+        } else if (it->second.isDeleted()) {
+            it->second.mod = modTime;
+            it->second.del = 0;
+            changed = true;
+        }
+    }
+
+    if (!changed && !cloudManifest.empty()) {
+        LOG("[LuaSync] Shutdown: no changes to upload");
+        // Still update sync state time
+        std::unordered_set<std::string> newFiles;
+        for (auto& [f, e] : cloudManifest) { if (!e.isDeleted()) newFiles.insert(f); }
+        WriteSyncState(now, newFiles);
+        return;
+    }
+
+    // Upload archive (alive files only)
+    std::vector<LuaFile> aliveFiles;
+    for (auto& lf : localFiles) {
+        auto it = cloudManifest.find(lf.filename);
+        if (it != cloudManifest.end() && !it->second.isDeleted())
+            aliveFiles.push_back(lf);
+    }
+
+    if (!aliveFiles.empty()) {
+        auto zipData = CreateLuaZip(aliveFiles);
+        if (!zipData.empty()) {
+            CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID,
+                "LuaArchive.zip", zipData.data(), zipData.size());
+        }
+    }
+
+    // Upload manifest (includes deletion markers)
+    std::string manifestStr = SerializeManifest(cloudManifest);
+    CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID, "LuaManifest.json",
+        reinterpret_cast<const uint8_t*>(manifestStr.data()), manifestStr.size());
+
+    // Update sync state
+    std::unordered_set<std::string> newFiles;
+    for (auto& [f, e] : cloudManifest) { if (!e.isDeleted()) newFiles.insert(f); }
+    WriteSyncState(now, newFiles);
+
+    LOG("[LuaSync] Shutdown upload: %zu alive, %zu total manifest entries",
+        localFiles.size(), cloudManifest.size());
+}
+
 // Expected Steam client version — patches and RVAs are only valid for this build
 static constexpr uint64_t EXPECTED_STEAM_VERSION = 1773426488ULL;
 
@@ -1588,7 +2232,7 @@ void Init(const std::string& steamPath) {
                         totalLuas++;
                         std::string luaPath = pluginBase + name;
                         if (IsSelfUnlockingLua(luaPath, appId)) {
-                            g_namespaceApps.insert(appId);
+                            AddNamespaceApp(appId);
                             selfUnlocking++;
                         }
                     }
@@ -1601,7 +2245,7 @@ void Init(const std::string& steamPath) {
             pluginDir.c_str(), GetLastError());
     }
 
-    if (!g_namespaceApps.empty()) {
+    if (HasNamespaceApps()) {
         LOG("[NS] Namespace mode ENABLED: %d self-unlocking of %d total lua(s)", selfUnlocking, totalLuas);
     } else {
         LOG("[NS] No self-unlocking Lua files found (%d total luas) — DLL will only log Cloud RPCs", totalLuas);
@@ -1715,11 +2359,35 @@ void Init(const std::string& steamPath) {
             int mb = static_cast<int>(maxUploadVal.integer());
             HttpServer::SetMaxUploadMB(mb);
         }
+
+        // sync toggles (all default OFF)
+        if (cfg["sync_achievements"].type == Json::Type::Bool)
+            g_syncAchievements = cfg["sync_achievements"].boolean();
+        if (cfg["sync_playtime"].type == Json::Type::Bool)
+            g_syncPlaytime = cfg["sync_playtime"].boolean();
+        if (cfg["sync_luas"].type == Json::Type::Bool)
+            g_syncLuas = cfg["sync_luas"].boolean();
+        LOG("[NS] Sync toggles: achievements=%d, playtime=%d, luas=%d",
+            g_syncAchievements, g_syncPlaytime, g_syncLuas);
     } else {
         LOG("[NS] No config.json at %s — local-only mode", configPath.c_str());
     }
 
     CloudStorage::Init(cloudRoot, std::move(provider));
+
+    // Launch deferred lua sync thread (waits for accountId to be captured).
+    // Runs even when no local luas exist -- a fresh install needs to pull them from cloud.
+    if (g_syncLuas) {
+        g_luaSyncThread = std::thread([] {
+            // Wait for accountId to be captured (set when first RPC arrives)
+            for (int i = 0; i < 300 && !g_shuttingDown.load(); i++) {
+                if (GetAccountId() != 0) break;
+                Sleep(1000);
+            }
+            if (g_shuttingDown.load() || GetAccountId() == 0) return;
+            SyncLuaFiles();
+        });
+    }
 
     LOG("CloudIntercept initialized (local server mode), steam=%s", g_steamPath.c_str());
 }
@@ -1806,7 +2474,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
             uint32_t appId = ExtractAppId(method.c_str(), innerFields);
 
             // Check if this is a namespace app that needs local handling
-            bool isNs = g_namespaceApps.count(appId) > 0;
+            bool isNs = IsNamespaceApp(appId);
 
             if (isNs) {
                 // Namespace app Cloud RPC reached SendPkt despite slot 4+5 hooks — unexpected!
@@ -1885,7 +2553,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     uint32_t realAppId = 0;
     bool isNamespace = false;
 
-    if (g_namespaceApps.count(appId)) {
+    if (IsNamespaceApp(appId)) {
         realAppId = appId;
         isNamespace = true;
     }
@@ -1956,6 +2624,15 @@ void Shutdown() {
             LOG("Shutdown: VirtualProtect failed restoring vtable (%u)", GetLastError());
         }
     }
+
+    // Join lua sync thread before shutdown proceeds
+    if (g_luaSyncThread.joinable()) g_luaSyncThread.join();
+
+    // Upload current lua state before cloud provider shuts down
+    if (g_syncLuas) UploadLuaOnShutdown();
+
+    // Wait for all pending cloud uploads (including lua) to finish
+    CloudStorage::DrainQueue();
 
     HttpServer::Stop();
     CloudStorage::Shutdown();

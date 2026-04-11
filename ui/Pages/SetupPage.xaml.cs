@@ -220,6 +220,52 @@ public partial class SetupPage : Page
         Log("Steam closed.");
     }
 
+    /// <summary>
+    /// Starts Steam and waits for the payload cache to appear in appcache/httpcache/3b/.
+    /// Returns true if the payload was found, false on timeout.
+    /// </summary>
+    private async Task<bool> BootstrapSteamForPayload()
+    {
+        var steamExe = Path.Combine(_steamPath, "steam.exe");
+        if (!File.Exists(steamExe))
+        {
+            Log("steam.exe not found");
+            return false;
+        }
+
+        Log("Starting Steam to download payload cache...");
+
+        await Task.Run(() =>
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = steamExe,
+                UseShellExecute = true
+            })?.Dispose();
+        });
+
+        Log("Waiting for payload to appear (up to 90 seconds)...");
+
+        bool found = await Task.Run(() =>
+        {
+            for (int i = 0; i < 180; i++) // 90s at 500ms intervals
+            {
+                System.Threading.Thread.Sleep(500);
+                if (Fingerprint.FindCachePath(_steamPath, verbose: false) != null)
+                    return true;
+            }
+            return false;
+        });
+
+        if (found)
+            Log("Payload cache found.");
+        else
+            Log("Timed out waiting for payload cache.");
+
+        await EnsureSteamClosed();
+        return found;
+    }
+
     // M20: RefreshStatuses involves file I/O and AES decryption. While ideally
     // the heavy lifting would run off the UI thread, the RefreshXxxStatus() helpers
     // directly set WPF controls and would require significant refactoring to decouple.
@@ -417,20 +463,17 @@ public partial class SetupPage : Page
             var localCloudPath = Path.Combine(_steamPath, "localcloud");
             Directory.CreateDirectory(localCloudPath);
 
-            var config = new Dictionary<string, string>
-            {
-                ["provider"] = "folder",
-                ["sync_path"] = localCloudPath
-            };
-
-            var options = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
-            string json = System.Text.Json.JsonSerializer.Serialize(config, options);
-
             var configPath = Path.Combine(configDir, "config.json");
-            // Atomic write: write to .tmp then rename to avoid partial config on crash
-            await Task.Run(() => FileUtils.AtomicWriteAllText(configPath, json));
 
-            Log($"Default config written — saves will sync to: {localCloudPath}");
+            await Task.Run(() => Services.ConfigHelper.SaveConfig(configPath,
+                new[] { "provider", "sync_path" },
+                writer =>
+                {
+                    writer.WriteString("provider", "folder");
+                    writer.WriteString("sync_path", localCloudPath);
+                }));
+
+            Log($"Default config written -- saves will sync to: {localCloudPath}");
             Log("You can change this later on the Cloud Provider page.");
         }
         catch (Exception ex)
@@ -454,6 +497,58 @@ public partial class SetupPage : Page
         await EnsureSteamClosed();
 
         bool allSucceeded = true;
+
+        // Pre-step: if core DLLs are missing, download them and bootstrap Steam
+        bool needsCoreDlls = await Task.Run(() => !new Patcher(_steamPath, Log).HasCoreDll());
+        if (needsCoreDlls)
+        {
+            Log("═══ Pre-step: Download SteamTools Core DLLs ═══");
+            try
+            {
+                PatchResult repairResult = null;
+                await Task.Run(() =>
+                {
+                    var patcher = new Patcher(_steamPath, Log);
+                    repairResult = patcher.RepairCoreDlls();
+                });
+
+                if (repairResult?.Succeeded != true)
+                {
+                    Log($"FAILED: {repairResult?.Error ?? "Unknown error"}");
+                    Log("");
+                    Log("Cannot proceed without core DLLs.");
+                    SetBusy(false);
+                    return;
+                }
+                Log("OK");
+            }
+            catch (Exception ex)
+            {
+                Log($"FAILED: {ex.Message}");
+                Log("");
+                Log("Cannot proceed without core DLLs.");
+                SetBusy(false);
+                return;
+            }
+            Log("");
+        }
+
+        bool needsPayload = await Task.Run(() => !new Patcher(_steamPath, Log).HasPayloadCache());
+        if (needsPayload)
+        {
+            Log("═══ Pre-step: Bootstrap Steam for Payload ═══");
+            bool payloadFound = await BootstrapSteamForPayload();
+            if (!payloadFound)
+            {
+                Log("FAILED: Payload cache did not appear.");
+                Log("Try running Steam manually, wait for it to fully load, then close it and try again.");
+                Log("");
+                SetBusy(false);
+                return;
+            }
+            Log("OK");
+            Log("");
+        }
 
         Log("═══ Step 1/4: SteamTools Offline Setup ═══");
         try

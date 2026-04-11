@@ -20,6 +20,7 @@ add_library(cloud_redirect SHARED
     src/google_drive.cpp
     src/onedrive.cpp
     src/json.cpp
+    src/vdf.cpp
     src/miniz.c
     src/miniz_tdef.c
     src/miniz_tinfl.c
@@ -27,7 +28,7 @@ add_library(cloud_redirect SHARED
 )
 
 target_include_directories(cloud_redirect PRIVATE src)
-target_compile_definitions(cloud_redirect PRIVATE MINIZ_NO_STDIO MINIZ_NO_ARCHIVE_WRITING_APIS)
+target_compile_definitions(cloud_redirect PRIVATE MINIZ_NO_STDIO)
 target_link_libraries(cloud_redirect PRIVATE Shlwapi Advapi32 ws2_32 winhttp Crypt32)
 
 # UI (builds DLL first, then publishes the WPF app with the DLL embedded)

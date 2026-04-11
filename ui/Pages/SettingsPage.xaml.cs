@@ -16,6 +16,7 @@ public partial class SettingsPage : Page
 
     private string? _latestDownloadUrl;
     private bool _languageLoading;
+    private bool _syncLoading;
 
     /// <summary>
     /// Language options: display key -> culture code (or "system").
@@ -35,6 +36,7 @@ public partial class SettingsPage : Page
         {
             LoadAbout();
             LoadLanguageSelector();
+            LoadSyncToggles();
         };
     }
 
@@ -156,6 +158,60 @@ public partial class SettingsPage : Page
 
             var newJson = System.Text.Encoding.UTF8.GetString(ms.ToArray());
             Services.FileUtils.AtomicWriteAllText(path, newJson);
+        }
+        catch { }
+    }
+
+    private static string GetConfigPath()
+    {
+        return Services.SteamDetector.GetConfigFilePath();
+    }
+
+    private void LoadSyncToggles()
+    {
+        _syncLoading = true;
+        try
+        {
+            var path = GetConfigPath();
+            if (!File.Exists(path)) return;
+
+            var json = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("sync_achievements", out var a) && a.ValueKind == JsonValueKind.True)
+                SyncAchievementsToggle.IsChecked = true;
+            if (root.TryGetProperty("sync_playtime", out var p) && p.ValueKind == JsonValueKind.True)
+                SyncPlaytimeToggle.IsChecked = true;
+            if (root.TryGetProperty("sync_luas", out var l) && l.ValueKind == JsonValueKind.True)
+                SyncLuasToggle.IsChecked = true;
+        }
+        catch { }
+        finally
+        {
+            _syncLoading = false;
+        }
+    }
+
+    private void SyncToggle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_syncLoading) return;
+        SaveSyncToggles();
+    }
+
+    private void SaveSyncToggles()
+    {
+        try
+        {
+            var path = GetConfigPath();
+            Services.ConfigHelper.SaveConfig(path,
+                new[] { "sync_achievements", "sync_playtime", "sync_luas" },
+                writer =>
+                {
+                    writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
+                    writer.WriteBoolean("sync_playtime", SyncPlaytimeToggle.IsChecked == true);
+                    writer.WriteBoolean("sync_luas", SyncLuasToggle.IsChecked == true);
+                });
         }
         catch { }
     }

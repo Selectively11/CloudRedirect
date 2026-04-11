@@ -47,7 +47,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #6</value>
+    <value>CloudRedirect - Public Test Version #7</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Dashboard</value>
@@ -1110,7 +1110,7 @@ Files can be restored from the Restore tab. Continue?</value>
 
   <!-- SettingsPage code-behind -->
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Version #6)</value>
+    <value>{0}.{1}.{2} (Public Test Version #7)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Checking...</value>
@@ -1166,7 +1166,7 @@ Are you sure?</value>
     <value>WARNING</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #6</value>
+    <value>CloudRedirect - Public Test Version #7</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  DATA  LOSS  RISK  !</value>
@@ -1377,6 +1377,30 @@ Are you sure?</value>
   </data>
   <data name="Settings_LanguagePortuguese" xml:space="preserve">
     <value>Português (Brasil)</value>
+  </data>
+  <data name="Settings_Sync" xml:space="preserve">
+    <value>Sync</value>
+  </data>
+  <data name="Settings_SyncHint" xml:space="preserve">
+    <value>These settings control what data is synced between your PCs via the cloud provider. Changes take effect after restarting Steam.</value>
+  </data>
+  <data name="Settings_SyncAchievements" xml:space="preserve">
+    <value>Sync achievements</value>
+  </data>
+  <data name="Settings_SyncAchievementsHint" xml:space="preserve">
+    <value>Upload and merge achievement progress for lua apps across PCs.</value>
+  </data>
+  <data name="Settings_SyncPlaytime" xml:space="preserve">
+    <value>Sync playtime</value>
+  </data>
+  <data name="Settings_SyncPlaytimeHint" xml:space="preserve">
+    <value>Upload and merge playtime data for lua apps across PCs.</value>
+  </data>
+  <data name="Settings_SyncLuas" xml:space="preserve">
+    <value>Sync lua files</value>
+  </data>
+  <data name="Settings_SyncLuasHint" xml:space="preserve">
+    <value>Sync lua files themselves between PCs so you don't have to install them again.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->

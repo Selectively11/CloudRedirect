@@ -44,7 +44,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #6</value>
+    <value>CloudRedirect - Public Test Version #7</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Panel</value>
@@ -1081,7 +1081,7 @@ Los archivos se pueden restaurar desde la pestaña Restaurar. ¿Continuar?</valu
   </data>
 
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Version #6)</value>
+    <value>{0}.{1}.{2} (Public Test Version #7)</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Verificando...</value>
@@ -1134,7 +1134,7 @@ Esto puede causar pérdida de datos en algunos casos.
     <value>ADVERTENCIA</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Version #6</value>
+    <value>CloudRedirect - Public Test Version #7</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  RIESGO  DE  PÉRDIDA  DE  DATOS  !</value>
@@ -1323,6 +1323,30 @@ Esto puede causar pérdida de datos en algunos casos.
   </data>
   <data name="Settings_LanguagePortuguese" xml:space="preserve">
     <value>Português (Brasil)</value>
+  </data>
+  <data name="Settings_Sync" xml:space="preserve">
+    <value>Sincronización</value>
+  </data>
+  <data name="Settings_SyncHint" xml:space="preserve">
+    <value>Estos ajustes controlan qué datos se sincronizan entre tus PCs a través del proveedor de nube. Los cambios se aplican después de reiniciar Steam.</value>
+  </data>
+  <data name="Settings_SyncAchievements" xml:space="preserve">
+    <value>Sincronizar logros</value>
+  </data>
+  <data name="Settings_SyncAchievementsHint" xml:space="preserve">
+    <value>Subir y fusionar el progreso de logros de las apps lua entre PCs.</value>
+  </data>
+  <data name="Settings_SyncPlaytime" xml:space="preserve">
+    <value>Sincronizar tiempo de juego</value>
+  </data>
+  <data name="Settings_SyncPlaytimeHint" xml:space="preserve">
+    <value>Subir y fusionar los datos de tiempo de juego de las apps lua entre PCs.</value>
+  </data>
+  <data name="Settings_SyncLuas" xml:space="preserve">
+    <value>Sincronizar archivos lua</value>
+  </data>
+  <data name="Settings_SyncLuasHint" xml:space="preserve">
+    <value>Sincronizar los archivos lua entre PCs para no tener que instalarlos de nuevo.</value>
   </data>
 
   <data name="Search_Placeholder" xml:space="preserve">

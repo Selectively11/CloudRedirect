@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -287,23 +288,20 @@ public partial class CloudProviderPage : Page
         if (provider == "local")
             configProvider = "folder";
 
-        // Build config as a dictionary and serialize properly to handle
-        // all special characters (control chars, quotes, backslashes, unicode)
-        var config = new Dictionary<string, string> { ["provider"] = configProvider };
-        if (configProvider == "folder")
-            config["sync_path"] = tokenPath;
-        else if (configProvider is not "local")
-            config["token_path"] = tokenPath;
-
-        var options = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
-        string json = System.Text.Json.JsonSerializer.Serialize(config, options);
-
         var configPath = Path.Combine(configDir, "config.json");
 
         try
         {
-            // Atomic write: write to .tmp then rename to avoid partial config on crash
-            Services.FileUtils.AtomicWriteAllText(configPath, json);
+            Services.ConfigHelper.SaveConfig(configPath,
+                new[] { "provider", "sync_path", "token_path" },
+                writer =>
+                {
+                    writer.WriteString("provider", configProvider);
+                    if (configProvider == "folder")
+                        writer.WriteString("sync_path", tokenPath);
+                    else if (configProvider is not "local")
+                        writer.WriteString("token_path", tokenPath);
+                });
             return true;
         }
         catch (Exception ex)
