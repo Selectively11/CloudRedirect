@@ -259,20 +259,61 @@ static void AddNamespaceApp(uint32_t appId) {
 // per-app launch timestamp for internal playtime tracking
 static std::mutex g_launchTimeMutex;
 static std::unordered_map<uint32_t, time_t> g_launchTimes;
+static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime;
 
 void RecordLaunchTime(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_launchTimeMutex);
     g_launchTimes[appId] = time(nullptr);
-    LOG("[Playtime] Recorded launch time for app %u", appId);
+
+    // Snapshot VDF playtime at launch while the file is stable
+    uint64_t vdfPT = 0;
+    uint32_t accountId = GetAccountId();
+    if (accountId) {
+        std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
+            + "\\config\\localconfig.vdf";
+        HANDLE hFile = CreateFileA(vdfPath.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD fileSize = GetFileSize(hFile, nullptr);
+            std::string vdfContent;
+            if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
+                vdfContent.resize(fileSize);
+                DWORD bytesRead = 0;
+                ReadFile(hFile, (LPVOID)vdfContent.data(), fileSize, &bytesRead, nullptr);
+                vdfContent.resize(bytesRead);
+            }
+            CloseHandle(hFile);
+
+            std::string appIdStr = std::to_string(appId);
+            const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
+            VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
+                [&](const VdfUtil::FieldInfo& fi) {
+                    if (fi.key == "Playtime")
+                        vdfPT = strtoull(std::string(fi.value).c_str(), nullptr, 10);
+                    return true;
+                });
+        }
+    }
+    g_launchVdfPlaytime[appId] = vdfPT;
+    LOG("[Playtime] Recorded launch time for app %u (vdfBaseline=%llu min)", appId, vdfPT);
 }
 
-static time_t PopLaunchTime(uint32_t appId) {
+struct LaunchInfo { time_t launchTime; uint64_t vdfBaseline; };
+static LaunchInfo PopLaunchInfo(uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_launchTimeMutex);
+    LaunchInfo info = {0, 0};
     auto it = g_launchTimes.find(appId);
-    if (it == g_launchTimes.end()) return 0;
-    time_t t = it->second;
-    g_launchTimes.erase(it);
-    return t;
+    if (it != g_launchTimes.end()) {
+        info.launchTime = it->second;
+        g_launchTimes.erase(it);
+    }
+    auto it2 = g_launchVdfPlaytime.find(appId);
+    if (it2 != g_launchVdfPlaytime.end()) {
+        info.vdfBaseline = it2->second;
+        g_launchVdfPlaytime.erase(it2);
+    }
+    return info;
 }
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
@@ -1242,26 +1283,26 @@ static void UploadStatsOnExit(uint32_t appId) {
 }
 
 // Upload playtime to cloud when a namespace app exits.
-// Primary source: internal launch-time tracking (always available).
-// Fallback: localconfig.vdf (Steam often doesn't write entries for lua apps).
-// Merges with existing cloud blob so playtime accumulates across sessions.
+// Uses internal tracking (launch time -> exit time) plus VDF baseline from launch.
+// The exit-side VDF read is unreliable because Steam may not have written it yet,
+// so we snapshot VDF playtime at launch and use that as the floor.
 static void UploadPlaytimeOnExit(uint32_t appId) {
     if (!CloudStorage::IsCloudActive()) return;
 
     uint32_t accountId = GetAccountId();
     if (!accountId) return;
 
-    time_t launchTime = PopLaunchTime(appId);
+    auto info = PopLaunchInfo(appId);
     time_t now = time(nullptr);
 
     uint64_t trackedMinutes = 0;
     uint64_t trackedLastPlayed = (uint64_t)now;
 
-    if (launchTime > 0 && now > launchTime) {
-        trackedMinutes = (uint64_t)(now - launchTime) / 60;
-        LOG("[Playtime] Internal tracking for app %u: %llu minutes", appId, trackedMinutes);
+    if (info.launchTime > 0 && now > info.launchTime) {
+        trackedMinutes = (uint64_t)(now - info.launchTime) / 60;
+        LOG("[Playtime] Internal tracking for app %u: %llu minutes (baseline=%llu)", appId, trackedMinutes, info.vdfBaseline);
     } else {
-        LOG("[Playtime] No internal launch time for app %u, relying on VDF fallback", appId);
+        LOG("[Playtime] No internal launch time for app %u, relying on VDF", appId);
     }
 
     // Read Steam's cumulative playtime from localconfig.vdf (if available).
@@ -1286,7 +1327,7 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
 
             std::string appIdStr = std::to_string(appId);
             const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-            VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
+            bool sectionFound = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
                 [&](const VdfUtil::FieldInfo& fi) {
                     if (fi.key == "LastPlayed")
                         vdfLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
@@ -1294,11 +1335,19 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
                         vdfPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
                     return true;
                 });
-            LOG("[Playtime] VDF for app %u: Playtime=%llu LastPlayed=%llu", appId, vdfPlaytime, vdfLastPlayed);
+            LOG("[Playtime] VDF for app %u: found=%d Playtime=%llu LastPlayed=%llu (read %lu bytes)",
+                appId, sectionFound, vdfPlaytime, vdfLastPlayed, (unsigned long)vdfContent.size());
         } else {
             LOG("[Playtime] Cannot open localconfig.vdf for app %u (err=%lu, path=%s)",
                 appId, GetLastError(), vdfPath.c_str());
         }
+    }
+
+    // Use the launch-time VDF baseline if exit-side read came back empty.
+    // Steam may not have flushed playtime to disk yet at exit time.
+    if (vdfPlaytime == 0 && info.vdfBaseline > 0) {
+        vdfPlaytime = info.vdfBaseline;
+        LOG("[Playtime] Using launch-time VDF baseline for app %u: %llu min", appId, vdfPlaytime);
     }
 
     uint64_t lastPlayed = (trackedLastPlayed > vdfLastPlayed) ? trackedLastPlayed : vdfLastPlayed;
@@ -1317,10 +1366,12 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
         }
     }
 
-    // Playtime: take max of (cloud total, VDF total, cloud + session delta)
+    // Playtime merge: baseline + session, but never less than VDF or cloud
     uint64_t mergedPlaytime = cloudPlaytime + trackedMinutes;
     if (vdfPlaytime > mergedPlaytime)
         mergedPlaytime = vdfPlaytime;
+    if (info.vdfBaseline + trackedMinutes > mergedPlaytime)
+        mergedPlaytime = info.vdfBaseline + trackedMinutes;
     uint64_t mergedLastPlayed = (lastPlayed > cloudLastPlayed) ? lastPlayed : cloudLastPlayed;
 
     if (mergedPlaytime == 0 && mergedLastPlayed == 0) {
@@ -1335,8 +1386,8 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
         "Playtime.bin", reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
-    LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, vdf=%llu min, cloud=%llu min, total=%llu min, LastPlayed=%llu, ok=%d)",
-        appId, trackedMinutes, vdfPlaytime, cloudPlaytime, mergedPlaytime, mergedLastPlayed, ok);
+    LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, baseline=%llu min, vdf=%llu min, cloud=%llu min, total=%llu min, LastPlayed=%llu, ok=%d)",
+        appId, trackedMinutes, info.vdfBaseline, vdfPlaytime, cloudPlaytime, mergedPlaytime, mergedLastPlayed, ok);
 }
 
 // Slot 8 hook — Notification wrapper (e.g. SignalAppExitSyncDone)

@@ -68,12 +68,7 @@ internal static class AppUpdater
             if (!Version.TryParse(remoteVersionStr, out var remoteVersion))
                 return null;
 
-            var local3 = new Version(localVersion.Major, localVersion.Minor, localVersion.Build);
-            var remote3 = remoteVersion.Build >= 0
-                ? new Version(remoteVersion.Major, remoteVersion.Minor, remoteVersion.Build)
-                : new Version(remoteVersion.Major, remoteVersion.Minor, 0);
-
-            if (remote3 <= local3)
+            if (remoteVersion <= localVersion)
                 return new CheckResult { UpdateAvailable = false };
 
             // Find the .exe asset
