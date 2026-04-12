@@ -35,7 +35,17 @@ public partial class SettingsPage : Page
         {
             LoadAbout();
             LoadLanguageSelector();
-            LoadSyncToggles();
+
+            var mode = Services.SteamDetector.ReadModeSetting();
+            if (mode == "cloud_redirect")
+            {
+                SyncSection.Visibility = Visibility.Visible;
+                LoadSyncToggles();
+            }
+            else
+            {
+                SyncSection.Visibility = Visibility.Collapsed;
+            }
         };
     }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
@@ -611,6 +612,21 @@ namespace CloudRedirect.Services.Patching
             catch { return null; }
         }
 
+        void KillSteamTools()
+        {
+            foreach (var p in Process.GetProcessesByName("SteamTools"))
+            {
+                try
+                {
+                    Log($"  Killing SteamTools.exe (PID {p.Id})...");
+                    p.Kill();
+                    p.WaitForExit(5000);
+                }
+                catch { }
+                finally { p.Dispose(); }
+            }
+        }
+
         // 0 = already patched, 1 = needs patch, -1 = not found / unrecognized
         public int GetSteamToolsExePatchState()
         {
@@ -635,13 +651,14 @@ namespace CloudRedirect.Services.Patching
             catch { return -1; }
         }
 
-        public bool PatchSteamToolsExe()
+        // Returns: 1 = patched (or already patched), 0 = not found (skip), -1 = failed
+        public int PatchSteamToolsExe()
         {
             var exe = FindSteamToolsExe();
             if (exe == null)
             {
-                Log("  SteamTools.exe not found");
-                return false;
+                Log("  SteamTools.exe not found — skipping");
+                return 0;
             }
 
             try
@@ -650,39 +667,49 @@ namespace CloudRedirect.Services.Patching
                 if (data.Length < StExePatchOffset + 2)
                 {
                     Log("  SteamTools.exe too small - unrecognized version");
-                    return false;
+                    return -1;
                 }
 
                 if (data[StExePatchOffset] == StExePatched[0]
                     && data[StExePatchOffset + 1] == StExePatched[1])
                 {
                     Log("  SteamTools.exe: already patched");
-                    return true;
+                    return 1;
                 }
 
                 if (data[StExePatchOffset] != StExeOriginal[0]
                     || data[StExePatchOffset + 1] != StExeOriginal[1])
                 {
                     Log($"  SteamTools.exe: unexpected bytes at patch site ({data[StExePatchOffset]:X2} {data[StExePatchOffset + 1]:X2}) - unrecognized version");
-                    return false;
+                    return -1;
                 }
 
                 Backup(exe);
                 data[StExePatchOffset] = StExePatched[0];
                 data[StExePatchOffset + 1] = StExePatched[1];
-                FileUtils.AtomicWriteAllBytes(exe, data);
+
+                try
+                {
+                    FileUtils.AtomicWriteAllBytes(exe, data);
+                }
+                catch (IOException)
+                {
+                    KillSteamTools();
+                    FileUtils.AtomicWriteAllBytes(exe, data);
+                }
+
                 Log("  SteamTools.exe: patched (DLL deploy disabled)");
-                return true;
+                return 1;
             }
             catch (UnauthorizedAccessException)
             {
                 Log("  SteamTools.exe: access denied - run as administrator");
-                return false;
+                return -1;
             }
             catch (IOException ex)
             {
                 Log($"  SteamTools.exe: {ex.Message}");
-                return false;
+                return -1;
             }
         }
 
@@ -706,7 +733,17 @@ namespace CloudRedirect.Services.Patching
 
                 data[StExePatchOffset] = StExeOriginal[0];
                 data[StExePatchOffset + 1] = StExeOriginal[1];
-                FileUtils.AtomicWriteAllBytes(exe, data);
+
+                try
+                {
+                    FileUtils.AtomicWriteAllBytes(exe, data);
+                }
+                catch (IOException)
+                {
+                    KillSteamTools();
+                    FileUtils.AtomicWriteAllBytes(exe, data);
+                }
+
                 Log("  SteamTools.exe: restored to original");
                 return true;
             }

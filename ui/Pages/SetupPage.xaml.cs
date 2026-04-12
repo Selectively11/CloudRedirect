@@ -541,16 +541,23 @@ public partial class SetupPage : Page
         Log("═══ Step 2/4: Patch SteamTools.exe ═══");
         try
         {
-            bool success = false;
+            int stResult = 0;
             await Task.Run(() =>
             {
                 var patcher = new Patcher(_steamPath, Log);
-                success = patcher.PatchSteamToolsExe();
+                stResult = patcher.PatchSteamToolsExe();
             });
 
             RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
-            Log(success ? "OK" : "FAILED");
-            if (!success) allSucceeded = false;
+            if (stResult == 0)
+                Log("Skipped (not installed)");
+            else if (stResult == 1)
+                Log("OK");
+            else
+            {
+                Log("FAILED");
+                allSucceeded = false;
+            }
         }
         catch (Exception ex)
         {
@@ -791,16 +798,18 @@ public partial class SetupPage : Page
 
         try
         {
-            bool success = false;
+            int stResult = 0;
             await Task.Run(() =>
             {
                 var patcher = new Patcher(_steamPath, Log);
-                success = patcher.PatchSteamToolsExe();
+                stResult = patcher.PatchSteamToolsExe();
             });
 
             RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
             Log("");
-            Log(success ? "SteamTools.exe patched." : "Patch failed — see log above.");
+            Log(stResult == 1 ? "SteamTools.exe patched."
+              : stResult == 0 ? "SteamTools.exe not found — nothing to patch."
+              : "Patch failed — see log above.");
         }
         catch (Exception ex)
         {

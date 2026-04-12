@@ -76,63 +76,65 @@
                 </StackPanel>
             </ui:CardControl>
 
-            <TextBlock Text="{res:Loc Settings_Sync}"
-                       FontSize="20" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,4" />
+            <StackPanel x:Name="SyncSection">
+                <TextBlock Text="{res:Loc Settings_Sync}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,4" />
 
-            <TextBlock Text="{res:Loc Settings_SyncHint}"
-                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,12" />
+                <TextBlock Text="{res:Loc Settings_SyncHint}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,12" />
 
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Settings_SyncAchievements}"
-                                   FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{res:Loc Settings_SyncAchievementsHint}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:ToggleSwitch x:Name="SyncAchievementsToggle"
-                                 Checked="SyncToggle_Changed"
-                                 Unchecked="SyncToggle_Changed" />
-            </ui:CardControl>
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_SyncAchievements}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_SyncAchievementsHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="SyncAchievementsToggle"
+                                     Checked="SyncToggle_Changed"
+                                     Unchecked="SyncToggle_Changed" />
+                </ui:CardControl>
 
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Settings_SyncPlaytime}"
-                                   FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{res:Loc Settings_SyncPlaytimeHint}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:ToggleSwitch x:Name="SyncPlaytimeToggle"
-                                 Checked="SyncToggle_Changed"
-                                 Unchecked="SyncToggle_Changed" />
-            </ui:CardControl>
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_SyncPlaytime}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_SyncPlaytimeHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="SyncPlaytimeToggle"
+                                     Checked="SyncToggle_Changed"
+                                     Unchecked="SyncToggle_Changed" />
+                </ui:CardControl>
 
-            <ui:CardControl Margin="0,0,0,32">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Settings_SyncLuas}"
-                                   FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{res:Loc Settings_SyncLuasHint}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:ToggleSwitch x:Name="SyncLuasToggle"
-                                 Checked="SyncToggle_Changed"
-                                 Unchecked="SyncToggle_Changed" />
-            </ui:CardControl>
+                <ui:CardControl Margin="0,0,0,32">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_SyncLuas}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_SyncLuasHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="SyncLuasToggle"
+                                     Checked="SyncToggle_Changed"
+                                     Unchecked="SyncToggle_Changed" />
+                </ui:CardControl>
+            </StackPanel>
 
             <TextBlock Text="{res:Loc Settings_DangerZone}"
                        FontSize="20" FontWeight="SemiBold"
