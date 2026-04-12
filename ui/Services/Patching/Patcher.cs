@@ -654,6 +654,7 @@ namespace CloudRedirect.Services.Patching
         // Returns: 1 = patched (or already patched), 0 = not found (skip), -1 = failed
         public int PatchSteamToolsExe()
         {
+            _verbose = true;
             var exe = FindSteamToolsExe();
             if (exe == null)
             {
@@ -663,6 +664,8 @@ namespace CloudRedirect.Services.Patching
 
             try
             {
+                KillSteamTools();
+
                 var data = ReadFileShared(exe);
                 if (data.Length < StExePatchOffset + 2)
                 {
@@ -687,16 +690,7 @@ namespace CloudRedirect.Services.Patching
                 Backup(exe);
                 data[StExePatchOffset] = StExePatched[0];
                 data[StExePatchOffset + 1] = StExePatched[1];
-
-                try
-                {
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
-                catch (IOException)
-                {
-                    KillSteamTools();
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
+                FileUtils.AtomicWriteAllBytes(exe, data);
 
                 Log("  SteamTools.exe: patched (DLL deploy disabled)");
                 return 1;
@@ -715,11 +709,14 @@ namespace CloudRedirect.Services.Patching
 
         public bool UnpatchSteamToolsExe()
         {
+            _verbose = true;
             var exe = FindSteamToolsExe();
             if (exe == null) return false;
 
             try
             {
+                KillSteamTools();
+
                 var data = ReadFileShared(exe);
                 if (data.Length < StExePatchOffset + 2) return false;
 
@@ -733,16 +730,7 @@ namespace CloudRedirect.Services.Patching
 
                 data[StExePatchOffset] = StExeOriginal[0];
                 data[StExePatchOffset + 1] = StExeOriginal[1];
-
-                try
-                {
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
-                catch (IOException)
-                {
-                    KillSteamTools();
-                    FileUtils.AtomicWriteAllBytes(exe, data);
-                }
+                FileUtils.AtomicWriteAllBytes(exe, data);
 
                 Log("  SteamTools.exe: restored to original");
                 return true;

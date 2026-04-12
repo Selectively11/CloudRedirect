@@ -555,7 +555,7 @@ public partial class SetupPage : Page
                 Log("OK");
             else
             {
-                Log("FAILED");
+                Log("FAILED — see detail above");
                 allSucceeded = false;
             }
         }
