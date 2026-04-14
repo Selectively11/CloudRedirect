@@ -84,7 +84,7 @@
     <value>Modo STFixer</value>
   </data>
   <data name="Choice_STFixer_Description" xml:space="preserve">
-    <value>Corrección de guardado Capcom, parches offline y fijación de manifiestos. Sin intercepción de guardado en la nube -- solo las correcciones que necesitas.</value>
+    <value>Correcciones principales. Hace que los juegos de Capcom guarden, habilita la activación de SteamTools cuando algunos servidores de SteamTools están caídos, habilita la fijación de manifiestos. No habilita Cloud Saves.</value>
   </data>
   <data name="Choice_STFixer_Features" xml:space="preserve">
     <value>Incluye: Corrección de guardado Capcom, parche offline SteamTools, despliegue de DLL, fijación de versión de manifiestos</value>
@@ -93,7 +93,7 @@
     <value>Modo Cloud Redirect</value>
   </data>
   <data name="Choice_CloudRedirect_Description" xml:space="preserve">
-    <value>Todo lo de STFixer, más intercepción de guardado en la nube. Redirige los guardados en la nube de apps lua al almacenamiento local y opcionalmente sincroniza con Google Drive o OneDrive.</value>
+    <value>Todo lo de ST Fixer, más redirección de Cloud Save. Redirige Steam Cloud para juegos lua a Google Drive/OneDrive/una carpeta local.</value>
   </data>
   <data name="Choice_CloudRedirect_Features" xml:space="preserve">
     <value>Incluye: Todas las funciones de STFixer + redirección de guardado en la nube, sincronización con proveedor de nube, gestión de apps, limpieza de contaminación</value>
