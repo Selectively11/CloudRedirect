@@ -31,7 +31,9 @@ inline bool AtomicWriteBinary(const std::string& path, const void* data, size_t 
     std::string tmpPath = path + ".tmp";
     std::ofstream f(tmpPath, std::ios::binary);
     if (!f) return false;
-    f.write(static_cast<const char*>(data), len);
+    if (len != 0) {
+        f.write(static_cast<const char*>(data), len);
+    }
     if (!f.good()) {
         f.close();
         std::error_code ec;

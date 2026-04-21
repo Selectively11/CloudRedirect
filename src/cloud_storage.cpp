@@ -3,6 +3,7 @@
 #include "local_disk_provider.h"
 #include "google_drive_provider.h"
 #include "onedrive_provider.h"
+#include "cloud_intercept.h"
 #include "file_util.h"
 #include "log.h"
 #include <fstream>
@@ -13,6 +14,16 @@
 #include <Windows.h>
 
 namespace CloudStorage {
+
+static std::string CanonicalizeInternalMetadataName(std::string_view filename) {
+    if (filename == CloudIntercept::kLegacyPlaytimeMetadataPath) {
+        return CloudIntercept::kPlaytimeMetadataPath;
+    }
+    if (filename == CloudIntercept::kLegacyStatsMetadataPath) {
+        return CloudIntercept::kStatsMetadataPath;
+    }
+    return std::string(filename);
+}
 
 
 static std::string                       g_localRoot;     // local cache root (e.g. "C:\Games\Steam\cloud_redirect\")
@@ -95,8 +106,19 @@ static std::unordered_map<std::string, std::list<WorkItem>::iterator> g_uploadIn
 static std::vector<std::thread>          g_workerThreads;
 static std::atomic<bool>                 g_workerRunning{false};
 static std::atomic<int>                  g_activeWorkers{0};
+static std::unordered_map<std::string, int> g_activePaths;
 static std::condition_variable           g_drainCV;       // signaled when a worker finishes an item
 static constexpr int                     WORKER_THREAD_COUNT = 4;
+
+static bool HasPendingWorkForPrefix(const std::string& prefix) {
+    for (const auto& item : g_workQueue) {
+        if (item.cloudPath.rfind(prefix, 0) == 0) return true;
+    }
+    for (const auto& [path, count] : g_activePaths) {
+        if (count > 0 && path.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+}
 
 
 // Cloud provider paths use forward slashes: "{accountId}/{appId}/blobs/{filename}"
@@ -156,6 +178,7 @@ static void WorkerLoop(int threadId) {
             }
             g_workQueue.pop_front();
             ++g_activeWorkers;
+            ++g_activePaths[item.cloudPath];
         }
 
         if (!g_provider) { --g_activeWorkers; g_drainCV.notify_all(); continue; }
@@ -199,7 +222,14 @@ static void WorkerLoop(int threadId) {
         else
             ++consecutiveFailures;
 
-        --g_activeWorkers;
+        {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            auto it = g_activePaths.find(item.cloudPath);
+            if (it != g_activePaths.end()) {
+                if (--it->second <= 0) g_activePaths.erase(it);
+            }
+            --g_activeWorkers;
+        }
         g_drainCV.notify_all();
     }
     LOG("[CloudStorage] Background worker %d stopped", threadId);
@@ -337,7 +367,9 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
         WorkItem wi;
         wi.type = WorkItem::Upload;
         wi.cloudPath = CloudBlobPath(accountId, appId, filename);
-        wi.data.assign(data, data + len);
+        if (len != 0) {
+            wi.data.assign(data, data + len);
+        }
         EnqueueWork(std::move(wi));
     }
 
@@ -671,7 +703,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
             // Extract filename from after "blobs/"
             auto blobsPos = fi.path.find("/blobs/");
             if (blobsPos == std::string::npos) continue;
-            std::string filename = fi.path.substr(blobsPos + 7);
+            std::string filename = CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7));
 
             std::string localBlobFile = LocalBlobPath(accountId, appId, filename);
             if (std::filesystem::exists(localBlobFile)) {
@@ -695,10 +727,9 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 // Without this, the changelist would report zero files on a fresh machine.
                 // Use WriteFileNoIncrement: CN was already set from the cloud response
                 // in step 1 (matching real Steam behavior where CN is set once, not per-file).
-                if (!data.empty()) {
-                    LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
-                                                      data.data(), data.size());
-                }
+                const uint8_t* localData = data.empty() ? nullptr : data.data();
+                LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                                  localData, data.size());
             } else {
                 LOG("[CloudStorage] SyncFromCloud app %u: FAILED to download blob %s",
                     appId, filename.c_str());
@@ -720,7 +751,7 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
         for (auto& fi : cloudBlobs) {
             auto blobsPos = fi.path.find("/blobs/");
             if (blobsPos == std::string::npos) continue;
-            cloudBlobNames.insert(fi.path.substr(blobsPos + 7));
+            cloudBlobNames.insert(CanonicalizeInternalMetadataName(fi.path.substr(blobsPos + 7)));
         }
 
         // Scan local storage directory for files to seed to cloud.
@@ -747,8 +778,6 @@ bool SyncFromCloud(uint32_t accountId, uint32_t appId) {
                 if (!f) continue;
                 std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
                                           std::istreambuf_iterator<char>());
-                if (data.empty()) continue;
-
                 WorkItem wi;
                 wi.type = WorkItem::Upload;
                 wi.cloudPath = CloudBlobPath(accountId, appId, rel);
@@ -852,6 +881,32 @@ void DrainQueue() {
     } else {
         LOG("[CloudStorage] DrainQueue: TIMEOUT after %lld ms, %zu queued, %d active",
             (long long)elapsed, g_workQueue.size(), g_activeWorkers.load());
+    }
+}
+
+void DrainQueueForApp(uint32_t accountId, uint32_t appId) {
+    if (!g_provider) return;
+
+    std::string prefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
+    LOG("[CloudStorage] DrainQueueForApp: waiting for %s", prefix.c_str());
+
+    constexpr int TIMEOUT_MS = 30000;
+    auto start = std::chrono::steady_clock::now();
+
+    std::unique_lock<std::mutex> lock(g_queueMutex);
+    bool completed = g_drainCV.wait_for(lock,
+        std::chrono::milliseconds(TIMEOUT_MS),
+        [&prefix] { return !HasPendingWorkForPrefix(prefix); });
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    if (completed) {
+        LOG("[CloudStorage] DrainQueueForApp: done for %s (%lld ms)",
+            prefix.c_str(), (long long)elapsed);
+    } else {
+        LOG("[CloudStorage] DrainQueueForApp: TIMEOUT for %s after %lld ms",
+            prefix.c_str(), (long long)elapsed);
     }
 }
 

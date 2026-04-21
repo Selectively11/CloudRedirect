@@ -1319,7 +1319,7 @@ static void UploadStatsOnExit(uint32_t appId) {
     }
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
-        "UserGameStats.bin", data.data(), data.size());
+        kStatsMetadataPath, data.data(), data.size());
     LOG("[Stats] Uploaded stats for app %u (%zu bytes, ok=%d)", appId, data.size(), ok);
 }
 
@@ -1395,15 +1395,30 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
 
     // Merge with existing cloud blob
     uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, "Playtime.bin");
+    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
     if (!ptData.empty()) {
         std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
         auto parsed = Json::Parse(blob);
         if (parsed.type == Json::Type::Object) {
             if (parsed.has("LastPlayed"))
-                cloudLastPlayed = strtoull(parsed["LastPlayed"].strVal.c_str(), nullptr, 10);
+                cloudLastPlayed = (parsed["LastPlayed"].type == Json::Type::Number)
+                    ? (parsed["LastPlayed"].number() > 0 ? (uint64_t)parsed["LastPlayed"].number() : 0)
+                    : strtoull(parsed["LastPlayed"].str().c_str(), nullptr, 10);
             if (parsed.has("Playtime"))
-                cloudPlaytime = strtoull(parsed["Playtime"].strVal.c_str(), nullptr, 10);
+                cloudPlaytime = (parsed["Playtime"].type == Json::Type::Number)
+                    ? (parsed["Playtime"].number() > 0 ? (uint64_t)parsed["Playtime"].number() : 0)
+                    : strtoull(parsed["Playtime"].str().c_str(), nullptr, 10);
+        } else {
+            std::istringstream blobStream(blob);
+            std::string blobLine;
+            while (std::getline(blobStream, blobLine)) {
+                size_t tab = blobLine.find('\t');
+                if (tab == std::string::npos) continue;
+                std::string key = blobLine.substr(0, tab);
+                std::string val = blobLine.substr(tab + 1);
+                if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
+                else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
+            }
         }
     }
 
@@ -1426,7 +1441,7 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
     std::string blobStr = Json::Stringify(obj);
 
     bool ok = CloudStorage::StoreBlob(accountId, appId,
-        "Playtime.bin", reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
+        kPlaytimeMetadataPath, reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
     LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, baseline=%llu min, vdf=%llu min, cloud=%llu min, total=%llu min, LastPlayed=%llu, ok=%d)",
         appId, trackedMinutes, info.vdfBaseline, vdfPlaytime, cloudPlaytime, mergedPlaytime, mergedLastPlayed, ok);
 }

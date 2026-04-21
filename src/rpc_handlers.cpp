@@ -22,25 +22,80 @@ namespace CloudIntercept {
 // per-app upload batch tracking
 static std::atomic<uint64_t> g_nextBatchId{1};
 
+static uint64_t MakeAppAccountKey(uint32_t accountId, uint32_t appId) {
+    return (static_cast<uint64_t>(accountId) << 32) | appId;
+}
+
+static bool RequireAccountId(const char* op, uint32_t appId, uint32_t& accountId) {
+    constexpr ULONGLONG timeoutMs = 5000;
+    constexpr DWORD sleepMs = 10;
+
+    ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    do {
+        accountId = GetAccountId();
+        if (accountId != 0) return true;
+        Sleep(sleepMs);
+    } while (GetTickCount64() < deadline);
+
+    LOG("[NS] %s app=%u timed out waiting for Steam account ID", op, appId);
+    return false;
+}
+
+static bool IsInternalMetadataFile(std::string_view cleanName) {
+    return cleanName == kPlaytimeMetadataPath || cleanName == kStatsMetadataPath;
+}
+
+static uint64_t ParsePlaytimeField(const Json::Value& value) {
+    if (value.type == Json::Type::Number) {
+        return value.number() > 0 ? static_cast<uint64_t>(value.number()) : 0;
+    }
+    if (value.type == Json::Type::String) {
+        return strtoull(value.str().c_str(), nullptr, 10);
+    }
+    return 0;
+}
+
+static void ParsePlaytimeBlob(const std::string& blob, uint64_t& lastPlayed, uint64_t& playtime) {
+    auto parsed = Json::Parse(blob);
+    if (parsed.type == Json::Type::Object) {
+        if (parsed.has("LastPlayed"))
+            lastPlayed = ParsePlaytimeField(parsed["LastPlayed"]);
+        if (parsed.has("Playtime"))
+            playtime = ParsePlaytimeField(parsed["Playtime"]);
+        return;
+    }
+
+    std::istringstream blobStream(blob);
+    std::string blobLine;
+    while (std::getline(blobStream, blobLine)) {
+        size_t tab = blobLine.find('\t');
+        if (tab == std::string::npos) continue;
+        std::string key = blobLine.substr(0, tab);
+        std::string val = blobLine.substr(tab + 1);
+        if (key == "LastPlayed") lastPlayed = strtoull(val.c_str(), nullptr, 10);
+        else if (key == "Playtime") playtime = strtoull(val.c_str(), nullptr, 10);
+    }
+}
+
 // per-app root tokens extracted from upload filenames (e.g., "%GameInstall%")
 // populated when HandleBeginBatch or HandleBeginFileUpload sees a %Token% prefix.
 // Used to know which tokens exist for an app; the changelist only presents each
 // file under the specific token it was uploaded with (tracked in g_fileTokens).
-static std::unordered_map<uint32_t, std::unordered_set<std::string>> g_appRootTokens;
+static std::unordered_map<uint64_t, std::unordered_set<std::string>> g_appRootTokens;
 static std::mutex g_rootTokenMutex;
 
 // per-app file-to-token mapping: which root token each file was uploaded under.
-// Key: appId -> { cleanName -> rootToken }
+// Key: (accountId, appId) -> { cleanName -> rootToken }
 // This prevents the changelist from duplicating files across ALL tokens, which
 // caused Steam's rootoverrides to see the cross-platform copy as stale and
 // issue spurious deletes (killing the only actual blob).
-static std::unordered_map<uint32_t, std::unordered_map<std::string, std::string>> g_fileTokens;
+static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_fileTokens;
 static std::mutex g_fileTokensMutex;
 
 // Track which apps had file-token changes during the current batch.
 // PersistFileTokens is deferred to HandleCompleteBatch instead of being
 // called per-file, eliminating redundant file_tokens.dat cloud uploads.
-static std::unordered_set<uint32_t> g_fileTokensDirtyApps;
+static std::unordered_set<uint64_t> g_fileTokensDirtyApps;
 static std::mutex g_fileTokensDirtyMutex;
 
 
@@ -77,25 +132,25 @@ static std::string ExtractRootToken(const std::string& filename) {
 // Capture a root token for an app from a filename containing a %Token% prefix.
 // Tracked at two levels: g_appRootTokens (all tokens per app) and g_fileTokens
 // (per-file -> token mapping for changelist). Returns true if new token added.
-static bool TryCaptureRootToken(uint32_t appId, const std::string& token) {
+static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::string& token) {
     if (token.empty()) return false;
 
     bool isNew = false;
     std::unordered_set<std::string> tokensCopy;
+    uint64_t key = MakeAppAccountKey(accountId, appId);
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-        auto& tokenSet = g_appRootTokens[appId];
+        auto& tokenSet = g_appRootTokens[key];
         auto result = tokenSet.insert(token);
         isNew = result.second;
         if (isNew) {
-            LOG("[NS-TOK] Captured root token for app %u: %s (now %zu tokens)",
-                appId, token.c_str(), tokenSet.size());
+            LOG("[NS-TOK] Captured root token for account %u app %u: %s (now %zu tokens)",
+                accountId, appId, token.c_str(), tokenSet.size());
             tokensCopy = tokenSet;  // copy under lock
         }
     }
     // Perform disk I/O + cloud upload outside the lock
     if (isNew) {
-        uint32_t accountId = GetAccountId();
         CloudStorage::SaveRootTokens(accountId, appId, tokensCopy);
     }
     return isNew;
@@ -103,17 +158,18 @@ static bool TryCaptureRootToken(uint32_t appId, const std::string& token) {
 
 // Record which root token a file was uploaded under.
 // Called from HandleCommitFileUpload after successful commit.
-static void RecordFileToken(uint32_t appId, const std::string& cleanName, const std::string& token) {
+static void RecordFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName, const std::string& token) {
     if (token.empty() || cleanName.empty()) return;
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-    g_fileTokens[appId][cleanName] = token;
-    LOG("[NS-FT] Recorded file token: app=%u file=%s token=%s", appId, cleanName.c_str(), token.c_str());
+    g_fileTokens[MakeAppAccountKey(accountId, appId)][cleanName] = token;
+    LOG("[NS-FT] Recorded file token: account=%u app=%u file=%s token=%s",
+        accountId, appId, cleanName.c_str(), token.c_str());
 }
 
 // Get the root token a file was uploaded under (empty if unknown).
-static std::string GetFileToken(uint32_t appId, const std::string& cleanName) {
+static std::string GetFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName) {
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-    auto appIt = g_fileTokens.find(appId);
+    auto appIt = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
     if (appIt == g_fileTokens.end()) return "";
     auto fileIt = appIt->second.find(cleanName);
     if (fileIt == appIt->second.end()) return "";
@@ -121,22 +177,21 @@ static std::string GetFileToken(uint32_t appId, const std::string& cleanName) {
 }
 
 // Remove a file's token mapping (called on delete).
-static void RemoveFileToken(uint32_t appId, const std::string& cleanName) {
+static void RemoveFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName) {
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-    auto appIt = g_fileTokens.find(appId);
+    auto appIt = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
     if (appIt != g_fileTokens.end()) {
         appIt->second.erase(cleanName);
-        LOG("[NS-FT] Removed file token: app=%u file=%s", appId, cleanName.c_str());
+        LOG("[NS-FT] Removed file token: account=%u app=%u file=%s", accountId, appId, cleanName.c_str());
     }
 }
 
 // Save in-memory file token map to disk and cloud for a given app.
-static void PersistFileTokens(uint32_t appId) {
-    uint32_t accountId = GetAccountId();
+static void PersistFileTokens(uint32_t accountId, uint32_t appId) {
     std::unordered_map<std::string, std::string> snapshot;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        auto it = g_fileTokens.find(appId);
+        auto it = g_fileTokens.find(MakeAppAccountKey(accountId, appId));
         if (it != g_fileTokens.end()) snapshot = it->second;
     }
     CloudStorage::SaveFileTokens(accountId, appId, snapshot);
@@ -145,9 +200,21 @@ static void PersistFileTokens(uint32_t appId) {
 // Mark an app's file tokens as needing persistence.
 // Actual persist is deferred to HandleCompleteBatch to avoid
 // redundant file_tokens.dat cloud uploads (one per file).
-static void MarkFileTokensDirty(uint32_t appId) {
+static void MarkFileTokensDirty(uint32_t accountId, uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_fileTokensDirtyMutex);
-    g_fileTokensDirtyApps.insert(appId);
+    g_fileTokensDirtyApps.insert(MakeAppAccountKey(accountId, appId));
+}
+
+static void InvalidateTokenCaches(uint32_t accountId, uint32_t appId) {
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    {
+        std::lock_guard<std::mutex> lock(g_rootTokenMutex);
+        g_appRootTokens.erase(key);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_fileTokensMutex);
+        g_fileTokens.erase(key);
+    }
 }
 
 
@@ -174,11 +241,25 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     auto* cnField = PB::FindField(reqBody, 2);
     uint64_t clientChangeNumber = cnField ? cnField->varintVal : 0;
 
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("GetAppFileChangelist", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, 0);
+        body.WriteVarint(3, 0);
+        body.WriteString(5, GetMachineName());
+        body.WriteVarint(6, 0);
+        return body;
+    }
+    uint64_t appKey = MakeAppAccountKey(accountId, appId);
     // Filenames from GetFileList are generated by filesystem::relative() against a controlled
     // app root directory, so they cannot contain path traversal sequences (e.g. "../").
     auto files = LocalStorage::GetFileList(accountId, appId);
     uint64_t serverChangeNumber = LocalStorage::GetChangeNumber(accountId, appId);
+
+    files.erase(std::remove_if(files.begin(), files.end(),
+        [](const LocalStorage::FileEntry& fe) {
+            return IsInternalMetadataFile(fe.filename);
+        }), files.end());
 
     LOG("[NS-CL] GetAppFileChangelist app=%u clientCN=%llu serverCN=%llu files=%zu",
         appId, clientChangeNumber, serverChangeNumber, files.size());
@@ -192,7 +273,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     std::unordered_set<std::string> rootTokens;
     {
         std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-        auto it = g_appRootTokens.find(appId);
+        auto it = g_appRootTokens.find(appKey);
         if (it != g_appRootTokens.end()) {
             rootTokens = it->second;
         }
@@ -202,7 +283,7 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
         rootTokens = CloudStorage::LoadRootTokens(accountId, appId);
         if (!rootTokens.empty()) {
             std::lock_guard<std::mutex> lock(g_rootTokenMutex);
-            g_appRootTokens[appId] = rootTokens;
+            g_appRootTokens[appKey] = rootTokens;
         }
     }
     // If still empty, use empty string (no root token prefix -- legacy behavior)
@@ -220,15 +301,15 @@ PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& req
     std::unordered_map<std::string, std::string> fileTokenSnapshot;
     {
         std::lock_guard<std::mutex> lock(g_fileTokensMutex);
-        if (g_fileTokens.find(appId) == g_fileTokens.end()) {
+        if (g_fileTokens.find(appKey) == g_fileTokens.end()) {
             auto loaded = CloudStorage::LoadFileTokens(accountId, appId);
             if (!loaded.empty()) {
-                g_fileTokens[appId] = std::move(loaded);
-                LOG("[NS-CL] Loaded %zu file-token mappings for app %u",
-                    g_fileTokens[appId].size(), appId);
+                g_fileTokens[appKey] = std::move(loaded);
+                LOG("[NS-CL] Loaded %zu file-token mappings for account %u app %u",
+                    g_fileTokens[appKey].size(), accountId, appId);
             }
         }
-        auto it = g_fileTokens.find(appId);
+        auto it = g_fileTokens.find(appKey);
         if (it != g_fileTokens.end()) {
             fileTokenSnapshot = it->second;
         }
@@ -654,16 +735,21 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
     RecordLaunchTime(appId);
     // Pull latest data from cloud provider (if active) before game starts.
     // This downloads CN, root tokens, metadata, and any missing blobs.
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("SignalAppLaunchIntent", appId, accountId)) {
+        PB::Writer body;
+        return body;
+    }
     if (CloudStorage::IsCloudActive()) {
         LOG("[NS] Syncing app %u from cloud (%s) before launch...",
             appId, CloudStorage::ProviderName());
         bool hadNewer = CloudStorage::SyncFromCloud(accountId, appId);
+        InvalidateTokenCaches(accountId, appId);
         LOG("[NS] Cloud sync complete for app %u (hadNewer=%d)", appId, hadNewer);
 
         // Merge achievement/stats data from cloud with local
         if (SyncAchievementsEnabled()) {
-            auto statsData = CloudStorage::RetrieveBlob(accountId, appId, "UserGameStats.bin");
+            auto statsData = CloudStorage::RetrieveBlob(accountId, appId, kStatsMetadataPath);
             if (!statsData.empty()) {
                 MergeStatsFile(appId, accountId, statsData);
             }
@@ -671,31 +757,11 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
 
         // Restore playtime from cloud
         if (SyncPlaytimeEnabled()) {
-            auto ptData = CloudStorage::RetrieveBlob(accountId, appId, "Playtime.bin");
+            auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
             if (!ptData.empty()) {
-                // Parse the blob: tab-separated key/value pairs, one per line
                 std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
                 uint64_t cloudLastPlayed = 0, cloudPlaytime = 0;
-
-                // Try JSON format first, fall back to legacy tab-separated
-                auto parsed = Json::Parse(blob);
-                if (parsed.type == Json::Type::Object) {
-                    if (parsed.has("LastPlayed"))
-                        cloudLastPlayed = strtoull(parsed["LastPlayed"].strVal.c_str(), nullptr, 10);
-                    if (parsed.has("Playtime"))
-                        cloudPlaytime = strtoull(parsed["Playtime"].strVal.c_str(), nullptr, 10);
-                } else {
-                    std::istringstream blobStream(blob);
-                    std::string blobLine;
-                    while (std::getline(blobStream, blobLine)) {
-                        size_t tab = blobLine.find('\t');
-                        if (tab == std::string::npos) continue;
-                        std::string key = blobLine.substr(0, tab);
-                        std::string val = blobLine.substr(tab + 1);
-                        if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
-                        else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
-                    }
-                }
+                ParsePlaytimeBlob(blob, cloudLastPlayed, cloudPlaytime);
 
                 if (cloudLastPlayed == 0 && cloudPlaytime == 0) {
                     LOG("[Playtime] Cloud blob empty/invalid for app %u, skipping merge", appId);
@@ -781,8 +847,20 @@ PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqB
 
 // ClientGetAppQuotaUsage
 PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBody) {
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientGetAppQuotaUsage", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, 0);
+        body.WriteVarint(2, 0);
+        body.WriteVarint(3, 10000);
+        body.WriteVarint(4, 1073741824ULL);
+        return body;
+    }
     auto files = LocalStorage::GetFileList(accountId, appId);
+    files.erase(std::remove_if(files.begin(), files.end(),
+        [](const LocalStorage::FileEntry& fe) {
+            return IsInternalMetadataFile(fe.filename);
+        }), files.end());
     uint64_t totalBytes = 0;
     for (auto& f : files) totalBytes += f.rawSize;
 
@@ -799,7 +877,13 @@ PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBod
 // BeginAppUploadBatch
 PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
     uint64_t batchId = g_nextBatchId.fetch_add(1);
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("BeginAppUploadBatch", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, batchId);
+        body.WriteVarint(4, 0);
+        return body;
+    }
     uint64_t changeNumber = LocalStorage::GetChangeNumber(accountId, appId);
 
     // log files to upload/delete and capture root tokens from filenames
@@ -808,13 +892,13 @@ PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBod
         if (f.fieldNum == 3 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   upload: %s", name.c_str());
-            TryCaptureRootToken(appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
             ++uploadCount;
         }
         if (f.fieldNum == 4 && f.wireType == PB::LengthDelimited) {
             std::string name(reinterpret_cast<const char*>(f.data), f.dataLen);
             LOG("[NS-BATCH]   delete: %s", name.c_str());
-            TryCaptureRootToken(appId, ExtractRootToken(name));
+            TryCaptureRootToken(accountId, appId, ExtractRootToken(name));
             ++deleteCount;
         }
     }
@@ -848,15 +932,20 @@ PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     }
 
     uint16_t port = HttpServer::GetPort();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientBeginFileUpload", appId, accountId)) {
+        return PB::Writer();
+    }
     std::string urlHost = "127.0.0.1:" + std::to_string(port);
     std::string rootToken = ExtractRootToken(filename);
     std::string cleanName = StripRootToken(filename);
-    std::string urlPath = "/upload/" + std::to_string(appId) + "/" + HttpUtil::UrlEncode(cleanName, true);
+    std::string urlPath = "/upload/" + std::to_string(accountId) + "/" + std::to_string(appId)
+        + "/" + HttpUtil::UrlEncode(cleanName, true);
 
     // Remember the root token for this app (used for default fallback in changelist).
     // The per-file token mapping (g_fileTokens) is set in HandleCommitFileUpload
     // after the upload succeeds.
-    TryCaptureRootToken(appId, rootToken);
+    TryCaptureRootToken(accountId, appId, rootToken);
 
     LOG("[NS-UP] BeginFileUpload app=%u file=%s (clean=%s) size=%llu rawSize=%llu -> %s%s",
         appId, filename.c_str(), cleanName.c_str(), fileSize, rawFileSize, urlHost.c_str(), urlPath.c_str());
@@ -919,11 +1008,16 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
 
     std::string cleanName = StripRootToken(filename);
     bool committed = false;
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientCommitFileUpload", appId, accountId)) {
+        PB::Writer body;
+        body.WriteVarint(1, 0);
+        return body;
+    }
     if (transferSucceeded) {
         // the file was PUT to HttpServer's blob store already -- verify it exists
-        if (HttpServer::HasBlob(appId, cleanName)) {
+        if (HttpServer::HasBlob(accountId, appId, cleanName)) {
             committed = true;
-            uint32_t accountId = GetAccountId();
 
             // Read blob for cloud upload. No SHA re-verification: Steam sent the
             // data over localhost TCP and told us the transfer succeeded. Re-reading
@@ -932,17 +1026,19 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // The real Steam server also doesn't re-verify SHA at commit time; it
             // trusts the uploaded data. Removing this check fixes spurious commit
             // rejections for volatile files (e.g. Player.log).
-            auto blobData = HttpServer::ReadBlob(appId, cleanName);
+            auto blobData = HttpServer::ReadBlob(accountId, appId, cleanName);
             LOG("[NS-UP]   committed: %s (%zu bytes)", cleanName.c_str(), blobData.size());
 
-            if (!blobData.empty()) {
+            {
                 // CloudStorage::StoreBlob writes to the local cache (same dir as
-                // LocalStorage) and increments the change number so Steam sees
-                // serverCN > clientCN on next restart and processes the file list.
-
-                // Push blob to cloud provider (async -- enqueues upload if provider active)
-                CloudStorage::StoreBlob(accountId, appId, cleanName,
-                    blobData.data(), blobData.size());
+                // LocalStorage) and enqueues a cloud upload. Empty files are valid
+                // and must be preserved as zero-byte blobs.
+                const uint8_t* blobPtr = blobData.empty() ? nullptr : blobData.data();
+                if (!CloudStorage::StoreBlob(accountId, appId, cleanName,
+                        blobPtr, blobData.size())) {
+                    LOG("[NS-UP]   ERROR: failed to store blob for %s", cleanName.c_str());
+                    committed = false;
+                }
             }
 
             // Record which root token this file was uploaded under.
@@ -950,8 +1046,8 @@ PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& 
             // preventing Steam's rootoverrides from seeing cross-platform
             // duplicates and issuing spurious deletes.
             std::string rootToken = ExtractRootToken(filename);
-            RecordFileToken(appId, cleanName, rootToken);
-            MarkFileTokensDirty(appId);
+            RecordFileToken(accountId, appId, cleanName, rootToken);
+            MarkFileTokensDirty(accountId, appId);
         } else {
             LOG("[NS-UP]   WARNING: blob not found after PUT for %s (clean=%s)", filename.c_str(), cleanName.c_str());
         }
@@ -969,20 +1065,25 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
     // Persist file tokens once per batch (deferred from per-file commits/deletes).
     // This replaces N redundant file_tokens.dat cloud uploads with a single one.
     {
-        std::unordered_set<uint32_t> dirtyApps;
+        std::unordered_set<uint64_t> dirtyApps;
         {
             std::lock_guard<std::mutex> lock(g_fileTokensDirtyMutex);
             dirtyApps.swap(g_fileTokensDirtyApps);
         }
-        for (uint32_t dirty : dirtyApps) {
-            PersistFileTokens(dirty);
+        for (uint64_t dirty : dirtyApps) {
+            uint32_t dirtyAccountId = static_cast<uint32_t>(dirty >> 32);
+            uint32_t dirtyAppId = static_cast<uint32_t>(dirty & 0xFFFFFFFFu);
+            PersistFileTokens(dirtyAccountId, dirtyAppId);
         }
     }
 
     // Increment CN once per batch (not per file) to match real Steam behavior.
     // This prevents the CN from climbing rapidly and causing conflict dialogs
     // when Steam restarts with clientCN=0.
-    uint32_t accountId = GetAccountId();
+    uint32_t accountId = 0;
+    if (!RequireAccountId("CompleteAppUploadBatchBlocking", appId, accountId)) {
+        return PB::Writer();
+    }
     uint64_t newCN = LocalStorage::IncrementChangeNumber(accountId, appId);
     LOG("[NS] CompleteBatch app=%u CN=%llu", appId, newCN);
 
@@ -990,7 +1091,7 @@ PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& req
     CloudStorage::PushCNToCloud(accountId, appId, newCN);
 
     // Drain cloud sync queue -- ensure all blobs are pushed before we tell Steam "batch done"
-    CloudStorage::DrainQueue();
+    CloudStorage::DrainQueueForApp(accountId, appId);
     PB::Writer body; // empty response
     return body;
 }
@@ -1004,13 +1105,17 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
             filename.assign(reinterpret_cast<const char*>(f.data), f.dataLen);
     }
 
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientFileDownload", appId, accountId)) {
+        return PB::Writer();
+    }
     uint16_t port = HttpServer::GetPort();
     std::string urlHost = "127.0.0.1:" + std::to_string(port);
     std::string cleanName = StripRootToken(filename);
-    std::string urlPath = "/download/" + std::to_string(appId) + "/" + HttpUtil::UrlEncode(cleanName, true);
+    std::string urlPath = "/download/" + std::to_string(accountId) + "/" + std::to_string(appId)
+        + "/" + HttpUtil::UrlEncode(cleanName, true);
 
     // get file metadata from local storage (single-file lookup, no full dir scan)
-    uint32_t accountId = GetAccountId();
     uint64_t fileSize = 0;    uint64_t timestamp = 0;
     std::vector<uint8_t> sha;
 
@@ -1023,7 +1128,7 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
 
     // fall back to blob store if not in local storage metadata
     if (fileSize == 0) {
-        fileSize = HttpServer::GetBlobSize(appId, cleanName);
+        fileSize = HttpServer::GetBlobSize(accountId, appId, cleanName);
     }
 
     LOG("[NS-DL] FileDownload app=%u file=%s (clean=%s) size=%llu -> %s%s",
@@ -1054,21 +1159,28 @@ PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBod
             filename.assign(reinterpret_cast<const char*>(f.data), f.dataLen);
     }
 
-    std::string rootToken = ExtractRootToken(filename);
     std::string cleanName = StripRootToken(filename);
     LOG("[NS] DeleteFile app=%u file=%s (clean=%s)", appId, filename.c_str(), cleanName.c_str());
 
-    uint32_t accountId = GetAccountId();
+    if (IsInternalMetadataFile(cleanName)) {
+        LOG("[NS] DeleteFile app=%u ignored for internal metadata %s", appId, cleanName.c_str());
+        return PB::Writer();
+    }
+
+    uint32_t accountId = 0;
+    if (!RequireAccountId("ClientDeleteFile", appId, accountId)) {
+        return PB::Writer();
+    }
     // CloudStorage::DeleteBlob removes from local cache and cloud, and
     // increments the change number so Steam re-downloads the file list.
-    HttpServer::DeleteBlob(appId, cleanName);
+    HttpServer::DeleteBlob(accountId, appId, cleanName);
 
     // Delete from cloud provider (async -- enqueues delete if provider active)
     CloudStorage::DeleteBlob(accountId, appId, cleanName);
 
     // Remove file-token mapping and mark dirty (persist deferred to CompleteBatch)
-    RemoveFileToken(appId, cleanName);
-    MarkFileTokensDirty(appId);
+    RemoveFileToken(accountId, appId, cleanName);
+    MarkFileTokensDirty(accountId, appId);
 
     PB::Writer body; // empty response
     return body;

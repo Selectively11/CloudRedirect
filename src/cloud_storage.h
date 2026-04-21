@@ -73,6 +73,9 @@ void SyncAllFromCloud(uint32_t accountId);
 // Block until all pending background operations complete.
 void DrainQueue();
 
+// Block until pending background operations for one app complete.
+void DrainQueueForApp(uint32_t accountId, uint32_t appId);
+
 // Push the change number to the cloud provider (uploads cn.dat).
 void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
 

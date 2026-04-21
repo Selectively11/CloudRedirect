@@ -20,20 +20,20 @@ void Stop();
 // get the port the server bound to (0 if not started)
 uint16_t GetPort();
 
-// check if a blob exists for the given app/filename
-bool HasBlob(uint32_t appId, const std::string& filename);
+// check if a blob exists for the given account/app/filename
+bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename);
 
 // get the size of a stored blob (compressed size on disk). returns 0 if not found.
-uint64_t GetBlobSize(uint32_t appId, const std::string& filename);
+uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& filename);
 
 // read a stored blob into memory. returns empty vector if not found.
-std::vector<uint8_t> ReadBlob(uint32_t appId, const std::string& filename);
+std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::string& filename);
 
 // delete a stored blob. returns true if it existed and was removed.
-bool DeleteBlob(uint32_t appId, const std::string& filename);
+bool DeleteBlob(uint32_t accountId, uint32_t appId, const std::string& filename);
 
 // write a blob directly (used for seeding/migration, not normal upload path).
-bool WriteBlob(uint32_t appId, const std::string& filename,
+bool WriteBlob(uint32_t accountId, uint32_t appId, const std::string& filename,
                const uint8_t* data, size_t len);
 
 } // namespace HttpServer

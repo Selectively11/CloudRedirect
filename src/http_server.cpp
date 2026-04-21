@@ -111,8 +111,8 @@ static void PruneClientThreads() {
 }
 
 // get the filesystem path for a blob: <blobRoot>/<accountId>/<appId>/<filename>
-static std::string BlobPath(uint32_t appId, const std::string& filename) {
-    std::string path = g_blobRoot + std::to_string(g_accountId.load()) + "\\" +
+static std::string BlobPath(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    std::string path = g_blobRoot + std::to_string(accountId) + "\\" +
                        std::to_string(appId) + "\\" + filename;
     for (auto& c : path) { if (c == '/') c = '\\'; }
     return path;
@@ -123,17 +123,24 @@ static std::string BlobPath(uint32_t appId, const std::string& filename) {
 // returns true if parse succeeded.
 // rejects path traversal attempts (e.g. "../" sequences after URL decoding).
 static bool ParseBlobPath(const char* path, const char* prefix,
-                          uint32_t& appId, std::string& filename) {
+                          uint32_t& accountId, uint32_t& appId, std::string& filename) {
     size_t prefixLen = strlen(prefix);
     if (strncmp(path, prefix, prefixLen) != 0) return false;
 
     const char* rest = path + prefixLen;
-    // parse appId (digits until next '/')
+    // parse accountId (digits until next '/')
     char* slash = nullptr;
     unsigned long id = strtoul(rest, &slash, 10);
     if (!slash || *slash != '/' || id == 0) return false;
 
+    accountId = (uint32_t)id;
+    rest = slash + 1;
+
+    // parse appId (digits until next '/')
+    id = strtoul(rest, &slash, 10);
+    if (!slash || *slash != '/' || id == 0) return false;
     appId = (uint32_t)id;
+
     std::string rawPath(slash + 1);
     // Strip query string (e.g. ?raw=12345)
     auto qpos = rawPath.find('?');
@@ -142,7 +149,7 @@ static bool ParseBlobPath(const char* path, const char* prefix,
     if (filename.empty()) return false;
 
     // Validate: resolved blob path must stay within the blob root.
-    std::string blobPath = BlobPath(appId, filename);
+    std::string blobPath = BlobPath(accountId, appId, filename);
     if (!FileUtil::IsPathWithin(g_blobRoot, blobPath)) {
         LOG("[HTTP] BLOCKED path traversal: %s (root=%s)", path, g_blobRoot.c_str());
         return false;
@@ -222,10 +229,11 @@ static void HandleClient(SOCKET client) {
             return;
         }
 
+        uint32_t accountId = 0;
         uint32_t appId = 0;
         std::string filename;
 
-        if (ParseBlobPath(path, "/upload/", appId, filename)) {
+        if (ParseBlobPath(path, "/upload/", accountId, appId, filename)) {
             // read the full body
             std::vector<uint8_t> bodyData;
             bodyData.reserve(contentLength > 0 ? (size_t)contentLength : 4096);
@@ -272,7 +280,7 @@ static void HandleClient(SOCKET client) {
             }
 
             // write blob to disk
-            std::string blobPath = BlobPath(appId, filename);
+            std::string blobPath = BlobPath(accountId, appId, filename);
             auto parent = std::filesystem::path(blobPath).parent_path();
             std::filesystem::create_directories(parent);
 
@@ -321,11 +329,12 @@ static void HandleClient(SOCKET client) {
         }
     } else if (_stricmp(method, "GET") == 0) {
         // GET /download/<appId>/<filename>
+        uint32_t accountId = 0;
         uint32_t appId = 0;
         std::string filename;
 
-        if (ParseBlobPath(path, "/download/", appId, filename)) {
-            std::string blobPath = BlobPath(appId, filename);
+        if (ParseBlobPath(path, "/download/", accountId, appId, filename)) {
+            std::string blobPath = BlobPath(accountId, appId, filename);
             std::ifstream f(blobPath, std::ios::binary | std::ios::ate);
 
             if (f) {
@@ -614,22 +623,22 @@ static bool ValidateBlobPath(const std::string& blobPath) {
     return true;
 }
 
-bool HasBlob(uint32_t appId, const std::string& filename) {
-    std::string path = BlobPath(appId, filename);
+bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     return std::filesystem::exists(path);
 }
 
-uint64_t GetBlobSize(uint32_t appId, const std::string& filename) {
-    std::string path = BlobPath(appId, filename);
+uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return 0;
     std::error_code ec;
     auto sz = std::filesystem::file_size(path, ec);
     return ec ? 0 : (uint64_t)sz;
 }
 
-std::vector<uint8_t> ReadBlob(uint32_t appId, const std::string& filename) {
-    std::string path = BlobPath(appId, filename);
+std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return {};
     std::ifstream f(path, std::ios::binary);
     if (!f) return {};
@@ -639,16 +648,16 @@ std::vector<uint8_t> ReadBlob(uint32_t appId, const std::string& filename) {
     );
 }
 
-bool DeleteBlob(uint32_t appId, const std::string& filename) {
-    std::string path = BlobPath(appId, filename);
+bool DeleteBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
+    std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     std::error_code ec;
     return std::filesystem::remove(path, ec);
 }
 
-bool WriteBlob(uint32_t appId, const std::string& filename,
+bool WriteBlob(uint32_t accountId, uint32_t appId, const std::string& filename,
                const uint8_t* data, size_t len) {
-    std::string path = BlobPath(appId, filename);
+    std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     auto parent = std::filesystem::path(path).parent_path();
     std::filesystem::create_directories(parent);
