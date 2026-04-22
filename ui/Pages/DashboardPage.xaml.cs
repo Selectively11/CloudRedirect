@@ -171,6 +171,11 @@ public partial class DashboardPage : Page
             return;
         }
 
+        if (!Services.SteamDetector.IsSteamRunning())
+        {
+            return;
+        }
+
         var confirmed = await Services.Dialog.ConfirmAsync(S.Get("Dashboard_RestartSteam"),
             S.Get("Dashboard_RestartSteamPrompt"));
 
