@@ -148,11 +148,8 @@ namespace CloudRedirect.Services.Patching
 
         public static readonly PatternPatch[] CorePatchDefs =
         {
-            // Core1: NOP download call (E8 -> B8)
-            // Anchored on: mov rcx,[rsp+disp8] + lea rdx,[rbp+disp8] + call/mov eax +
-            //   test eax,eax + jz near + cmp r12d,1
+            // Core1: NOP download call (E8 -> B8). 26 bytes, 15 fixed; unique in .text.
             // 48 8B 4C 24 ?? 48 8D 55 ?? [E8|B8] ?? ?? ?? ?? 85 C0 0F 84 ?? ?? ?? ?? 41 83 FC 01
-            // 26 bytes, 15 fixed. Unique in .text.
             new PatternPatch
             {
                 Name = "Core1 (download call)",
@@ -181,11 +178,8 @@ namespace CloudRedirect.Services.Patching
                     return opcode == 0xB8;
                 },
             },
-            // Core2: jz -> jmp (hash check bypass)
-            // Anchored on: mov rdx,r13 + lea rcx,[rbp+disp8] + call + test eax,eax +
-            //   [jz|jmp] short + xor edi,edi + jmp near
+            // Core2: jz -> jmp (hash check bypass). 19 bytes, 12 fixed; relative to Core1.
             // 49 8B D5 48 8D 4D ?? E8 ?? ?? ?? ?? 85 C0 [74|EB] ?? 33 FF E9
-            // 19 bytes, 12 fixed. Unique in .text. Relative to Core1.
             new PatternPatch
             {
                 Name = "Core2 (hash check jz)",
@@ -218,10 +212,8 @@ namespace CloudRedirect.Services.Patching
 
         public static readonly PatternPatch[] PayloadP123Defs =
         {
-            // P1: cloud rewrite jz -> nop jmp
-            // Anchored on: mov r15d,[rip+disp32] (44 8B 3D) loading the cloud spoof target id,
-            // followed by test eax,eax / jnz near / test r15d,r15d / jz near (patch site).
-            // 44 8B 3D is a distinctive opcode (r15d global load), giving 15 fixed anchor bytes.
+            // P1: cloud rewrite jz -> nop jmp. Anchor: 44 8B 3D (r15d global load) +
+            // test/jnz/test/jz; 15 fixed anchor bytes.
             new PatternPatch
             {
                 Name = "P1 (cloud rewrite skip)",
@@ -240,15 +232,13 @@ namespace CloudRedirect.Services.Patching
                 WildcardStart = 2, WildcardLen = 4,
                 Validator = (data, hit) =>
                 {
-                    // bytes 18-19 must be either 0F 84 (original jz) or 90 E9 (patched nop+jmp)
+                    // 18-19: 0F 84 (orig jz) or 90 E9 (patched nop+jmp).
                     return (data[hit + 18] == 0x0F && data[hit + 19] == 0x84) ||
                            (data[hit + 18] == 0x90 && data[hit + 19] == 0xE9);
                 },
             },
-            // P2: zero proxy appid load
-            // Anchored on: mov rsi,rax + mov r8,rdi + mov r15,[rsp+disp8] + mov rdx,r15 +
-            //   mov rcx,rax + call + [mov ecx,[rip+X] | xor ecx,ecx] + lea rdx,[rsi+rdi] +
-            //   cmp rcx,80h (varint threshold). 28 fixed bytes across 39-byte span.
+            // P2: zero proxy appid load. 28 fixed bytes across 39-byte span,
+            // ending in lea rdx,[rsi+rdi] + cmp rcx,80h (varint threshold).
             new PatternPatch
             {
                 Name = "P2 (proxy appid zero)",
@@ -281,7 +271,7 @@ namespace CloudRedirect.Services.Patching
                 RelativeToPatchIndex = 0, RelativeStart = 0, RelativeEnd = 0x500,
                 Validator = (data, hit) =>
                 {
-                    // patch site at hit+22: must be 8B 0D (original) or 31 C9 (patched)
+                    // hit+22: 8B 0D (orig) or 31 C9 (patched).
                     return (data[hit + 22] == 0x8B && data[hit + 23] == 0x0D) ||
                            (data[hit + 22] == 0x31 && data[hit + 23] == 0xC9);
                 },
@@ -319,11 +309,8 @@ namespace CloudRedirect.Services.Patching
 
         public static readonly PatternPatch[] PayloadSetupDefs =
         {
-            // P4: force activation flag to 1
-            // Anchored on: test r8,r8 + jz + call strcmp + test eax,eax + jnz +
-            //   mov [flag],1 + jmp $+5 (obfuscator bridge) + jmp merge + mov [flag],0
-            // The null-check-before-strcmp pattern + E9 00 00 00 00 bridge is very distinctive.
-            // 21 fixed bytes across 46-byte span.
+            // P4: force activation flag to 1. 21 fixed bytes across 46-byte span;
+            // null-check-before-strcmp + E9 obfuscator bridge is the distinctive cue.
             new PatternPatch
             {
                 Name = "P4 (activation flag)",
@@ -360,10 +347,8 @@ namespace CloudRedirect.Services.Patching
                     return val == 0x00 || val == 0x01;
                 },
             },
-            // P5: skip GetCookie retry
-            // Anchored on: two consecutive movq reg,xmm instructions (66 48 0F 7E C7 / CE),
-            // followed by lea rcx,[rbp+disp8] + call + test rsi,rsi + jnz.
-            // The paired movq-from-xmm sequence is extremely distinctive -- 18 fixed anchor bytes.
+            // P5: skip GetCookie retry. Anchor: paired movq reg,xmm (66 48 0F 7E C7/CE);
+            // 18 fixed anchor bytes.
             new PatternPatch
             {
                 Name = "P5 (GetCookie retry skip)",
@@ -411,10 +396,8 @@ namespace CloudRedirect.Services.Patching
         // ── CloudRedirect hook finders ──────────────────────────────────
 
         /// <summary>
-        /// Find the SendPkt function (sub_18000DB50) by scanning for its
-        /// distinctive alloca_probe setup: B8 00 11 00 00 E8 (mov eax, 1100h; call)
-        /// then walking back to the function prologue.
-        /// Returns the file offset of the function's first byte, or -1.
+        /// Locate SendPkt (sub_18000DB50) via its alloca_probe setup
+        /// (B8 00 11 00 00 E8) and walk back to the prologue. Returns -1 if absent.
         /// </summary>
         public static int FindSendPktFunction(byte[] data, int textStart, int textEnd)
         {
@@ -426,11 +409,11 @@ namespace CloudRedirect.Services.Patching
                 int hit = ScanForBytes(data, pos, textEnd, needle);
                 if (hit < 0) break;
 
-                // the prologue is 0x18 bytes before: push regs + lea rbp
+                // Prologue is 0x18 bytes back (push regs + lea rbp).
                 int funcStart = hit - 0x18;
                 if (funcStart < textStart) { pos = hit + 1; continue; }
 
-                // validate prologue: 48 89 5C 24 20 (original) or E9 xx xx xx xx (already patched jmp)
+                // Validate: 48 89 5C 24 20 (orig) or E9 xx xx xx xx (already patched).
                 if ((data[funcStart] == 0x48 && data[funcStart + 1] == 0x89 &&
                      data[funcStart + 2] == 0x5C && data[funcStart + 3] == 0x24 &&
                      data[funcStart + 4] == 0x20) ||
@@ -444,11 +427,7 @@ namespace CloudRedirect.Services.Patching
             return -1;
         }
 
-        /// <summary>
-        /// Find a code cave (zero-filled region) in an executable PE section
-        /// where VirtualSize > RawSize or at the end of raw data.
-        /// Returns the file offset of the cave, or -1.
-        /// </summary>
+        /// <summary>Find a zero-filled code cave in an executable PE section, or -1.</summary>
         public static int FindCodeCave(byte[] data, PeSection[] sections, int requiredSize)
         {
             for (int s = 0; s < sections.Length; s++)
@@ -460,7 +439,6 @@ namespace CloudRedirect.Services.Patching
                 if (rawEnd > data.Length) rawEnd = data.Length;
                 int rawStart = (int)sec.RawOffset;
 
-                // scan backward from end of raw data for zero-filled region
                 int zeroRun = 0;
                 for (int i = rawEnd - 1; i >= rawStart; i--)
                 {
@@ -472,7 +450,6 @@ namespace CloudRedirect.Services.Patching
 
                 if (zeroRun >= requiredSize)
                 {
-                    // place cave at the start of the zero run, aligned to leave some margin
                     int caveStart = rawEnd - zeroRun;
                     return caveStart;
                 }
@@ -481,21 +458,13 @@ namespace CloudRedirect.Services.Patching
         }
 
         /// <summary>
-        /// Find the recvPktGlobal RVA by locating the LEA that references SendPkt's
-        /// address in the hook installer, then finding the nearby MOV that stores
-        /// the RecvPkt vtable pointer.
-        ///
-        /// Sequence in the hook installer:
-        ///   lea rcx, sub_SendPkt       (48 8D 0D xx xx xx xx)  -- references our SendPkt
-        ///   ... (obfuscated junk, VirtualProtect, etc.) ...
-        ///   mov cs:qword_recvPkt, rcx  (48 89 0D xx xx xx xx)  -- stores RecvPkt ptr
-        ///
-        /// Returns the RVA of the recvPktGlobal, or -1.
+        /// Locate recvPktGlobal: find `lea rcx, SendPkt` in the hook installer,
+        /// then the following `mov cs:qword, rcx` that stores RecvPkt. Returns -1 on miss.
         /// </summary>
         public static int FindRecvPktGlobalRva(byte[] data, PeSection[] sections,
             int sendPktRva, int searchStart, int searchEnd)
         {
-            // scan for 48 8D 0D xx xx xx xx where target = sendPktRva
+            // 48 8D 0D xx xx xx xx with target == sendPktRva.
             for (int i = searchStart; i < searchEnd - 7; i++)
             {
                 if (data[i] != 0x48 || data[i + 1] != 0x8D || data[i + 2] != 0x0D)
@@ -508,9 +477,7 @@ namespace CloudRedirect.Services.Patching
                 int targetRva = instrRva + 7 + rel;
                 if (targetRva != sendPktRva) continue;
 
-                // found the lea rcx, sub_SendPkt
-                // now search forward for 48 89 0D (mov cs:qword, rcx) which
-                // stores recvPktGlobal -- the first such instruction after the lea
+                // Forward-scan for `mov cs:qword, rcx` (48 89 0D).
                 for (int j = i + 7; j < Math.Min(i + 0x100, searchEnd) - 7; j++)
                 {
                     if (data[j] == 0x48 && data[j + 1] == 0x89 && data[j + 2] == 0x0D)

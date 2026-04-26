@@ -19,42 +19,80 @@ public partial class CloudProviderPage : Page
     public CloudProviderPage()
     {
         InitializeComponent();
-        Loaded += (_, _) => LoadCurrentConfig();
+        Loaded += async (_, _) =>
+        {
+            try { await LoadCurrentConfigAsync(); }
+            catch { }
+        };
+        // Cancel in-flight OAuth when the user navigates away mid-auth.
+        // Without this, the loopback HTTP listener in OAuthService keeps
+        // running until the user closes their browser tab (or forever if
+        // they don't), the auth state machine continuation keeps `this`
+        // alive via the closure, and the per-message log callback
+        // (msg => Dispatcher.BeginInvoke(...)) keeps marshaling work onto
+        // a detached LogOutput. Cancelling _authCts triggers the existing
+        // finally block in SignIn_Click which disposes _oauth + _authCts
+        // and resets the UI state.
+        Unloaded += (_, _) =>
+        {
+            if (_isAuthenticating)
+                _authCts?.Cancel();
+        };
     }
 
-    private void LoadCurrentConfig()
-    {
-        var config = Services.SteamDetector.ReadConfig();
-        if (config == null)
-        {
-            AuthStatus.Text = S.Get("CloudProvider_NoConfigFound");
-            ProviderCombo.SelectedIndex = 3; // Local only
-            SetDefaultLocalPath();
-            return;
-        }
+    /// <summary>
+    /// Snapshot of everything LoadCurrentConfigAsync gathers off the UI
+    /// thread. Pre-resolving the default local path here means the
+    /// dispatcher continuation never has to fall back to a synchronous
+    /// FindSteamPath() (registry + file probes) on Loaded.
+    /// </summary>
+    private sealed record LoadedConfigSnapshot(
+        Services.CloudConfig? Config,
+        string DefaultLocalPath,
+        string PathTextOverride,
+        Services.TokenStatus? TokenStatus);
 
+    // M14: Move SteamDetector.ReadConfig + FindSteamPath + OAuth token
+    // status check off the UI thread. Loaded used to call them
+    // synchronously; on a slow disk or stalled DPAPI prompt that froze
+    // the dispatcher long enough for the page to render with a blank
+    // status line. We now resolve the snapshot in Task.Run and apply it
+    // to controls in the dispatcher continuation, mirroring
+    // DashboardPage.LoadStatusAsync.
+    private async Task LoadCurrentConfigAsync()
+    {
+        // _loading must be true the entire time we touch ProviderCombo /
+        // TokenPathBox so the SelectionChanged handler doesn't fire
+        // user-gesture branches against a partially-initialized UI. Set
+        // it on the UI thread before launching the I/O.
+        _loading = true;
         try
         {
-            _loading = true;
-
-            for (int i = 0; i < ProviderCombo.Items.Count; i++)
+            var snapshot = await Task.Run(() =>
             {
-                if (ProviderCombo.Items[i] is ComboBoxItem item && item.Tag as string == config.Provider)
+                var config = Services.SteamDetector.ReadConfig();
+                var steamPath = Services.SteamDetector.FindSteamPath();
+                var defaultLocal = steamPath != null
+                    ? Path.Combine(steamPath, "localcloud")
+                    : "";
+
+                string pathOverride = "";
+                if (config != null)
                 {
-                    ProviderCombo.SelectedIndex = i;
-                    break;
+                    if (config.TokenPath != null)
+                        pathOverride = config.TokenPath;
+                    else if (config.SyncPath != null)
+                        pathOverride = config.SyncPath;
                 }
-            }
 
-            if (config.TokenPath != null)
-                TokenPathBox.Text = config.TokenPath;
-            else if (config.SyncPath != null)
-                TokenPathBox.Text = config.SyncPath;
-            else if (config.IsLocal || config.IsFolder)
-                SetDefaultLocalPath();
+                Services.TokenStatus? tokenStatus = null;
+                if (config?.TokenPath != null)
+                    tokenStatus = Services.OAuthService.CheckTokenStatus(config.TokenPath);
 
-            UpdateProviderUI();
-            UpdateAuthStatus();
+                return new LoadedConfigSnapshot(config, defaultLocal, pathOverride, tokenStatus);
+            });
+
+            ApplyLoadedSnapshot(snapshot);
         }
         catch (Exception ex)
         {
@@ -66,8 +104,45 @@ public partial class CloudProviderPage : Page
         }
     }
 
+    private void ApplyLoadedSnapshot(LoadedConfigSnapshot snap)
+    {
+        if (snap.Config == null)
+        {
+            AuthStatus.Text = S.Get("CloudProvider_NoConfigFound");
+            ProviderCombo.SelectedIndex = 3; // Local only
+            if (!string.IsNullOrEmpty(snap.DefaultLocalPath))
+                TokenPathBox.Text = snap.DefaultLocalPath;
+            return;
+        }
+
+        for (int i = 0; i < ProviderCombo.Items.Count; i++)
+        {
+            if (ProviderCombo.Items[i] is ComboBoxItem item && item.Tag as string == snap.Config.Provider)
+            {
+                ProviderCombo.SelectedIndex = i;
+                break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(snap.PathTextOverride))
+            TokenPathBox.Text = snap.PathTextOverride;
+        else if (snap.Config.IsLocal || snap.Config.IsFolder)
+        {
+            if (!string.IsNullOrEmpty(snap.DefaultLocalPath))
+                TokenPathBox.Text = snap.DefaultLocalPath;
+        }
+
+        UpdateProviderUI();
+        // Use the pre-resolved token status so the dispatcher path never
+        // re-enters CheckTokenStatus synchronously on Loaded. Only reach
+        // the slow path on later user gestures (Provider change, Browse).
+        UpdateAuthStatus(snap.TokenStatus);
+    }
+
     /// <summary>
     /// Sets the path box to the default local storage path: &lt;steamdir&gt;/localcloud.
+    /// Synchronous fallback for non-Loaded callers (BrowseToken, provider switch);
+    /// the Loaded path uses the pre-resolved snapshot instead.
     /// </summary>
     private void SetDefaultLocalPath()
     {
@@ -258,7 +333,7 @@ public partial class CloudProviderPage : Page
     private void CancelAuth_Click(object sender, RoutedEventArgs e)
     {
         _authCts?.Cancel();
-        // Don't dispose _oauth here — the SignIn_Click finally block handles cleanup
+        // Don't dispose _oauth here -- the SignIn_Click finally block handles cleanup
         // after the async operation observes cancellation.
     }
 
@@ -318,7 +393,7 @@ public partial class CloudProviderPage : Page
         return "local";
     }
 
-    private void UpdateAuthStatus()
+    private void UpdateAuthStatus(Services.TokenStatus? preCheckedStatus = null)
     {
         if (ProviderCombo.SelectedItem is not ComboBoxItem item) return;
 
@@ -364,7 +439,13 @@ public partial class CloudProviderPage : Page
             return;
         }
 
-        var status = Services.OAuthService.CheckTokenStatus(tokenPath);
+        // Caller (the Loaded path) may pass a status that was already
+        // resolved off the UI thread; otherwise we hit DPAPI + file I/O
+        // synchronously. The user-gesture callers (Browse, provider
+        // switch, post-OAuth) accept the synchronous cost in exchange
+        // for keeping their flow simple -- those events are already
+        // tied to a click and the user has paid attention.
+        var status = preCheckedStatus ?? Services.OAuthService.CheckTokenStatus(tokenPath);
         AuthStatus.Text = status.Message;
         AuthIcon.Symbol = status.IsAuthenticated
             ? Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24

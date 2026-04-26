@@ -69,7 +69,12 @@ int64_t Iso8601ToUnix(const std::string& iso) {
     if (matched != 6) return 0;
     tm.tm_year -= 1900;
     tm.tm_mon -= 1;
-    return (int64_t)_mkgmtime(&tm);
+    // _mkgmtime -> -1 on unrepresentable input. A signed -> unsigned cast in
+    // callers would become UINT64_MAX and break tombstone mtime gating, so
+    // normalize to 0 here ("missing mtime").
+    time_t t = _mkgmtime(&tm);
+    if (t == static_cast<time_t>(-1)) return 0;
+    return static_cast<int64_t>(t);
 }
 
 std::string UnixToIso8601(int64_t ts) {

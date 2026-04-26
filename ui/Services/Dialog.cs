@@ -32,13 +32,17 @@ public static class Dialog
 
     public static Task ShowWarningAsync(string title, string message)
     {
+        // CloseButtonText defaults to "Close" in WPF-UI's MessageBox, so
+        // setting only PrimaryButtonText leaves a redundant second button
+        // that does the same thing as the primary "OK". Suppress it.
         var box = new MessageBox
         {
             Title = title,
             Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
             PrimaryButtonText = S.Get("Dialog_OK"),
             PrimaryButtonAppearance = ControlAppearance.Caution,
-            IsPrimaryButtonEnabled = true
+            IsPrimaryButtonEnabled = true,
+            CloseButtonText = string.Empty
         };
         return box.ShowDialogAsync();
     }
@@ -51,7 +55,8 @@ public static class Dialog
             Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
             PrimaryButtonText = S.Get("Dialog_OK"),
             PrimaryButtonAppearance = ControlAppearance.Danger,
-            IsPrimaryButtonEnabled = true
+            IsPrimaryButtonEnabled = true,
+            CloseButtonText = string.Empty
         };
         return box.ShowDialogAsync();
     }

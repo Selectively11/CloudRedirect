@@ -9,9 +9,12 @@
 #include "cloud_storage.h"
 #include "cloud_provider.h"
 #include "json.h"
+#include "legacy_metadata_cleanup.h"
+#include "file_util.h"
 #include "miniz.h"
 #include "miniz_zip.h"
 #include <shlobj.h>
+#include <psapi.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <atomic>
@@ -25,6 +28,9 @@
 #include <limits>
 
 namespace CloudIntercept {
+
+static void ShutdownImpl();
+static void InstallExitProcessHook();
 
 static constexpr uint32_t PROTO_FLAG = 0x80000000;
 static constexpr uint32_t EMSG_MASK = 0x7FFFFFFF;
@@ -106,7 +112,7 @@ static constexpr uint32_t CCM_OFF_CONN_CONTEXT       = 1688;  // connection cont
 // CBaseUser layout
 static constexpr uint32_t USER_OFF_CCMINTERFACE     = 72;     // CCMInterface embedded at CBaseUser+0x48
 
-// Function pointer types for BRouteMsgToJob bypass (Approach D — legacy)
+// Function pointer types for BRouteMsgToJob bypass (Approach D -- legacy)
 // sub_138D02530: wraps CNetPacket into CProtoBufNetPacket (parses protobuf header)
 using WrapPacketFn = void*(__fastcall*)(CNetPacket* pkt, int addRef);
 // sub_138D0EB50: routes a wrapped packet to the waiting job
@@ -114,7 +120,7 @@ using BRouteMsgToJobFn = char(__fastcall*)(void* jobMgr, void* connCtx,
                                            void* wrappedPkt, void* routeInfo, int validateFrom);
 // sub_1380EB160: releases a wrapped packet (decrements refcount)
 using ReleaseWrappedFn = void*(__fastcall*)(void* wrappedPkt);
-// sub_138DCA830: refcount increment helper — takes ptr-to-ptr, reads inner ptr, does InterlockedIncrement64
+// sub_138DCA830: refcount increment helper -- takes ptr-to-ptr, reads inner ptr, does InterlockedIncrement64
 using RefCountHelperFn = void*(__fastcall*)(volatile int64_t** ppCounter);
 
 // Function pointer types for service-method vtable hook (Approach E)
@@ -134,25 +140,25 @@ using ServiceMethodSlot4Fn = bool(__fastcall*)(void* thisptr, const char* method
 //   [rsp+28h] = flags (int64_t*, typically NULL)
 using ServiceMethodSlot5Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                 void* request, void* response, int64_t* flags);
-// Slot 7 signature: notification direct — sends fire-and-forget notification
+// Slot 7 signature: notification direct -- sends fire-and-forget notification
 //   rcx = this (CClientUnifiedServiceTransport*)
 //   rdx = methodName (const char*)
 //   r8  = bodyObj (raw protobuf body object, NOT wrapped in CProtoBufMsg)
-//   r9  = flags (int*, can be NULL) — {routing_appid, ?, ?, ?}
+//   r9  = flags (int*, can be NULL) -- {routing_appid, ?, ?, ?}
 using NotificationSlot7Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                void* bodyObj, int* flags);
-// Slot 8 signature: notification wrapper — extracts body from CProtoBufMsg, calls slot 7
+// Slot 8 signature: notification wrapper -- extracts body from CProtoBufMsg, calls slot 7
 //   rcx = this (CClientUnifiedServiceTransport*)
 //   rdx = methodName (const char*)
 //   r8  = request CProtoBufMsg* (body at +48, header at +40)
 using NotificationSlot8Fn = bool(__fastcall*)(void* thisptr, const char* methodName,
                                                void* request);
-// sub_138BD0210: ParseFromArray — fills a protobuf message object from raw bytes
+// sub_138BD0210: ParseFromArray -- fills a protobuf message object from raw bytes
 //   rcx = protobuf message object (body at CProtoBufMsg+48)
 //   rdx = raw data pointer
 //   r8  = raw data size (as int)
 using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int size);
-// sub_138BD07E0: SerializeToArray — writes protobuf message to a buffer
+// sub_138BD07E0: SerializeToArray -- writes protobuf message to a buffer
 //   rcx = protobuf message object (body at CProtoBufMsg+48)
 //   rdx = output buffer pointer
 //   returns pointer past last written byte
@@ -208,11 +214,32 @@ static LONG WINAPI CrashExcFilter(PEXCEPTION_POINTERS pExc) {
             s_crashAccessType = 99;
             s_crashAccessAddr = 0;
         }
-        // Identify which module contains the crashing instruction
+        // Identify the faulting module. Wide + UTF-8 narrow keeps non-ASCII
+        // Steam install paths legible in the log.
         s_crashModuleName[0] = '\0';
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery((void*)s_crashFaultAddr, &mbi, sizeof(mbi)) && mbi.AllocationBase) {
-            GetModuleFileNameA((HMODULE)mbi.AllocationBase, s_crashModuleName, sizeof(s_crashModuleName));
+            wchar_t wbuf[MAX_PATH];
+            DWORD wlen = GetModuleFileNameW((HMODULE)mbi.AllocationBase, wbuf, MAX_PATH);
+            if (wlen > 0 && wlen < MAX_PATH) {
+                // Fall back to the leaf name on overflow; UTF-8 of a wide
+                // path can exceed our buffer for non-ASCII install paths.
+                int n = WideCharToMultiByte(CP_UTF8, 0, wbuf, (int)wlen,
+                                            s_crashModuleName,
+                                            (int)sizeof(s_crashModuleName) - 1,
+                                            nullptr, nullptr);
+                if (n > 0) {
+                    s_crashModuleName[n] = '\0';
+                } else {
+                    const wchar_t* leaf = wcsrchr(wbuf, L'\\');
+                    leaf = leaf ? leaf + 1 : wbuf;
+                    int leafN = WideCharToMultiByte(CP_UTF8, 0, leaf, -1,
+                                                    s_crashModuleName,
+                                                    (int)sizeof(s_crashModuleName),
+                                                    nullptr, nullptr);
+                    if (leafN <= 0) s_crashModuleName[0] = '\0';
+                }
+            }
         }
     }
     return EXCEPTION_EXECUTE_HANDLER;
@@ -223,6 +250,7 @@ static uintptr_t g_payloadBase = 0;
 static uintptr_t g_steamClientBase = 0;           // steamclient64.dll base address
 static std::string g_steamPath;
 static RecvPktFn g_originalRecvPkt = nullptr;
+static void** g_recvPktSlot = nullptr;            // address of the patched RecvPkt vtable slot, for shutdown restore
 static void* g_cmInterface = nullptr;             // real CCMInterface* (found via CSteamEngine)
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<bool> g_cmInterfaceFound{false}; // whether we've found the real CCMInterface
@@ -260,9 +288,7 @@ static std::atomic<bool> g_syncAchievements{false};
 static std::atomic<bool> g_syncPlaytime{false};
 static std::atomic<bool> g_syncLuas{false};
 
-// Master toggle for cloud save redirection (default ON for backward compat).
-// When false, the DLL still loads for manifest pinning and other patches,
-// but skips HTTP server, local/cloud storage, and packet interception.
+// Cloud-redirect master toggle (default ON). When OFF the DLL still applies manifest pinning + patches but skips HTTP/storage/interception.
 static std::atomic<bool> g_cloudRedirectEnabled{true};
 
 // Manifest pinning (depot -> manifest override)
@@ -297,7 +323,7 @@ static ParseFromArrayFn g_parseFromArray = nullptr;          // sub_138BD0210
 static SerializeToArrayFn g_serializeToArray = nullptr;      // sub_138BD07E0
 static std::atomic<bool> g_vtableHookInstalled{false};
 
-// Hook reference counter — incremented on entry to each hook, decremented on exit.
+// Hook reference counter -- incremented on entry to each hook, decremented on exit.
 // Shutdown() spins until this reaches zero before restoring vtable pointers.
 static std::atomic<int> g_hookRefCount{0};
 
@@ -416,7 +442,9 @@ void RecordLaunchTime(uint32_t appId) {
     if (accountId) {
         std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
             + "\\config\\localconfig.vdf";
-        HANDLE hFile = CreateFileA(vdfPath.c_str(), GENERIC_READ,
+        // Wide-API: CreateFileA's ACP narrowing breaks non-ASCII profile paths (Cyrillic/CJK), which would silently skip the playtime baseline.
+        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
+        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile != INVALID_HANDLE_VALUE) {
@@ -686,7 +714,7 @@ static void TryFindCCMInterface() {
     void* ccm = FindCCMInterface();
     if (!ccm) return;
 
-    // Atomically claim the "first finder" role — only one thread proceeds.
+    // Atomically claim the "first finder" role -- only one thread proceeds.
     // This prevents double vtable patching which would overwrite the saved
     // original slot pointers with our hook addresses, causing crash on restore.
     bool expected = false;
@@ -699,7 +727,7 @@ static void TryFindCCMInterface() {
 
     LOG("[CCM] Found real CCMInterface: %p", ccm);
 
-    // Log details for debugging (wrapped in SEH — raw pointer dereferences for diagnostics only)
+    // Log details for debugging (wrapped in SEH -- raw pointer dereferences for diagnostics only)
     __try {
         uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
         uintptr_t engine = *pEngineGlobal;
@@ -707,7 +735,7 @@ static void TryFindCCMInterface() {
 
         LOG("[CCM]   CSteamEngine: %p (global at sc+0x%X)", (void*)engine, SC_RVA_GLOBAL_ENGINE);
         LOG("[CCM]   Global user handle: %u", handle);
-        LOG("[CCM]   Vtable: %p (RVA=0x%llX) — MATCHES CCMInterface::vftable",
+        LOG("[CCM]   Vtable: %p (RVA=0x%llX) -- MATCHES CCMInterface::vftable",
             (void*)(*(uintptr_t*)ccm), (uint64_t)SC_RVA_CCMINTERFACE_VT);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[CCM] WARNING: exception reading engine globals (code=0x%lX)", GetExceptionCode());
@@ -741,14 +769,7 @@ static void TryFindCCMInterface() {
     }
 }
 
-// Response injection via BRouteMsgToJob (Approach D — legacy fallback)
-//
-// Queue + inject on network thread via RecvPktMonitorHook.
-// BRouteMsgToJob → Coroutine_Continue requires the thread-local coroutine manager
-// (only valid on Steam's network thread where CJob coroutines are created).
-//
-// Flow: OnSendPkt intercepts → builds response → pushes to queue →
-//       RecvPktMonitorHook (network thread) drains queue → WrapPacket → BRouteMsgToJob
+// Approach D response injection: OnSendPkt enqueues; RecvPktMonitorHook drains on the network thread (valid Coroutine_Continue TLS).
 
 struct QueuedInjection {
     uint8_t* pktBuf;       // VirtualAlloc'd packet data (kept in ring for deferred free)
@@ -759,9 +780,7 @@ struct QueuedInjection {
     char methodName[128];
 };
 
-// Lock ordering: g_injectMutex must NOT be held when calling ProcessQueuedInjection,
-// because ProcessQueuedInjection -> InjectResponse -> enqueue can reacquire g_injectMutex.
-// Always acquire g_injectMutex only for short-lived queue push/pop operations.
+// Lock order: drop g_injectMutex before ProcessQueuedInjection (the call chain re-acquires via InjectResponse->enqueue).
 static std::queue<QueuedInjection*> g_injectQueue;
 static std::mutex g_injectMutex;
 
@@ -778,9 +797,9 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         return;
     }
 
-    // Wrap CNetPacket into CProtoBufNetPacket
-    // On success, WrapPacket takes ownership of pktStruct via refcount.
-    // On failure, we must free pktStruct ourselves.
+    // Wrap CNetPacket into CProtoBufNetPacket.
+    // WrapPacket takes ownership of pktStruct via refcount on success;
+    // caller frees pktStruct on failure.
     void* wrappedPkt = nullptr;
     __try {
         wrappedPkt = g_wrapPacket(ctx->pktStruct, 1);
@@ -793,19 +812,19 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     }
 
     if (!wrappedPkt) {
-        LOG("[INJECT] WrapPacket returned NULL — packet validation failed");
+        LOG("[INJECT] WrapPacket returned NULL -- packet validation failed");
         VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
         free(ctx->pktStruct);
         delete ctx;
         return;
     }
 
-    // Diagnostic: verify wrapped packet
-    uintptr_t wrappedVtable = *(uintptr_t*)wrappedPkt;
+    // SEH-wrap vtable + slot reads on the Steam-internal wrapped packet.
     using GetEMsgFn = unsigned int(__fastcall*)(void* self);
-    GetEMsgFn getEMsg = (GetEMsgFn)(*(uintptr_t*)(wrappedVtable + 0x40));
     unsigned int wrappedEmsg = 0;
     __try {
+        uintptr_t wrappedVtable = *(uintptr_t*)wrappedPkt;
+        GetEMsgFn getEMsg = (GetEMsgFn)(*(uintptr_t*)(wrappedVtable + 0x40));
         wrappedEmsg = getEMsg(wrappedPkt);
         LOG("[INJECT]   wrappedPkt=%p GetEMsg()=%u (expected %u)",
             wrappedPkt, wrappedEmsg, (unsigned)EMSG_SERVICE_METHOD_RESP);
@@ -856,7 +875,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
             uint32_t jobState = cjobPtr ? *(uint32_t*)((uintptr_t)cjobPtr + 0x84) : 999;
             LOG("[INJECT]   FindJob slot=%d cjob=%p state=%u", jobSlot, cjobPtr, jobState);
         } else {
-            LOG("[INJECT]   FindJob: job not found (slot=%d) — may have timed out", jobSlot);
+            LOG("[INJECT]   FindJob: job not found (slot=%d) -- may have timed out", jobSlot);
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[INJECT]   EXCEPTION in FindJob: code=0x%08X", GetExceptionCode());
@@ -871,7 +890,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         }
     }
 
-    // Call BRouteMsgToJob (on network thread — coroutine manager is valid here)
+    // Call BRouteMsgToJob (on network thread -- coroutine manager is valid here)
     char result = 0;
     s_crashFaultAddr = 0;
     s_crashAccessAddr = 0;
@@ -899,6 +918,26 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     delete ctx;
 }
 
+// Free queued injections at shutdown without dispatching them; the
+// receive thread is gone so BRouteMsgToJob is unsafe.
+static void DrainInjectQueueOnShutdown() {
+    std::vector<QueuedInjection*> leftovers;
+    {
+        std::lock_guard<std::mutex> lock(g_injectMutex);
+        while (!g_injectQueue.empty()) {
+            leftovers.push_back(g_injectQueue.front());
+            g_injectQueue.pop();
+        }
+    }
+    if (leftovers.empty()) return;
+    LOG("Shutdown: dropping %zu undelivered injection(s)", leftovers.size());
+    for (auto* ctx : leftovers) {
+        if (ctx->pktBuf) VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
+        if (ctx->pktStruct) free(ctx->pktStruct);
+        delete ctx;
+    }
+}
+
 static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
                            int32_t eresult, const PB::Writer& body) {
     if (!g_wrapPacket || !g_bRouteMsgToJob || !g_releaseWrapped || !g_cmInterface) {
@@ -918,9 +957,7 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
 
     auto pktData = BuildPacket(EMSG_SERVICE_METHOD_RESP, hdr, body);
 
-    // Allocate packet data buffer — use VirtualAlloc for page-aligned memory.
-    // This buffer is referenced by the CNetPacket and must outlive RecvPkt processing.
-    // We manage lifetime via a ring buffer for deferred free.
+    // VirtualAlloc for page-aligned packet buffer; CNetPacket holds the pointer past RecvPkt, so a ring buffer defers free.
     uint8_t* pktBuf = (uint8_t*)VirtualAlloc(nullptr, pktData.size(),
         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pktBuf) {
@@ -929,14 +966,9 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     }
     memcpy(pktBuf, pktData.data(), pktData.size());
 
-    // pktBuf lifetime is managed by ProcessQueuedInjection — freed after BRouteMsgToJob completes.
+    // pktBuf lifetime is managed by ProcessQueuedInjection -- freed after BRouteMsgToJob completes.
 
-    // Allocate CNetPacket via malloc. Steam's CNetPacket::Release (sub_138E5A220)
-    // puts it into a pool for reuse when refcount hits 0 — it does NOT call free().
-    // To prevent pool corruption from mixing allocators, we start m_cRef at 1.
-    // AddRef in WrapPacket makes it 2, and Release brings it to 1 (never 0),
-    // so it's never returned to the pool. This is an intentional per-injection leak
-    // of ~64 bytes to avoid heap corruption.
+    // CNetPacket::Release pools rather than frees; m_cRef=1 keeps refcount > 0 forever and our malloc'd packet out of the pool (~64 B/inject leak).
     auto* fakePkt = (CNetPacket*)malloc(sizeof(CNetPacket));
     if (!fakePkt) {
         LOG("[INJECT] malloc failed for CNetPacket");
@@ -951,14 +983,8 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     LOG("[INJECT] Deferring %s response: eresult=%d body=%zu bytes pkt=%zu bytes",
         methodName.c_str(), eresult, body.Size(), pktData.size());
 
-    // Queue for deferred injection on the network thread.
-    // We're inside SendPkt, called by BYieldingSendMessageAndGetReply.
-    // The code cave returns 'mov al, 1; ret' AFTER we return, telling BYielding
-    // "packet sent OK, now yield for response." We can't inject now because
-    // the job hasn't entered yield state yet. Instead, we push to a queue and
-    // RecvPktMonitorHook (on the network thread) drains it on the next real packet.
-    // This also solves the coroutine thread-affinity problem — BRouteMsgToJob
-    // must run on the network thread where the coroutine manager lives.
+    // Queue for the network thread to drain: BRouteMsgToJob requires the
+    // network thread's coroutine manager, and the job hasn't yielded yet.
     auto* ctx = new QueuedInjection();
     ctx->pktBuf = pktBuf;
     ctx->pktSize = (uint32_t)pktData.size();
@@ -1105,13 +1131,9 @@ static std::optional<PB::Writer> DispatchCloudRpc(
     return std::nullopt;
 }
 
-// Vtable hook for slot 4 — replaces CClientUnifiedServiceTransport::vtable[4]
-// This is the "direct" request/response function that slot 5 normally wraps.
-// RPCs like ClientBeginFileUpload, ClientCommitFileUpload, ClientFileDownload call
-// slot 4 directly, bypassing slot 5. By hooking slot 4, we can handle these
-// synchronously — no deferred injection queue, no timing delays.
-//
-// Slot 4 takes raw protobuf body objects (NOT wrapped in CProtoBufMsg).
+// Vtable slot 4 hook: direct request/response (no CProtoBufMsg wrapper).
+// ClientBeginFileUpload / ClientCommitFileUpload / ClientFileDownload all
+// call slot 4 directly, so handling here avoids the slot-5 deferred queue.
 // Flags layout (int[68]): [0]=routing_appid, [1]=mode, [2]=error_code, [3]=eresult, [4..67]=error_message
 static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* methodName,
                                                  void* requestBody, void* responseBody, int* flags) {
@@ -1165,13 +1187,13 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
-    // === NAMESPACE APP: handle locally, synchronously ===
+    // NAMESPACE APP: handle locally, synchronously
     LOG("[Slot4] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[Slot4-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
 #endif
 
-    // Capture SteamID if not yet captured (from SendPkt or slot 5 — but just in case)
+    // Capture SteamID if not yet captured (from SendPkt or slot 5 -- but just in case)
     // (SteamID should already be captured from earlier RPCs)
 
     // Call the appropriate handler to build a response body
@@ -1198,20 +1220,20 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
 
     // Flags layout (from IDA decompilation of sub_138914710 / sub_138914A30):
     //   [0-1]: __int64 (routing/request context, leave untouched)
-    //   [2]:   int  — transport success flag (1 = OK, 0 = transport failure → triggers k_EResultTimeout=16)
-    //   [3]:   int  — eresult from response header (1 = k_EResultOK)
-    //   [4+]:  char[] — error message string (null-terminated)
+    //   [2]:   int  -- transport success flag (1 = OK, 0 = transport failure → triggers k_EResultTimeout=16)
+    //   [3]:   int  -- eresult from response header (1 = k_EResultOK)
+    //   [4+]:  char[] -- error message string (null-terminated)
     if (flags) {
         flags[2] = 1;  // transport_success = true (MUST be 1, or caller returns k_EResultTimeout!)
         flags[3] = 1;  // eresult = k_EResultOK
         flags[4] = 0;  // error_message = "" (null terminator)
     }
 
-    LOG("[Slot4] %s handled successfully (synchronous)", methodName);
+    LOG("[Slot4] %s handled synchronously", methodName);
     return true;
 }
 
-// The actual vtable hook function — replaces CClientUnifiedServiceTransport::vtable[5]
+// The actual vtable hook function -- replaces CClientUnifiedServiceTransport::vtable[5]
 static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                                            void* request, void* response, int64_t* flags) {
     HookGuard guard;
@@ -1227,7 +1249,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     }
 
     // Check if it's a Cloud RPC we handle (zero-alloc check via strcmp)
-    // Request/response RPCs only — notifications go through slots 7/8
+    // Request/response RPCs only -- notifications go through slots 7/8
     bool isCloudRpc = (strcmp(methodName, RPC_GET_CHANGELIST) == 0 || strcmp(methodName, RPC_BEGIN_BATCH) == 0 ||
                        strcmp(methodName, RPC_BEGIN_UPLOAD) == 0 || strcmp(methodName, RPC_COMMIT_UPLOAD) == 0 ||
                        strcmp(methodName, RPC_FILE_DOWNLOAD) == 0 || strcmp(methodName, RPC_DELETE_FILE) == 0 ||
@@ -1272,12 +1294,12 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     }
 
     if (!isNamespace) {
-        // Not a namespace app — pass through to real Steam servers
+        // Not a namespace app -- pass through to real Steam servers
         LOG("[VtHook] %s app=%u: not namespace, passing through", methodName, appId);
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
-    // === NAMESPACE APP: handle locally ===
+    // NAMESPACE APP: handle locally
     LOG("[VtHook] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[VtHook-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
@@ -1287,9 +1309,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     if (g_steamId.load() == 0) {
         void* reqHeader = *(void**)((uintptr_t)request + 40);
         if (reqHeader) {
-            // The header is a CMsgProtoBufHeader object. We can try to read
-            // the steamid from its serialized form, or directly from its fields.
-            // For now, try to serialize and parse the header too.
+            // CMsgProtoBufHeader: serialize-and-parse to extract steamid.
             auto hdrBytes = SerializeBodyToBytes(reqHeader);
             if (!hdrBytes.empty()) {
                 auto hdrFields = PB::Parse(hdrBytes.data(), hdrBytes.size());
@@ -1336,15 +1356,9 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         }
     }
 
-    // Set eresult=1 (success) in the response header
-    // The response header is at CProtoBufMsg+40, it's a CMsgProtoBufHeader object.
-    // From the slot 5 decompilation, after slot 4 returns:
-    //   v9 = *(a4 + 40) → response header
-    //   *(v9 + 16) |= 0x20000000  → set has_bits for eresult field
-    //   *(v9 + 216) = eresult value
-    //   *(v9 + 16) |= 2           → set has_bits for target_job_name
-    //   *(v9 + 16) |= 0x40000000  → set has_bits for error_message
-    //   *(v9 + 220) = error_code
+    // Set eresult=1 in the response header (CProtoBufMsg+40):
+    //   has_bits |= 0x20000000 (eresult), |= 2 (target_job_name), |= 0x40000000 (error_message)
+    //   header+216 = eresult, header+220 = error_code
     void* respHeader = *(void**)((uintptr_t)response + 40);
     if (respHeader) {
         if (!SEH_WriteResponseHeader(respHeader)) {
@@ -1352,21 +1366,13 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         }
         LOG("[VtHook] Set response header: eresult=1, error=0");
     } else {
-        // Response body was already written above -- we can't undo that.
-        // Without a valid header, the caller won't see eresult=1 and may
-        // misinterpret the response. Passing through to g_originalSlot5 would
-        // make a real network call with our already-modified response buffer,
-        // risking corruption. Return transport failure instead (H1).
+        // Body already written; passing through would corrupt the real
+        // network response. Return transport failure instead.
         LOG("[VtHook] %s: respHeader is NULL after writing body -- returning transport failure", methodName);
         return false;
     }
 
-    // Set the flags output (if provided) to indicate success
-    // From slot 5 decompilation: after slot 4 returns:
-    //   v5[3] is read and written to *(respHeader + 216) — this is the eresult from flags
-    //   v5[2] is read and written to *(respHeader + 220) — this is the error code from flags
-    //   We already set those directly in the header above.
-    // But the caller (sync job) reads the flags too, so we need to set them.
+    // Populate flags output (caller reads in addition to the header).
     if (flags) {
         // flags layout (from slot 5):
         //   flags[0] = int32_t routing_appid (slot 5 reads *(reqHeader+116) and writes to flags[0])
@@ -1390,9 +1396,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
 
 // Notification hook helpers
 
-// Check if a Cloud notification is for a namespace app.
-// For notifications, the appId is typically in field 1 of the body.
-// Returns the real appId if namespace, 0 if not.
+// Cloud notification namespace check: appId is in body field 1; returns real appId, or 0 if not namespace.
 static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* bodyObj) {
     if (!bodyObj) return 0;
 
@@ -1420,9 +1424,7 @@ static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* body
     return 0;
 }
 
-// Upload achievement/stats data to cloud when a namespace app exits.
-// Reads UserGameStats_{accountId}_{appId}.bin from appcache/stats/ and stores
-// it as a blob so it can be restored on another machine at launch time.
+// On namespace-app exit: read appcache/stats/UserGameStats_{account}_{app}.bin and store as a cross-machine restore blob.
 static void UploadStatsOnExit(uint32_t appId) {
     if (!CloudStorage::IsCloudActive()) return;
 
@@ -1432,7 +1434,10 @@ static void UploadStatsOnExit(uint32_t appId) {
     std::string statsFile = g_steamPath + "appcache\\stats\\UserGameStats_"
         + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin";
 
-    HANDLE hFile = CreateFileA(statsFile.c_str(), GENERIC_READ,
+    // Wide-API: CreateFileA narrows via ACP and fails for non-ASCII Steam
+    // install roots, silently skipping stats upload for affected users.
+    auto statsFileWide = FileUtil::Utf8ToPath(statsFile).wstring();
+    HANDLE hFile = CreateFileW(statsFileWide.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
@@ -1458,15 +1463,18 @@ static void UploadStatsOnExit(uint32_t appId) {
         return;
     }
 
-    bool ok = CloudStorage::StoreBlob(accountId, appId,
-        kStatsMetadataPath, data.data(), data.size());
+    // Account-scoped sentinel (appId=0): keeps blob out of per-app namespace so Steam never resolves it under an AutoCloud root. See cloud_metadata_paths.h.
+    bool ok = CloudStorage::StoreBlob(accountId, kAccountScopeAppId,
+        AccountStatsFilename(appId), data.data(), data.size());
     LOG("[Stats] Uploaded stats for app %u (%zu bytes, ok=%d)", appId, data.size(), ok);
+
+    if (ok) {
+        CloudStorage::DeleteBlob(accountId, appId, kLegacyStatsMetadataPath,
+                                 /*keepTombstoneOnSuccess=*/true);
+    }
 }
 
-// Upload playtime to cloud when a namespace app exits.
-// Uses internal tracking (launch time -> exit time) plus VDF baseline from launch.
-// The exit-side VDF read is unreliable because Steam may not have written it yet,
-// so we snapshot VDF playtime at launch and use that as the floor.
+// Upload playtime on namespace-app exit. Internal launch->exit delta + launch-time VDF baseline (exit-side VDF is unreliable -- Steam may not have written it yet).
 static void UploadPlaytimeOnExit(uint32_t appId) {
     if (!CloudStorage::IsCloudActive()) return;
 
@@ -1492,7 +1500,9 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
     {
         std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
             + "\\config\\localconfig.vdf";
-        HANDLE hFile = CreateFileA(vdfPath.c_str(), GENERIC_READ,
+        // Wide-API parity with the launch-time reader above; see UploadStatsOnExit.
+        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
+        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile != INVALID_HANDLE_VALUE) {
@@ -1539,9 +1549,27 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
 
     uint64_t lastPlayed = (trackedLastPlayed > vdfLastPlayed) ? trackedLastPlayed : vdfLastPlayed;
 
-    // Merge with existing cloud blob
+    // Merge with existing blob; CheckBlobExists distinguishes Missing (merge with empty) from Error (abort) -- RetrieveBlob alone would silently overwrite on transient failure.
     uint64_t cloudLastPlayed = 0, cloudPlaytime = 0, cloudPlaytime2wks = 0;
-    auto ptData = CloudStorage::RetrieveBlob(accountId, appId, kPlaytimeMetadataPath);
+    auto acctScopeStatus = CloudStorage::CheckBlobExists(
+        accountId, kAccountScopeAppId, AccountPlaytimeFilename(appId));
+    if (acctScopeStatus == ICloudProvider::ExistsStatus::Error) {
+        LOG("[Playtime] account-scope existence check returned Error for app %u; "
+            "aborting upload to avoid stale-merge rollback", appId);
+        return;
+    }
+    std::vector<uint8_t> ptData;
+    if (acctScopeStatus == ICloudProvider::ExistsStatus::Exists) {
+        ptData = CloudStorage::RetrieveBlob(accountId, kAccountScopeAppId,
+                                             AccountPlaytimeFilename(appId));
+        // Empty after Exists means the download itself failed; abort
+        // matches the Error path above (our writer never emits empty).
+        if (ptData.empty()) {
+            LOG("[Playtime] account-scope retrieve returned empty after Exists for app %u; "
+                "aborting upload to avoid stale-merge rollback", appId);
+            return;
+        }
+    }
     if (!ptData.empty()) {
         std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
         auto parsed = Json::Parse(blob);
@@ -1599,14 +1627,21 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
     obj.objVal["Playtime2wks"] = Json::String(std::to_string(mergedPlaytime2wks));
     std::string blobStr = Json::Stringify(obj);
 
-    bool ok = CloudStorage::StoreBlob(accountId, appId,
-        kPlaytimeMetadataPath, reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
+    // Account-scoped sentinel (appId=0): keeps blob out of per-app namespace so Steam never resolves it under an AutoCloud root. See cloud_metadata_paths.h.
+    bool ok = CloudStorage::StoreBlob(accountId, kAccountScopeAppId,
+        AccountPlaytimeFilename(appId),
+        reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
     LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, baseline=%llu min, baseline2wks=%llu min, vdf=%llu min, vdf2wks=%llu min, cloud=%llu min, cloud2wks=%llu min, total=%llu min, 2wks=%llu min, LastPlayed=%llu, ok=%d)",
         appId, trackedMinutes, info.vdfBaseline, info.vdfBaseline2wks, vdfPlaytime, vdfPlaytime2wks,
         cloudPlaytime, cloudPlaytime2wks, mergedPlaytime, mergedPlaytime2wks, mergedLastPlayed, ok);
+
+    if (ok) {
+        CloudStorage::DeleteBlob(accountId, appId, kLegacyPlaytimeMetadataPath,
+                                 /*keepTombstoneOnSuccess=*/true);
+    }
 }
 
-// Slot 8 hook — Notification wrapper (e.g. SignalAppExitSyncDone)
+// Slot 8 hook -- Notification wrapper (e.g. SignalAppExitSyncDone)
 // request is a CProtoBufMsg* with body at +48, header at +40
 static bool __fastcall NotificationWrapperHook(void* thisptr, const char* methodName, void* request) {
     HookGuard guard;
@@ -1626,7 +1661,7 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
     uint32_t realAppId = CheckNotificationNamespaceApp(methodName, bodyObj);
 
     if (realAppId == 0) {
-        // Not a namespace app — pass through to real Steam
+        // Not a namespace app -- pass through to real Steam
         LOG("[VtHook-Notif] %s: not namespace, passing through", methodName);
         return g_originalSlot8(thisptr, methodName, request);
     }
@@ -1638,16 +1673,22 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
         });
+        // Re-check shutdown under the same lock used to splice out the
+        // vector, so we never push into an already-drained list.
         std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-        g_bgThreads.push_back(std::move(t));
+        if (g_shuttingDown.load(std::memory_order_acquire)) {
+            t.detach(); // OS reaps at process exit
+        } else {
+            g_bgThreads.push_back(std::move(t));
+        }
     }
 
-    // Namespace app — suppress the notification (don't send to Steam servers)
+    // Namespace app - suppress the notification (don't send to Steam servers)
     LOG("[VtHook-Notif] SUPPRESSED %s app=%u (notification not sent to server)", methodName, realAppId);
     return true;  // Return success without actually sending
 }
 
-// Slot 7 hook — Notification direct (e.g. ConflictResolution, TransferReport)
+// Slot 7 hook -- Notification direct (e.g. ConflictResolution, TransferReport)
 // bodyObj is the raw protobuf body (NOT wrapped in CProtoBufMsg)
 static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodName, void* bodyObj, int* flags) {
     HookGuard guard;
@@ -1665,7 +1706,7 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
     uint32_t realAppId = CheckNotificationNamespaceApp(methodName, bodyObj);
 
     if (realAppId == 0) {
-        // Not a namespace app — pass through to real Steam
+        // Not a namespace app -- pass through to real Steam
         LOG("[VtHook-Notif] %s (direct): not namespace, passing through", methodName);
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
     }
@@ -1677,11 +1718,16 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
             if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
             if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
         });
+        // See NotificationHook (slot 8) above -- same shutdown-window race.
         std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-        g_bgThreads.push_back(std::move(t));
+        if (g_shuttingDown.load(std::memory_order_acquire)) {
+            t.detach();
+        } else {
+            g_bgThreads.push_back(std::move(t));
+        }
     }
 
-    // Namespace app — suppress the notification
+    // Namespace app - suppress the notification
     LOG("[VtHook-Notif] SUPPRESSED %s app=%u (direct notification not sent to server)", methodName, realAppId);
     return true;
 }
@@ -1697,7 +1743,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] ParseFromArray=%p SerializeToArray=%p",
         g_parseFromArray, g_serializeToArray);
 
-    // === Read slot 4 (request/response direct) ===
+    // Read slot 4 (request/response direct)
     uintptr_t vtableSlot4Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT4;
 
     ServiceMethodSlot4Fn currentSlot4 = nullptr;
@@ -1717,7 +1763,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 4: %p (RVA=0x%llX)",
         (void*)currentSlot4, (uint64_t)((uintptr_t)currentSlot4 - g_steamClientBase));
 
-    // === Patch slot 5 (request/response wrapper) ===
+    // Patch slot 5 (request/response wrapper)
     uintptr_t vtableSlot5Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT5;
 
     ServiceMethodSlot5Fn currentSlot5 = nullptr;
@@ -1737,7 +1783,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 5: %p (RVA=0x%llX)",
         (void*)currentSlot5, (uint64_t)((uintptr_t)currentSlot5 - g_steamClientBase));
 
-    // === Patch slot 7 (notification direct) ===
+    // Patch slot 7 (notification direct)
     uintptr_t vtableSlot7Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT7;
 
     NotificationSlot7Fn currentSlot7 = nullptr;
@@ -1757,7 +1803,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 7: %p (RVA=0x%llX)",
         (void*)currentSlot7, (uint64_t)((uintptr_t)currentSlot7 - g_steamClientBase));
 
-    // === Patch slot 8 (notification wrapper) ===
+    // Patch slot 8 (notification wrapper)
     uintptr_t vtableSlot8Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT8;
 
     NotificationSlot8Fn currentSlot8 = nullptr;
@@ -1777,7 +1823,7 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Original slot 8: %p (RVA=0x%llX)",
         (void*)currentSlot8, (uint64_t)((uintptr_t)currentSlot8 - g_steamClientBase));
 
-    // === Make vtable region writable and patch all four slots ===
+    // Make vtable region writable and patch all four slots
     // Slots 4, 5, 7, 8 span from slot 4 (offset 0x20) to slot 8 (offset 0x40 + 8)
     // Total region: slot 4 addr to slot 8 addr + sizeof(void*) 
     uintptr_t regionStart = vtableSlot4Addr;
@@ -1809,38 +1855,58 @@ static void InstallServiceMethodHook() {
     LOG("[VtHook] Vtable slot 8 patched: %p -> %p (ok=%d)", (void*)currentSlot8, (void*)NotificationWrapperHook, slot8Ok);
 
     if (g_vtableHookInstalled.load(std::memory_order_acquire)) {
-        LOG("[VtHook] All hooks ACTIVE — Cloud RPCs (slots 4/5/7/8) will be intercepted at vtable level");
+        LOG("[VtHook] All hooks ACTIVE -- Cloud RPCs (slots 4/5/7/8) will be intercepted at vtable level");
     } else {
         LOG("[VtHook] WARNING: Some hooks failed! slot4=%d slot5=%d slot7=%d slot8=%d", slot4Ok, slot5Ok, slot7Ok, slot8Ok);
     }
 }
 
-// Inline detour hook on CUserAppManager::BuildDepotDependency (sub_1384B72B0).
-// This is a POST-CALL hook: we call the original first, then patch the output
-// depot vectors to replace manifest IDs for pinned depots. This fixes both
-// the download path AND the scheduler comparison (which caused the update loop
-// when we hooked BYldBuildFileMapping instead).
+// Inline detour on CUserAppManager::BuildDepotDependency: call original
+// then rewrite manifest IDs for pinned depots in the output vectors.
 static void PatchDepotVector(__int64 vec, uint32_t appId,
                              const std::unordered_map<uint32_t, uint64_t>& depotPins,
                              const char* vecName) {
     if (!vec) return;
-    uint8_t* arrayBase = *reinterpret_cast<uint8_t**>(vec);
-    int count = *reinterpret_cast<int*>(vec + 16);
-    if (!arrayBase || count <= 0) return;
 
-    for (int i = 0; i < count; i++) {
-        uint8_t* entry = arrayBase + static_cast<size_t>(i) * 32;
-        uint32_t depotId = *reinterpret_cast<uint32_t*>(entry);
-        auto pinIt = depotPins.find(depotId);
-        if (pinIt != depotPins.end()) {
-            uint64_t* pManifestId = reinterpret_cast<uint64_t*>(entry + 8);
-            uint64_t oldManifest = *pManifestId;
-            if (oldManifest != pinIt->second) {
-                *pManifestId = pinIt->second;
-                LOG("[ManifestPin] app %u depot %u (%s): manifest %llu -> %llu",
-                    appId, depotId, vecName, oldManifest, pinIt->second);
+    // Reverse-engineered vector layout (pointer at +0, count at +16, 32-byte
+    // entries). SEH-wrap every read and cap the bound for future-proofing.
+    uint8_t* arrayBase = nullptr;
+    int count = 0;
+    __try {
+        arrayBase = *reinterpret_cast<uint8_t**>(vec);
+        count = *reinterpret_cast<int*>(vec + 16);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestPin] PatchDepotVector(%s): faulted reading vector header for app %u",
+            vecName, appId);
+        return;
+    }
+
+    constexpr int kMaxDepotsPerVec = 4096;
+    if (!arrayBase || count <= 0) return;
+    if (count > kMaxDepotsPerVec) {
+        LOG("[ManifestPin] PatchDepotVector(%s): suspicious count=%d for app %u, skipping",
+            vecName, count, appId);
+        return;
+    }
+
+    __try {
+        for (int i = 0; i < count; i++) {
+            uint8_t* entry = arrayBase + static_cast<size_t>(i) * 32;
+            uint32_t depotId = *reinterpret_cast<uint32_t*>(entry);
+            auto pinIt = depotPins.find(depotId);
+            if (pinIt != depotPins.end()) {
+                uint64_t* pManifestId = reinterpret_cast<uint64_t*>(entry + 8);
+                uint64_t oldManifest = *pManifestId;
+                if (oldManifest != pinIt->second) {
+                    *pManifestId = pinIt->second;
+                    LOG("[ManifestPin] app %u depot %u (%s): manifest %llu -> %llu",
+                        appId, depotId, vecName, oldManifest, pinIt->second);
+                }
             }
         }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestPin] PatchDepotVector(%s): faulted iterating entries for app %u (count=%d)",
+            vecName, appId, count);
     }
 }
 
@@ -1870,21 +1936,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     HookGuard guard;
     if (g_shuttingDown.load(std::memory_order_acquire))
         return g_originalRecvPkt(thisptr, pkt);
-    // ── Drain injection queue (Approach D) ──
-    // This hook runs on Steam's network receive thread, which is where all
-    // CJob coroutines were created. BRouteMsgToJob → Coroutine_Continue
-    // requires the thread-local coroutine manager to have the target coroutine,
-    // so we MUST call BRouteMsgToJob from this thread.
-    //
-    // We must NOT hold g_injectMutex while calling ProcessQueuedInjection.
-    // BRouteMsgToJob resumes the job's coroutine, which may immediately send the
-    // next RPC (e.g. GetChangelist → SignalAppLaunchIntent). OnSendPkt intercepts
-    // that and calls InjectResponse, which needs g_injectMutex to push to the queue.
-    // Holding the lock here would deadlock.
-    //
-    // We use a loop: snapshot the queue, process all items unlocked, then re-check
-    // in case new items were queued during processing (by the resumed coroutine).
-    // Bounded to prevent runaway iteration if processing causes re-queuing.
+    // Network-recv thread is the only one that can BRouteMsgToJob the original coroutines. Snapshot under g_injectMutex, process unlocked (resumed coroutine may re-enter InjectResponse).
     static constexpr int kMaxDrainIterations = 16;
     for (int drainIter = 0; drainIter < kMaxDrainIterations; ++drainIter) {
         std::vector<QueuedInjection*> batch;
@@ -1949,7 +2001,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
                     } else if (f.wireType == PB::WireType::LengthDelimited) {
                         // Could be string, bytes, or submessage
                         if (f.fieldNum == 2) {
-                            // file entry submessage — parse recursively
+                            // file entry submessage -- parse recursively
                             auto subFields = PB::Parse(f.data, f.dataLen);
                             std::string fileName;
                             for (auto& sf : subFields) {
@@ -1963,7 +2015,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
                                     LOG("[RecvMon-PB]    field=%u varint=%llu", sf.fieldNum, sf.varintVal);
                                 } else if (sf.wireType == PB::WireType::LengthDelimited) {
                                     if (sf.fieldNum == 2) {
-                                        // sha — log as hex
+                                        // sha -- log as hex
                                         char shaHex[50] = {};
                                         for (uint32_t i = 0; i < sf.dataLen && i < 20; i++)
                                             snprintf(shaHex + i*2, 3, "%02x", sf.data[i]);
@@ -2000,17 +2052,9 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     return g_originalRecvPkt(thisptr, pkt);
 }
 
-// ── Lua file sync ───────────────────────────────────────────────────────
-// Syncs the stplug-in/*.lua collection between machines via cloud storage.
-// Uses a zip archive (LuaArchive.zip) and a manifest (LuaManifest.json)
-// stored under appId=0 as account-level blobs.
-//
-// Manifest format: { "file.lua": { "mod": <unix_ts>, "del": <unix_ts> }, ... }
-// A file with "del" > "mod" is considered deleted. Deletion timestamps let
-// removals propagate across machines without ping-pong.
-//
-// .sync_state format: first line is lastSyncTime (unix seconds), remaining
-// lines are filenames this machine knows about.
+// Lua file sync: stplug-in/*.lua via account-scope LuaArchive.zip + LuaManifest.json (appId=0).
+// Manifest entry: { "file.lua": { "mod": ts, "del": ts } }; del > mod = deleted (timestamps prevent ping-pong).
+// .sync_state: line 1 = lastSyncTime, remaining lines = files this machine knows about.
 
 static constexpr uint32_t LUA_SYNC_APPID = 0;
 
@@ -2025,7 +2069,7 @@ static std::string GetLuaSyncStatePath() {
 
 static SyncState ReadSyncState() {
     SyncState state;
-    std::ifstream f(GetLuaSyncStatePath());
+    std::ifstream f(FileUtil::Utf8ToPath(GetLuaSyncStatePath()));
     if (!f.is_open()) return state;
     std::string line;
     // First line is the timestamp
@@ -2045,14 +2089,18 @@ static SyncState ReadSyncState() {
 static void WriteSyncState(uint64_t syncTime, const std::unordered_set<std::string>& files) {
     std::string path = GetLuaSyncStatePath();
     std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-    std::ofstream f(path, std::ios::trunc);
-    if (!f.is_open()) {
-        LOG("[LuaSync] Failed to write .sync_state");
-        return;
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(path).parent_path(), ec);
+    // Atomic-write to avoid a half-truncated .sync_state on crash.
+    std::string content;
+    content += std::to_string(syncTime);
+    content += '\n';
+    for (auto& s : files) {
+        content += s;
+        content += '\n';
     }
-    f << syncTime << "\n";
-    for (auto& s : files) f << s << "\n";
+    if (!FileUtil::AtomicWriteText(path, content)) {
+        LOG("[LuaSync] Failed to write .sync_state");
+    }
 }
 
 struct LuaFile {
@@ -2099,13 +2147,18 @@ static bool IsValidLuaContent(const uint8_t* data, size_t len) {
 static std::vector<LuaFile> ReadLocalLuaFiles() {
     std::vector<LuaFile> files;
     std::string dir = g_steamPath + "config\\stplug-in\\";
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA((dir + "*.lua").c_str(), &fd);
+    // Wide enumeration; ANSI would return 8.3 short names for non-Latin-1
+    // filenames and rotate them into different lua records every launch.
+    auto dirWide = FileUtil::Utf8ToPath(dir).wstring();
+    std::wstring pattern = dirWide + L"*.lua";
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
     if (hFind == INVALID_HANDLE_VALUE) return files;
     do {
-        std::string name = fd.cFileName;
+        std::string name = FileUtil::WideToUtf8(fd.cFileName);
+        if (name.empty()) continue;
         std::string path = dir + name;
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary | std::ios::ate);
         if (!f.is_open()) continue;
         auto size = f.tellg();
         if (size <= 0 || size > 10 * 1024 * 1024) continue; // 10 MB per-file limit
@@ -2115,12 +2168,19 @@ static std::vector<LuaFile> ReadLocalLuaFiles() {
         f.seekg(0);
         f.read(reinterpret_cast<char*>(lf.content.data()), size);
 
+        // Reject short reads to avoid uploading uninitialized tail bytes.
+        if (f.fail() || static_cast<std::streamsize>(f.gcount()) != size) {
+            LOG("[LuaSync] short read on %s (expected %lld, got %lld); skipping",
+                name.c_str(), (long long)size, (long long)f.gcount());
+            continue;
+        }
+
         ULARGE_INTEGER uli;
         uli.LowPart = fd.ftLastWriteTime.dwLowDateTime;
         uli.HighPart = fd.ftLastWriteTime.dwHighDateTime;
         lf.modTime = (uli.QuadPart - 116444736000000000ULL) / 10000000ULL;
         files.push_back(std::move(lf));
-    } while (FindNextFileA(hFind, &fd));
+    } while (FindNextFileW(hFind, &fd));
     FindClose(hFind);
     return files;
 }
@@ -2253,6 +2313,17 @@ static void SyncLuaFiles() {
             constexpr size_t MAX_TOTAL_SIZE = 100 * 1024 * 1024; // 100 MB aggregate
             for (mz_uint i = 0; i < numFiles; i++) {
                 char fname[256];
+                // Probe true name size first; miniz's silent post-clamp truncation could chop "../" and slip past IsValidLuaFilename.
+                mz_uint nameLenPlusNul = mz_zip_reader_get_filename(&zip, i, nullptr, 0);
+                if (nameLenPlusNul == 0) {
+                    LOG("[LuaSync] Skipping zip entry %u: corrupt or missing CDH", i);
+                    continue;
+                }
+                if (nameLenPlusNul > sizeof(fname)) {
+                    LOG("[LuaSync] Skipping zip entry %u: overlength filename (%u bytes)",
+                        i, nameLenPlusNul);
+                    continue;
+                }
                 mz_zip_reader_get_filename(&zip, i, fname, sizeof(fname));
                 if (!IsValidLuaFilename(fname)) {
                     LOG("[LuaSync] Skipping invalid zip entry: %s", fname);
@@ -2318,7 +2389,9 @@ static void SyncLuaFiles() {
             if (onDisk && lastSync > 0 && entry.del > lastSync) {
                 // Deleted on another machine after our last sync -- delete locally
                 std::string path = luaDir + filename;
-                if (DeleteFileA(path.c_str())) {
+                // Wide-API: DeleteFileA's ACP narrowing fails with ERROR_FILE_NOT_FOUND on non-ASCII installs, stranding the stale lua.
+                auto pathWide = FileUtil::Utf8ToPath(path).wstring();
+                if (DeleteFileW(pathWide.c_str())) {
                     deletedLocally++;
                     localByName.erase(filename);
                     LOG("[LuaSync] Deleted locally (remote deletion): %s", filename.c_str());
@@ -2332,15 +2405,16 @@ static void SyncLuaFiles() {
                 auto it = cloudFiles.find(filename);
                 if (it != cloudFiles.end()) {
                     std::error_code ec;
-                    std::filesystem::create_directories(luaDir, ec);
+                    // Route via Utf8ToPath: create_directories on std::string narrows via ACP internally.
+                    std::filesystem::create_directories(FileUtil::Utf8ToPath(luaDir), ec);
                     std::string destPath = luaDir + filename;
-                    std::ofstream out(destPath, std::ios::binary | std::ios::trunc);
-                    if (out.is_open()) {
-                        out.write(reinterpret_cast<const char*>(it->second.data()), it->second.size());
-                        out.close();
+                    // Atomic-write so a crash never leaves a partial lua.
+                    if (FileUtil::AtomicWriteBinary(destPath, it->second.data(), it->second.size())) {
                         localByName[filename] = entry.mod;
                         extracted++;
                         LOG("[LuaSync] Extracted new lua: %s (%zu bytes)", filename.c_str(), it->second.size());
+                    } else {
+                        LOG("[LuaSync] Failed to extract lua %s", filename.c_str());
                     }
                 }
             } else if (!onDisk && inSyncState) {
@@ -2525,12 +2599,12 @@ static void UploadLuaOnShutdown() {
         localFiles.size(), cloudManifest.size());
 }
 
-// Expected Steam client version — patches and RVAs are only valid for this build
+// Expected Steam client version -- patches and RVAs are only valid for this build
 static constexpr uint64_t EXPECTED_STEAM_VERSION = 1773426488ULL;
 
 static uint64_t ReadSteamVersion(const std::string& steamDir) {
     std::string manifest = steamDir + "package\\steam_client_win64.manifest";
-    std::ifstream f(manifest);
+    std::ifstream f(FileUtil::Utf8ToPath(manifest));
     if (!f) return 0;
     std::string line;
     while (std::getline(f, line)) {
@@ -2555,11 +2629,9 @@ static uint64_t ReadSteamVersion(const std::string& steamDir) {
     return 0;
 }
 
-// Check if a lua file is "self-unlocking" -- contains addappid(<appId>) for its own
-// appId, meaning the base game itself is lua-unlocked (not owned). DLC-only luas
-// never call addappid() with the base game's appId and should be excluded.
+// Self-unlocking lua: contains addappid(<own appId>), i.e. base game is lua-unlocked. DLC-only luas don't and are excluded.
 static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId) {
-    std::ifstream ifs(filePath);
+    std::ifstream ifs(FileUtil::Utf8ToPath(filePath));
     if (!ifs.is_open()) return false;
 
     // Build the two markers: "addappid(12345)" and "addappid(12345,"
@@ -2632,17 +2704,18 @@ void Init(const std::string& steamPath) {
         LOG("Steam version: %llu (OK)", detectedVersion);
     }
 
-    // Auto-detect namespace apps by scanning {steamPath}\config\stplug-in\*.lua
-    // Only includes "self-unlocking" luas where the lua calls addappid() for its own
-    // appId, meaning the base game is lua-unlocked. DLC-only luas are excluded.
+    // Auto-detect namespace apps from {steamPath}\config\stplug-in\*.lua, restricted to self-unlocking luas (base-game addappid for own id).
     std::string pluginDir = g_steamPath + "config\\stplug-in\\*";
     std::string pluginBase = g_steamPath + "config\\stplug-in\\";
     int totalLuas = 0, selfUnlocking = 0;
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(pluginDir.c_str(), &fd);
+    // Wide enumeration; FindFirstFileA fails on non-ASCII g_steamPath.
+    auto pluginDirWide = FileUtil::Utf8ToPath(pluginDir).wstring();
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(pluginDirWide.c_str(), &fd);
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
-            std::string name = fd.cFileName;
+            std::string name = FileUtil::WideToUtf8(fd.cFileName);
+            if (name.empty()) continue;
             if (name.size() > 4 && name.compare(name.size() - 4, 4, ".lua") == 0) {
                 std::string stem = name.substr(0, name.size() - 4);
                 bool allDigits = !stem.empty();
@@ -2661,7 +2734,7 @@ void Init(const std::string& steamPath) {
                     }
                 }
             }
-        } while (FindNextFileA(hFind, &fd));
+        } while (FindNextFileW(hFind, &fd));
         FindClose(hFind);
     } else {
         LOG("[NS] Failed to scan stplug-in directory: %s (err=%u)",
@@ -2671,7 +2744,7 @@ void Init(const std::string& steamPath) {
     if (HasNamespaceApps()) {
         LOG("[NS] Namespace mode ENABLED: %d self-unlocking of %d total lua(s)", selfUnlocking, totalLuas);
     } else {
-        LOG("[NS] No self-unlocking Lua files found (%d total luas) — DLL will only log Cloud RPCs", totalLuas);
+        LOG("[NS] No self-unlocking Lua files found (%d total luas) -- DLL will only log Cloud RPCs", totalLuas);
     }
 
     // Steam-side config (per-system, controls DLL feature toggles).
@@ -2679,7 +2752,7 @@ void Init(const std::string& steamPath) {
     std::string cloudRoot = g_steamPath + "cloud_redirect\\";
     {
         std::string pinConfigPath = cloudRoot + "config.json";
-        std::ifstream pinFile(pinConfigPath);
+        std::ifstream pinFile(FileUtil::Utf8ToPath(pinConfigPath));
         if (pinFile) {
             std::string pinStr((std::istreambuf_iterator<char>(pinFile)), {});
             pinFile.close();
@@ -2711,24 +2784,26 @@ void Init(const std::string& steamPath) {
                 LOG("[ManifestPin] Loaded %zu pinned app(s)", g_pinnedApps.size());
             }
 
-            // Load lua setManifestid entries for apps that should be pinned.
-            // An app's lua pins are loaded when:
-            //   - auto_comment is false (all luas respected), OR
-            //   - the app is in pinned_apps (per-app override)
+            // Load lua setManifestid pins (when auto_comment=false or app
+            // is in pinned_apps). Wide enumeration for non-ASCII paths.
             if (g_manifestPinsEnabled.load()) {
                 std::string luaDir = g_steamPath + "config\\stplug-in\\";
-                WIN32_FIND_DATAA fd;
-                HANDLE hFind = FindFirstFileA((luaDir + "*.lua").c_str(), &fd);
+                auto luaDirWide = FileUtil::Utf8ToPath(luaDir).wstring();
+                std::wstring pattern = luaDirWide + L"*.lua";
+                WIN32_FIND_DATAW fd;
+                HANDLE hFind = FindFirstFileW(pattern.c_str(), &fd);
                 if (hFind != INVALID_HANDLE_VALUE) {
                     do {
-                        uint32_t fileAppId = (uint32_t)strtoul(fd.cFileName, nullptr, 10);
+                        // strtoul on narrowed cFileName: pure-digit prefixes are single-byte in both encodings.
+                        std::string nameUtf8 = FileUtil::WideToUtf8(fd.cFileName);
+                        uint32_t fileAppId = (uint32_t)strtoul(nameUtf8.c_str(), nullptr, 10);
                         if (fileAppId == 0) continue;
 
                         bool shouldLoad = !g_autoComment.load() || g_pinnedApps.count(fileAppId);
                         if (!shouldLoad) continue;
 
-                        std::string luaPath = luaDir + fd.cFileName;
-                        std::ifstream luaFile(luaPath);
+                        std::string luaPath = luaDir + nameUtf8;
+                        std::ifstream luaFile(FileUtil::Utf8ToPath(luaPath));
                         if (!luaFile) continue;
                         std::string line;
                         while (std::getline(luaFile, line)) {
@@ -2757,9 +2832,9 @@ void Init(const std::string& steamPath) {
                             g_manifestPins[fileAppId][depotId] = manifestId;
                             totalPins++;
                             LOG("[ManifestPin] Lua pin: app %u depot %u -> manifest %llu (from %s)",
-                                fileAppId, depotId, manifestId, fd.cFileName);
+                                fileAppId, depotId, manifestId, nameUtf8.c_str());
                         }
-                    } while (FindNextFileA(hFind, &fd));
+                    } while (FindNextFileW(hFind, &fd));
                     FindClose(hFind);
                 }
             }
@@ -2790,22 +2865,126 @@ void Init(const std::string& steamPath) {
         std::string oldRoot = g_steamPath + "cloud_redirect\\blobs\\";
         std::string newRoot = g_steamPath + "cloud_redirect\\storage\\";
         std::error_code ec;
-        if (std::filesystem::is_directory(oldRoot, ec)) {
+        auto oldRootPath = FileUtil::Utf8ToPath(oldRoot);
+        if (std::filesystem::is_directory(oldRootPath, ec)) {
             int migrated = 0, skipped = 0;
-            for (auto& entry : std::filesystem::recursive_directory_iterator(oldRoot, ec)) {
-                if (!entry.is_regular_file()) continue;
-                auto rel = std::filesystem::relative(entry.path(), oldRoot, ec);
-                if (ec) continue;
-                auto dest = std::filesystem::path(newRoot) / rel;
-                if (std::filesystem::exists(dest, ec)) { skipped++; continue; }
-                std::filesystem::create_directories(dest.parent_path(), ec);
-                std::filesystem::rename(entry.path(), dest, ec);
-                if (!ec) migrated++;
+            // Manual increment with error_code; range-for throws on permission
+            // errors and would kill Steam on the DLL init thread.
+            std::filesystem::recursive_directory_iterator it(oldRootPath, ec);
+            const std::filesystem::recursive_directory_iterator end;
+            while (!ec && it != end) {
+                const auto& entry = *it;
+                std::error_code regEc;
+                if (entry.is_regular_file(regEc)) {
+                    std::error_code relEc;
+                    auto rel = std::filesystem::relative(entry.path(), oldRootPath, relEc);
+                    if (!relEc) {
+                        auto dest = FileUtil::Utf8ToPath(newRoot) / rel;
+                        std::error_code existsEc;
+                        if (std::filesystem::exists(dest, existsEc)) {
+                            skipped++;
+                        } else {
+                            std::error_code mkEc;
+                            std::filesystem::create_directories(dest.parent_path(), mkEc);
+                            std::error_code mvEc;
+                            std::filesystem::rename(entry.path(), dest, mvEc);
+                            if (!mvEc) migrated++;
+                        }
+                    }
+                }
+                std::error_code stepEc;
+                it.increment(stepEc);
+                if (stepEc) break;
             }
-            std::filesystem::remove_all(oldRoot, ec);
+            std::error_code rmEc;
+            std::filesystem::remove_all(oldRootPath, rmEc);
             if (migrated > 0 || skipped > 0)
                 LOG("[NS] Migrated legacy blobs/ -> storage/: %d files moved, %d already existed (skipped)", migrated, skipped);
         }
+    }
+
+    // Scrub Playtime.bin/UserGameStats.bin relics left by older DLL builds
+    // in Steam's userdata remote/. Current DLL never writes there.
+    LegacyMetadataCleanup::PruneSteamUserdata(g_steamPath);
+
+    // Scrub <root>/.cloudredirect/{Playtime,UserGameStats}.bin in AutoCloud user-profile roots; ladder mirrors local_storage.cpp:GetAutoCloudFileList.
+    try {
+        auto getEnvUtf8 = [](const wchar_t* name) -> std::string {
+            wchar_t wbuf[MAX_PATH];
+            constexpr DWORD bufLen = (DWORD)(sizeof(wbuf) / sizeof(wbuf[0]));
+            DWORD n = GetEnvironmentVariableW(name, wbuf, bufLen);
+            if (n == 0 || n >= bufLen) return {};
+            return FileUtil::WideToUtf8(wbuf, (size_t)n);
+        };
+        auto knownFolderUtf8 = [](const KNOWNFOLDERID& id) -> std::string {
+            PWSTR wide = nullptr;
+            HRESULT hr = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &wide);
+            if (FAILED(hr) || !wide) {
+                if (wide) CoTaskMemFree(wide);
+                return {};
+            }
+            // try/catch so CoTaskMemFree runs even if WideToUtf8 throws.
+            std::string out;
+            try {
+                out = FileUtil::WideToUtf8(wide);
+            } catch (...) {
+                CoTaskMemFree(wide);
+                throw;
+            }
+            CoTaskMemFree(wide);
+            return out;
+        };
+        auto withTrailingSlash = [](std::string s) -> std::string {
+            if (!s.empty() && s.back() != '\\' && s.back() != '/') s += '\\';
+            return s;
+        };
+
+        std::vector<std::string> autoCloudRoots;
+
+        // LocalLow: knownfolder primary, `%LOCALAPPDATA%\..\LocalLow` fallback.
+        {
+            std::string p = knownFolderUtf8(FOLDERID_LocalAppDataLow);
+            if (p.empty()) {
+                std::string la = getEnvUtf8(L"LOCALAPPDATA");
+                if (!la.empty()) p = la + "\\..\\LocalLow";
+            }
+            if (!p.empty()) autoCloudRoots.push_back(withTrailingSlash(std::move(p)));
+        }
+        // LocalAppData: env-var only (matches AutoCloud).
+        {
+            std::string p = getEnvUtf8(L"LOCALAPPDATA");
+            if (!p.empty()) autoCloudRoots.push_back(withTrailingSlash(std::move(p)));
+        }
+        // RoamingAppData: env-var only (matches AutoCloud).
+        {
+            std::string p = getEnvUtf8(L"APPDATA");
+            if (!p.empty()) autoCloudRoots.push_back(withTrailingSlash(std::move(p)));
+        }
+        // Documents: knownfolder primary, `%USERPROFILE%\Documents` fallback.
+        {
+            std::string p = knownFolderUtf8(FOLDERID_Documents);
+            if (p.empty()) {
+                std::string up = getEnvUtf8(L"USERPROFILE");
+                if (!up.empty()) p = up + "\\Documents";
+            }
+            if (!p.empty()) autoCloudRoots.push_back(withTrailingSlash(std::move(p)));
+        }
+        // Saved Games: knownfolder primary, `%USERPROFILE%\Saved Games` fallback.
+        {
+            std::string p = knownFolderUtf8(FOLDERID_SavedGames);
+            if (p.empty()) {
+                std::string up = getEnvUtf8(L"USERPROFILE");
+                if (!up.empty()) p = up + "\\Saved Games";
+            }
+            if (!p.empty()) autoCloudRoots.push_back(withTrailingSlash(std::move(p)));
+        }
+
+        LegacyMetadataCleanup::PruneAutoCloudPollutionRoots(autoCloudRoots);
+    } catch (const std::exception& ex) {
+        // Helper swallows; only resolution lambdas can throw out (bad_alloc). Don't take down DLL init for a cleanup pass.
+        LOG("[NS] PruneAutoCloud setup failed: %s", ex.what());
+    } catch (...) {
+        LOG("[NS] PruneAutoCloud setup failed: unknown exception");
     }
 
     // start local HTTP server for upload/download
@@ -2835,7 +3014,7 @@ void Init(const std::string& steamPath) {
             LOG("[NS] WARNING: Could not resolve %%APPDATA%%, falling back to steam folder for config");
         }
     }
-    std::ifstream configFile(configPath);
+    std::ifstream configFile(FileUtil::Utf8ToPath(configPath));
     if (configFile) {
         std::string configStr((std::istreambuf_iterator<char>(configFile)), {});
         configFile.close();
@@ -2917,6 +3096,10 @@ void Init(const std::string& steamPath) {
     }
 
     LOG("CloudIntercept initialized (local server mode), steam=%s", g_steamPath.c_str());
+
+    // Cooperative Shutdown via ExitProcess IAT hook (atexit and
+    // DLL_PROCESS_DETACH both run too late to safely drain workers).
+    InstallExitProcessHook();
 }
 
 // InstallRecvPktMonitor / SetSendPktAddr
@@ -2936,6 +3119,9 @@ void InstallRecvPktMonitor(void* savedOrigPtrAddr) {
     }
     *slot = RecvPktMonitorHook;
     VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+    // Remember the slot only on success so shutdown never restores an
+    // unpatched slot.
+    g_recvPktSlot = reinterpret_cast<void**>(slot);
     RecvPktFn readback = *slot;
     LOG("InstallRecvPktMonitor: hooked -> %p (readback=%p, match=%d)",
         RecvPktMonitorHook, readback, readback == RecvPktMonitorHook);
@@ -3058,6 +3244,9 @@ void SetSendPktAddr(void* recvPktGlobalAddr) {
 bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     if (!g_cloudRedirectEnabled.load(std::memory_order_relaxed)) return false;
     if (g_proxySending) return false;
+    // After Shutdown() the receive thread is gone; refuse new pushes so
+    // queued buffers don't leak.
+    if (g_shuttingDown.load(std::memory_order_acquire)) return false;
 
     // Try to discover the real CCMInterface via CSteamEngine global.
     // This also installs the vtable hook once CCMInterface is found.
@@ -3090,10 +3279,8 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
         }
     }
 
-    // If vtable hook is active, Cloud RPCs are handled at the vtable level.
-    // With slots 4+5 both hooked, namespace Cloud RPCs should never reach SendPkt.
-    // If they do, it means something escaped — log a warning and fall through
-    // to the legacy Approach D handler as a safety net.
+    // With slots 4+5 hooked, namespace Cloud RPCs should not reach SendPkt;
+    // log and fall through to Approach D as a safety net if they do.
     static std::atomic<int> g_approachDFallbackCount{0};
     if (g_vtableHookInstalled.load(std::memory_order_acquire)) {
         if (isCloudMethod) {
@@ -3106,14 +3293,14 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
             bool isNs = IsNamespaceApp(appId);
 
             if (isNs) {
-                // Namespace app Cloud RPC reached SendPkt despite slot 4+5 hooks — unexpected!
+                // Namespace app Cloud RPC reached SendPkt despite slot 4+5 hooks -- unexpected!
                 int count = ++g_approachDFallbackCount;
                 LOG("[SendPkt] WARNING: %s app=%u (%u bytes) escaped vtable hooks! "
                     "Using Approach D fallback (occurrence #%d)",
                     method.c_str(), appId, pkt.bodyLen, count);
                 // Fall through to Approach D below
             } else {
-                LOG("[SendPkt] %s app=%u (%u bytes) — vtable hook active, passing through",
+                LOG("[SendPkt] %s app=%u (%u bytes) -- vtable hook active, passing through",
                     method.c_str(), appId, pkt.bodyLen);
                 return false;
             }
@@ -3122,7 +3309,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
         }
     }
 
-    // === Approach D: handle namespace Cloud RPCs locally ===
+    // Approach D: handle namespace Cloud RPCs locally
     // This path is only reached when vtable hooks are not active, or a namespace RPC escaped.
     // Non-Cloud RPCs: early-out before allocating std::string
     if (!isCloudMethod) return false;
@@ -3188,14 +3375,14 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     }
 
     if (!isNamespace) {
-        // not a namespace app — log and pass through
+        // not a namespace app -- log and pass through
         if (method.find("Cloud.") != std::string::npos) {
             LOG("[PassThru] %s app=%u (%u bytes)", method.c_str(), appId, pkt.bodyLen);
         }
         return false;
     }
 
-    // === NAMESPACE APP: handle locally, fabricate response (Approach D fallback) ===
+    // NAMESPACE APP: handle locally, fabricate response (Approach D fallback)
     LOG("[NS-D] INTERCEPT %s app=%u (%u bytes):", method.c_str(), appId, pkt.bodyLen);
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[NS-REQ]", pkt.bodyData, pkt.bodyLen);
@@ -3219,71 +3406,246 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     return true;
 }
 
-// Shutdown
+// Bounded join used at shutdown so a wedged worker can't keep Steam alive.
+// Timeout detaches; the OS reaps at process exit.
+static bool JoinThreadWithTimeout(std::thread& t, DWORD timeoutMs, const char* name) {
+    if (!t.joinable()) return true;
+    HANDLE h = static_cast<HANDLE>(t.native_handle());
+    DWORD wait = WaitForSingleObject(h, timeoutMs);
+    if (wait == WAIT_OBJECT_0) {
+        t.join();
+        return true;
+    }
+    LOG("Shutdown: %s did not finish within %u ms (wait=%u) -- detaching to unblock shutdown",
+        name, timeoutMs, wait);
+    t.detach();
+    return false;
+}
+
+// IAT rewrite of every module's kernel32!ExitProcess slot; wrapper runs
+// cooperative Shutdown then chains the original.
+using ExitProcessFn = VOID(WINAPI*)(UINT);
+static ExitProcessFn g_originalExitProcess = nullptr;
+static std::vector<void**> g_patchedExitProcessIatSlots;
+
+static VOID WINAPI ExitProcessHook(UINT uExitCode) {
+    // Re-entry guard: Shutdown() invoking ExitProcess on this thread would
+    // recurse into call_once and hang.
+    static thread_local bool tls_inShutdown = false;
+    if (tls_inShutdown) {
+        LOG("ExitProcessHook: re-entry on shutdown thread (code=%u) -- chaining original directly", uExitCode);
+        if (g_originalExitProcess) g_originalExitProcess(uExitCode);
+        TerminateProcess(GetCurrentProcess(), uExitCode);
+        for (;;) Sleep(INFINITE);
+    }
+    tls_inShutdown = true;
+    LOG("ExitProcessHook: caller invoked ExitProcess(%u) -- running cooperative Shutdown", uExitCode);
+    Shutdown();
+    if (g_originalExitProcess) {
+        g_originalExitProcess(uExitCode);
+    } else {
+        TerminateProcess(GetCurrentProcess(), uExitCode);
+    }
+    for (;;) Sleep(INFINITE);
+}
+
+static bool PatchModuleExitProcessIat(HMODULE hMod, void* originalAddr, void* hookAddr) {
+    if (!hMod) return false;
+    auto base = reinterpret_cast<uint8_t*>(hMod);
+    auto dosHdr = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+    if (dosHdr->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto ntHdr = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dosHdr->e_lfanew);
+    if (ntHdr->Signature != IMAGE_NT_SIGNATURE) return false;
+    auto& importDir = ntHdr->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (importDir.VirtualAddress == 0 || importDir.Size == 0) return false;
+
+    auto importDesc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + importDir.VirtualAddress);
+    bool patchedAny = false;
+    for (; importDesc->Name != 0; ++importDesc) {
+        // Match by resolved address so api-ms-win-core-* forwarders count.
+        auto thunk = reinterpret_cast<IMAGE_THUNK_DATA*>(base + importDesc->FirstThunk);
+        for (; thunk->u1.Function != 0; ++thunk) {
+            if (reinterpret_cast<void*>(thunk->u1.Function) != originalAddr) continue;
+            void** slot = reinterpret_cast<void**>(&thunk->u1.Function);
+            DWORD oldProt;
+            if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt)) continue;
+            *slot = hookAddr;
+            VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
+            g_patchedExitProcessIatSlots.push_back(slot);
+            patchedAny = true;
+        }
+    }
+    return patchedAny;
+}
+
+static void InstallExitProcessHook() {
+    HMODULE hKernel = GetModuleHandleA("kernel32.dll");
+    if (!hKernel) {
+        LOG("InstallExitProcessHook: kernel32.dll not loaded (impossible) -- skipping");
+        return;
+    }
+    auto origAddr = reinterpret_cast<void*>(GetProcAddress(hKernel, "ExitProcess"));
+    if (!origAddr) {
+        LOG("InstallExitProcessHook: GetProcAddress(ExitProcess) returned NULL -- skipping");
+        return;
+    }
+    g_originalExitProcess = reinterpret_cast<ExitProcessFn>(origAddr);
+    void* hookAddr = reinterpret_cast<void*>(&ExitProcessHook);
+
+    // Walk every loaded module and patch its ExitProcess IAT slot.
+    HMODULE mods[1024];
+    DWORD cbNeeded = 0;
+    HANDLE hProc = GetCurrentProcess();
+    if (!EnumProcessModules(hProc, mods, sizeof(mods), &cbNeeded)) {
+        LOG("InstallExitProcessHook: EnumProcessModules failed (%u)", GetLastError());
+        return;
+    }
+    DWORD modCount = cbNeeded / sizeof(HMODULE);
+    if (modCount > 1024) modCount = 1024;
+    int patchedModules = 0;
+    for (DWORD i = 0; i < modCount; ++i) {
+        // Skip kernel32 itself (its IAT entry, if any, would create a self-loop).
+        if (mods[i] == hKernel) continue;
+        if (PatchModuleExitProcessIat(mods[i], origAddr, hookAddr)) {
+            ++patchedModules;
+        }
+    }
+    LOG("InstallExitProcessHook: patched %d module IAT slot(s) for ExitProcess (orig=%p hook=%p)",
+        patchedModules, origAddr, hookAddr);
+}
+
+// Shutdown entry points: ExitProcess IAT hook (production) and DllMain
+// DLL_PROCESS_DETACH with reserved==NULL. once_flag makes it idempotent.
 void Shutdown() {
+    static std::once_flag s_shutdownOnce;
+    std::call_once(s_shutdownOnce, [] {
+        ShutdownImpl();
+        // Close the log last so teardown errors reach disk.
+        Log::Shutdown();
+    });
+}
+
+static void ShutdownImpl() {
     g_shuttingDown.store(true);
 
-    // Restore original vtable pointers before DLL unload to prevent dangling function pointers
-    if (g_vtableHookInstalled.load(std::memory_order_acquire) && g_steamClientBase) {
-        uintptr_t vtableSlot4Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT4;
-        uintptr_t vtableSlot8Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT8;
-        uintptr_t regionStart = vtableSlot4Addr;
-        size_t regionSize = (vtableSlot8Addr + sizeof(void*)) - vtableSlot4Addr;
-
-        // Wait for all in-flight hook calls to complete before restoring vtable
-        int spinCount = 0;
-        while (g_hookRefCount.load(std::memory_order_acquire) > 0) {
-            Sleep(1);
-            if (++spinCount > 5000) { // 5 seconds max
-                LOG("Shutdown: timed out waiting for %d in-flight hooks", g_hookRefCount.load());
-                break;
-            }
-        }
-
-        DWORD oldProt;
-        if (VirtualProtect((void*)regionStart, regionSize, PAGE_READWRITE, &oldProt)) {
-            if (g_originalSlot4) *(ServiceMethodSlot4Fn*)vtableSlot4Addr = g_originalSlot4;
-            if (g_originalSlot5) *(ServiceMethodSlot5Fn*)(g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT5) = g_originalSlot5;
-            if (g_originalSlot7) *(NotificationSlot7Fn*)(g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT7) = g_originalSlot7;
-            if (g_originalSlot8) *(NotificationSlot8Fn*)vtableSlot8Addr = g_originalSlot8;
-            VirtualProtect((void*)regionStart, regionSize, oldProt, &oldProt);
-            g_vtableHookInstalled.store(false, std::memory_order_release);
-            LOG("Shutdown: restored vtable slots 4/5/7/8");
-        } else {
-            LOG("Shutdown: VirtualProtect failed restoring vtable (%u)", GetLastError());
+    // Drain in-flight hook calls (HookGuard refcount) before restoring any
+    // patched slot, including the recv-pkt slot which has its own install path.
+    int spinCount = 0;
+    while (g_hookRefCount.load(std::memory_order_acquire) > 0) {
+        Sleep(1);
+        if (++spinCount > 5000) { // 5 seconds max
+            LOG("Shutdown: timed out waiting for %d in-flight hooks", g_hookRefCount.load());
+            break;
         }
     }
 
-    // Restore inline detour on steamclient64 (manifest pinning)
-    if (g_bddOrigAddr && g_bddTrampoline) {
-        DWORD oldProt;
-        if (VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
-            memcpy(g_bddOrigAddr, g_bddTrampoline, SC_BDD_STOLEN_BYTES);
-            FlushInstructionCache(GetCurrentProcess(), g_bddOrigAddr, SC_BDD_STOLEN_BYTES);
-            VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, oldProt, &oldProt);
-            LOG("Shutdown: restored BuildDepotDependency prologue");
+    // Restore vtable pointers before DLL unload, but skip if steamclient64
+    // is gone (Steam's clean exit FreeLibrarys it before ExitProcess; the
+    // cached base then points at unmapped memory and VirtualProtect 487s).
+    if (g_vtableHookInstalled.load(std::memory_order_acquire) && g_steamClientBase) {
+        HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
+        if (!currentSC) {
+            LOG("Shutdown: steamclient64.dll already unloaded, skipping vtable restore");
+            g_vtableHookInstalled.store(false, std::memory_order_release);
+        } else if ((uintptr_t)currentSC != g_steamClientBase) {
+            LOG("Shutdown: steamclient64.dll base changed (%p -> %p), skipping vtable restore",
+                (void*)g_steamClientBase, (void*)currentSC);
+            g_vtableHookInstalled.store(false, std::memory_order_release);
+        } else {
+            uintptr_t vtableSlot4Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT4;
+            uintptr_t vtableSlot8Addr = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT8;
+            uintptr_t regionStart = vtableSlot4Addr;
+            size_t regionSize = (vtableSlot8Addr + sizeof(void*)) - vtableSlot4Addr;
+
+            DWORD oldProt;
+            if (VirtualProtect((void*)regionStart, regionSize, PAGE_READWRITE, &oldProt)) {
+                if (g_originalSlot4) *(ServiceMethodSlot4Fn*)vtableSlot4Addr = g_originalSlot4;
+                if (g_originalSlot5) *(ServiceMethodSlot5Fn*)(g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT5) = g_originalSlot5;
+                if (g_originalSlot7) *(NotificationSlot7Fn*)(g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_SLOT7) = g_originalSlot7;
+                if (g_originalSlot8) *(NotificationSlot8Fn*)vtableSlot8Addr = g_originalSlot8;
+                VirtualProtect((void*)regionStart, regionSize, oldProt, &oldProt);
+                g_vtableHookInstalled.store(false, std::memory_order_release);
+                LOG("Shutdown: restored vtable slots 4/5/7/8");
+            } else {
+                LOG("Shutdown: VirtualProtect failed restoring vtable (%u)", GetLastError());
+            }
         }
-        VirtualFree(g_bddTrampoline, 0, MEM_RELEASE);
+    }
+
+    // Restore the RecvPkt vtable slot in clientservice.dll. InstallRecvPktMonitor
+    // saved the slot address into g_recvPktSlot only on its success path, so a
+    // failed install leaves g_recvPktSlot null and we skip cleanly.
+    if (g_recvPktSlot && g_originalRecvPkt) {
+        DWORD oldProt;
+        if (VirtualProtect(g_recvPktSlot, sizeof(void*), PAGE_READWRITE, &oldProt)) {
+            *g_recvPktSlot = reinterpret_cast<void*>(g_originalRecvPkt);
+            VirtualProtect(g_recvPktSlot, sizeof(void*), oldProt, &oldProt);
+            LOG("Shutdown: restored RecvPkt slot (%p -> %p)", g_recvPktSlot, g_originalRecvPkt);
+        } else {
+            LOG("Shutdown: VirtualProtect failed restoring RecvPkt slot (%u)", GetLastError());
+        }
+        g_recvPktSlot = nullptr;
+    }
+
+    // No new InjectResponse pushes can land after vtable restore + ref spin;
+    // drop any pre-shutdown enqueues since RecvPktMonitorHook now bails.
+    DrainInjectQueueOnShutdown();
+
+    // Restore BuildDepotDependency detour; trampoline page is leaked deliberately (mid-trampoline thread would AV); ExitProcess reclaims it.
+    if (g_bddOrigAddr && g_bddTrampoline) {
+        // If steamclient64 already unloaded, the prologue is gone with it.
+        HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
+        if (!currentSC) {
+            LOG("Shutdown: steamclient64.dll already unloaded, skipping BuildDepotDependency restore");
+        } else {
+            DWORD oldProt;
+            if (VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                memcpy(g_bddOrigAddr, g_bddTrampoline, SC_BDD_STOLEN_BYTES);
+                FlushInstructionCache(GetCurrentProcess(), g_bddOrigAddr, SC_BDD_STOLEN_BYTES);
+                VirtualProtect(g_bddOrigAddr, SC_BDD_STOLEN_BYTES, oldProt, &oldProt);
+                LOG("Shutdown: restored BuildDepotDependency prologue (trampoline page intentionally leaked, reclaimed on ExitProcess)");
+            } else {
+                LOG("Shutdown: VirtualProtect failed restoring BuildDepotDependency prologue (%u)", GetLastError());
+            }
+        }
         g_bddTrampoline = nullptr;
         g_origBuildDepotDependency = nullptr;
         g_bddOrigAddr = nullptr;
     }
 
-    // Join lua sync thread before shutdown proceeds
-    if (g_luaSyncThread.joinable()) g_luaSyncThread.join();
-    if (g_startupMetadataThread.joinable()) g_startupMetadataThread.join();
+    // Both threads poll g_shuttingDown; 5s is generous. Stuck network I/O
+    // detaches and is reaped by the OS.
+    JoinThreadWithTimeout(g_luaSyncThread, 5000, "g_luaSyncThread");
+    JoinThreadWithTimeout(g_startupMetadataThread, 5000, "g_startupMetadataThread");
 
-    // Join background threads (exit-sync uploads, MessageBox, etc.)
+    // Background threads (exit-sync uploads, MessageBox) don't poll
+    // g_shuttingDown mid-flight; bounded-join to keep shutdown responsive.
     {
-        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-        for (auto& t : g_bgThreads) {
-            if (t.joinable()) t.join();
+        std::vector<std::thread> threads;
+        {
+            std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+            threads = std::move(g_bgThreads);
+            g_bgThreads.clear();
         }
-        g_bgThreads.clear();
+        // Move out before joining so spawners that race in don't deadlock
+        // on g_bgThreadsMutex; they re-check g_shuttingDown and detach.
+        size_t total = threads.size();
+        size_t joined = 0, detached = 0, skipped = 0;
+        for (auto& t : threads) {
+            if (!t.joinable()) { ++skipped; continue; }
+            if (JoinThreadWithTimeout(t, 3000, "g_bgThreads[bg]")) ++joined;
+            else ++detached;
+        }
+        if (total > 0) {
+            LOG("Shutdown: bg threads joined=%zu detached=%zu skipped=%zu (total=%zu)",
+                joined, detached, skipped, total);
+        }
     }
 
     // Upload current lua state before cloud provider shuts down
     if (g_syncLuas) UploadLuaOnShutdown();
+
+    ShutdownRpcHandlers();
 
     // Wait for all pending cloud uploads (including lua) to finish
     CloudStorage::DrainQueue();

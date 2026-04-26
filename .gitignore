@@ -14,6 +14,8 @@ ui/CloudRedirect.Tests/obj/
 # Legacy / dev-only (not part of public build)
 stfixer/
 tools/
+tests/
+scripts/
 
 # Debug artifacts
 cleanup_scan.log

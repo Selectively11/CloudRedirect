@@ -109,6 +109,12 @@ internal static class AppUpdater
         }
     }
 
+    // Hard caps on a downloaded update payload. Framework-dependent single-file is ~8 MB;
+    // 50 MB leaves ample headroom while ensuring a hostile or corrupted response cannot
+    // exhaust memory or disk before validation rejects it.
+    private const long MinUpdateBytes = 1L * 1024 * 1024;
+    private const long MaxUpdateBytes = 50L * 1024 * 1024;
+
     /// <summary>
     /// Downloads the update, validates it, swaps the running exe, and relaunches.
     /// Returns an error message on failure, or null on success (the process will exit).
@@ -125,35 +131,48 @@ internal static class AppUpdater
             response.EnsureSuccessStatusCode();
 
             var totalBytes = response.Content.Headers.ContentLength ?? -1;
+
+            // Reject obviously bogus Content-Length up front so we never start writing
+            // a 4 GB "update" to a temp file before discovering it.
+            if (totalBytes > MaxUpdateBytes)
+                return $"Downloaded file has suspicious size ({totalBytes} bytes)";
+
+            // Stream to disk with a bounded buffer; cap running total even when the
+            // server omitted or lied about Content-Length.
             using var stream = await response.Content.ReadAsStreamAsync();
-            using var ms = new MemoryStream();
-            var buffer = new byte[81920];
             long bytesRead = 0;
-            int read;
-            while ((read = await stream.ReadAsync(buffer)) > 0)
+            await using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
-                ms.Write(buffer, 0, read);
-                bytesRead += read;
-                if (totalBytes > 0)
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await stream.ReadAsync(buffer)) > 0)
                 {
-                    var pct = (int)(bytesRead * 100 / totalBytes);
-                    onProgress?.Invoke(pct, $"Downloading... {pct}%");
+                    bytesRead += read;
+                    if (bytesRead > MaxUpdateBytes)
+                        return $"Downloaded file has suspicious size (>{MaxUpdateBytes} bytes)";
+                    await fs.WriteAsync(buffer.AsMemory(0, read));
+                    if (totalBytes > 0)
+                    {
+                        var pct = (int)(bytesRead * 100 / totalBytes);
+                        onProgress?.Invoke(pct, $"Downloading... {pct}%");
+                    }
                 }
             }
 
-            var data = ms.ToArray();
-
             // Validate: size between 1 MB and 50 MB (framework-dependent single-file ~8 MB)
-            if (data.Length < 1024 * 1024 || data.Length > 50 * 1024 * 1024)
-                return $"Downloaded file has suspicious size ({data.Length} bytes)";
+            if (bytesRead < MinUpdateBytes || bytesRead > MaxUpdateBytes)
+                return $"Downloaded file has suspicious size ({bytesRead} bytes)";
 
-            // Validate: MZ header (PE executable)
-            if (data.Length < 2 || data[0] != 'M' || data[1] != 'Z')
-                return "Downloaded file is not a valid executable";
+            // Validate: MZ header (PE executable). Read just the first two bytes back
+            // from the temp file rather than holding the whole payload in memory.
+            byte[] mz = new byte[2];
+            await using (var verify = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                if (await verify.ReadAsync(mz.AsMemory(0, 2)) < 2 || mz[0] != (byte)'M' || mz[1] != (byte)'Z')
+                    return "Downloaded file is not a valid executable";
+            }
 
             onProgress?.Invoke(-1, "Installing update...");
-
-            await File.WriteAllBytesAsync(tempPath, data);
 
             var currentExe = Environment.ProcessPath;
             if (string.IsNullOrEmpty(currentExe))

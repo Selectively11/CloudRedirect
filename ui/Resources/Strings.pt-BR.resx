@@ -110,6 +110,9 @@
   <data name="Choice_CurrentMode_CloudRedirect_Desc" xml:space="preserve">
     <value>Todos os recursos estão habilitados. A interceptação de saves na nuvem está ativa.</value>
   </data>
+  <data name="Choice_FailedSaveMode" xml:space="preserve">
+    <value>Não foi possível salvar sua seleção: {0}</value>
+  </data>
 
   <data name="Setup_Title" xml:space="preserve">
     <value>Configuração</value>
@@ -816,6 +819,144 @@ Você pode restaurar pelo painel Restaurar Saves.</value>
   <data name="Apps_DeleteFailedTitle" xml:space="preserve">
     <value>Exclusão Falhou</value>
   </data>
+
+  <!-- AppsPage orphan-blob prune -->
+  <data name="Apps_ScanForOrphans" xml:space="preserve">
+    <value>Buscar órfãos na nuvem</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
+    <value>Buscar órfãos na nuvem</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
+    <value>Um "órfão" é um arquivo de save no seu armazenamento em nuvem que nenhum aplicativo deste PC ainda referencia -- fica para trás quando um save é renomeado, um aplicativo é desinstalado ou uma sincronização é interrompida. Eles ocupam espaço e podem encobrir saves mais novos em caso de conflito.
+
+Esta varredura apenas lê as listagens da nuvem; nada é apagado. Após a varredura, cada aplicativo afetado ganha um botão "Revisar órfãos" para você inspecionar os arquivos e decidir se quer apagá-los.
+
+O Steam precisa estar fechado durante a varredura para que um upload em andamento não seja confundido com um órfão. Continuar?</value>
+  </data>
+  <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
+    <value>Escaneando... ({0}/{1})</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyTitle" xml:space="preserve">
+    <value>Sem provedor de nuvem</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyMessage" xml:space="preserve">
+    <value>O CloudRedirect está configurado apenas para armazenamento local. Não há nuvem para buscar blobs órfãos.</value>
+  </data>
+  <data name="Apps_ScanFailedTitle" xml:space="preserve">
+    <value>Falha na varredura</value>
+  </data>
+  <data name="Apps_ScanCompleteCleanFormat" xml:space="preserve">
+    <value>{0} aplicativo(s) verificado(s) -- nenhum blob órfão encontrado.</value>
+  </data>
+  <data name="Apps_ScanCompleteFoundFormat" xml:space="preserve">
+    <value>Encontrados {0} blob(s) órfão(s) em {1} aplicativo(s).</value>
+  </data>
+  <data name="Apps_ScanCompletePartialFormat" xml:space="preserve">
+    <value>{0} aplicativo(s) não puderam ser verificados (listagem incompleta).</value>
+  </data>
+  <data name="Apps_OrphanSummaryFormat" xml:space="preserve">
+    <value>{0} blob(s) não referenciado(s) na nuvem</value>
+  </data>
+  <data name="Apps_PruneAll" xml:space="preserve">
+    <value>Remover todos</value>
+  </data>
+  <data name="Apps_ReviewOrphans" xml:space="preserve">
+    <value>Revisar órfãos</value>
+  </data>
+  <data name="Apps_CollapseOrphans" xml:space="preserve">
+    <value>Recolher</value>
+  </data>
+  <data name="Apps_PruneTooltip" xml:space="preserve">
+    <value>Excluir blobs órfãos na nuvem que não são mais referenciados por este app</value>
+  </data>
+  <data name="Apps_PruneScanningTitle" xml:space="preserve">
+    <value>Analisando blobs na nuvem...</value>
+  </data>
+  <data name="Apps_PruneButton" xml:space="preserve">
+    <value>Limpar</value>
+  </data>
+  <data name="Apps_PruneButtonScanning" xml:space="preserve">
+    <value>Analisando...</value>
+  </data>
+  <data name="Apps_PruneButtonPruning" xml:space="preserve">
+    <value>Limpando...</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyTitle" xml:space="preserve">
+    <value>Sem provedor na nuvem</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyMessage" xml:space="preserve">
+    <value>O CloudRedirect está configurado para armazenamento somente local. Não há provedor na nuvem de onde limpar blobs órfãos.</value>
+  </data>
+  <data name="Apps_PruneNoOrphansTitle" xml:space="preserve">
+    <value>Sem blobs órfãos</value>
+  </data>
+  <data name="Apps_PruneNoOrphansMessageFormat" xml:space="preserve">
+    <value>Todos os {0} blob(s) na nuvem de {1} são referenciados pelo índice local de saves. Nada para limpar.</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteTitle" xml:space="preserve">
+    <value>Listagem da nuvem incompleta</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteMessage" xml:space="preserve">
+    <value>Não foi possível obter uma lista completa dos blobs na nuvem. Limpar com dados parciais poderia excluir saves legítimos, então a operação foi cancelada. Tente novamente quando a conexão com o provedor na nuvem estiver estável.
+
+Detalhes: {0}</value>
+  </data>
+  <data name="Apps_PruneConfirmTitle" xml:space="preserve">
+    <value>Limpar blobs órfãos da nuvem</value>
+  </data>
+  <data name="Apps_PruneConfirmHeaderFormat" xml:space="preserve">
+    <value>Excluir {0} blob(s) órfão(s) na nuvem para {1} ({2})?
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmExplanation" xml:space="preserve">
+    <value>Estes blobs existem no seu provedor na nuvem ({0}) mas NÃO são referenciados pelo índice local de saves (file_tokens.dat). Ficaram para trás de uma sessão anterior, de uma exclusão que falhou, ou de uma alteração manual, e nunca serão baixados ou limpos pelo caminho de sincronização normal.
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmPreviewHeader" xml:space="preserve">
+    <value>Arquivos a excluir:
+</value>
+  </data>
+  <data name="Apps_PruneConfirmMoreFormat" xml:space="preserve">
+    <value>  ...e mais {0}
+</value>
+  </data>
+  <data name="Apps_PruneConfirmWarning" xml:space="preserve">
+    <value>Esta operação não pode ser desfeita. Saves locais NÃO serão afetados.</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmTitle" xml:space="preserve">
+    <value>Confirmar limpeza</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmMessageFormat" xml:space="preserve">
+    <value>Excluir permanentemente {0} blob(s) órfão(s) na nuvem para {1}? Isto não pode ser desfeito.</value>
+  </data>
+  <data name="Apps_PruneCompleteTitle" xml:space="preserve">
+    <value>Limpeza concluída</value>
+  </data>
+  <data name="Apps_PruneCompleteMessageFormat" xml:space="preserve">
+    <value>{0} blob(s) órfão(s) na nuvem excluído(s) para {1}.</value>
+  </data>
+  <data name="Apps_PrunePartialTitle" xml:space="preserve">
+    <value>Limpeza parcialmente concluída</value>
+  </data>
+  <data name="Apps_PrunePartialMessageFormat" xml:space="preserve">
+    <value>{0} de {1} blob(s) órfão(s) na nuvem excluído(s) para {2}. {3} arquivo(s) não puderam ser excluídos:
+
+{4}
+
+Detalhes: {5}</value>
+  </data>
+  <data name="Apps_PruneFailedTitle" xml:space="preserve">
+    <value>Limpeza Falhou</value>
+  </data>
+  <data name="Apps_PruneFailedMessageFormat" xml:space="preserve">
+    <value>Não foi possível excluir nenhum dos {0} blob(s) órfão(s) para {1}.
+
+Detalhes: {2}</value>
+  </data>
+
   <data name="Apps_SteamNotFound" xml:space="preserve">
     <value>Steam não encontrado</value>
   </data>
@@ -1267,7 +1408,7 @@ Tem certeza?</value>
     <value>Steam Está em Execução</value>
   </data>
   <data name="Steam_IsRunningMessage" xml:space="preserve">
-    <value>O Steam deve ser fechado antes de restaurar saves. Feche o Steam e tente novamente.</value>
+    <value>O Steam deve ser fechado antes de continuar. Feche o Steam e tente novamente.</value>
   </data>
 
   <data name="Provider_GoogleDrive" xml:space="preserve">
@@ -1373,6 +1514,12 @@ Tem certeza?</value>
   <data name="Settings_RestartNow" xml:space="preserve">
     <value>Reiniciar agora</value>
   </data>
+  <data name="Settings_FailedSaveLanguage" xml:space="preserve">
+    <value>Não foi possível salvar a preferência de idioma: {0}</value>
+  </data>
+  <data name="Settings_FailedSaveSync" xml:space="preserve">
+    <value>Não foi possível salvar as configurações de sincronização: {0}</value>
+  </data>
   <data name="Settings_SystemDefault" xml:space="preserve">
     <value>Padrão do sistema</value>
   </data>
@@ -1462,6 +1609,9 @@ Tem certeza?</value>
   </data>
   <data name="Pin_AppFallbackName" xml:space="preserve">
     <value>App {0}</value>
+  </data>
+  <data name="Pin_FailedSavePinConfig" xml:space="preserve">
+    <value>Não foi possível salvar a configuração de fixação: {0}</value>
   </data>
 
   <data name="Search_Placeholder" xml:space="preserve">

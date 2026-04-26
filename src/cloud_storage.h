@@ -7,7 +7,7 @@
 #include <condition_variable>
 #include <unordered_set>
 
-// CloudStorage — central layer between cloud_intercept and ICloudProvider.
+// CloudStorage -- central layer between cloud_intercept and ICloudProvider.
 // Manages local blob cache, metadata sync, change number coordination,
 // and a background worker for async cloud uploads/deletes.
 // All public methods are thread-safe.
@@ -39,25 +39,34 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
 std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
                                   const std::string& filename);
 
-// Delete a blob from local cache and cloud.
+// Delete a blob from local cache and cloud. Set keepTombstoneOnSuccess
+// for cleanup-originated deletes (legacy/migration paths).
 bool DeleteBlob(uint32_t accountId, uint32_t appId,
-                const std::string& filename);
+                const std::string& filename,
+                bool keepTombstoneOnSuccess = false);
 
 // Check if a blob exists (local cache or cloud).
 bool BlobExists(uint32_t accountId, uint32_t appId,
                 const std::string& filename);
+ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
+                                             const std::string& filename);
 
-// Get the authoritative change number (max of local and cloud).
-uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId);
+// Local-only existence check (no provider call). Use after a full
+// CheckBlobExists when you only need to spot a concurrent local download.
+bool HasLocalBlob(uint32_t accountId, uint32_t appId,
+                  const std::string& filename);
 
-// Root token persistence — same as before but also syncs to cloud.
-void SaveRootTokens(uint32_t accountId, uint32_t appId,
+// Root token persistence -- same as before but also syncs to cloud.
+// Returns true if local disk persist succeeded (cloud upload is async
+// and its result is reported separately via the work queue).
+bool SaveRootTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_set<std::string>& tokens);
 std::unordered_set<std::string> LoadRootTokens(uint32_t accountId, uint32_t appId);
 
 // Per-file token tracking: which root token each file was uploaded under.
 // Synced to cloud alongside root_token.dat and cn.dat.
-void SaveFileTokens(uint32_t accountId, uint32_t appId,
+// Returns true if local disk persist succeeded.
+bool SaveFileTokens(uint32_t accountId, uint32_t appId,
                     const std::unordered_map<std::string, std::string>& fileTokens);
 std::unordered_map<std::string, std::string> LoadFileTokens(uint32_t accountId, uint32_t appId);
 
@@ -74,10 +83,30 @@ std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
 void DrainQueue();
 
 // Block until pending background operations for one app complete.
-void DrainQueueForApp(uint32_t accountId, uint32_t appId);
+bool DrainQueueForApp(uint32_t accountId, uint32_t appId);
 
 // Push the change number to the cloud provider (uploads cn.dat).
 void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
+bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// Drain pending work and synchronously push CN. On failure enqueues an
+// async CN retry and drains again. Returns true only on the all-sync path.
+bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// Fire-and-forget CommitCNWithRetry. Detaches a worker thread; Shutdown
+// bounded-waits for it. Use from RPC dispatch threads to avoid blocking
+// Steam's slot-5 Cloud.* transport.
+void CommitCNAsync(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// RAII gate that pauses background cloud HTTP work for the scope, so a
+// foreground (launch-intent) SyncFromCloud doesn't queue behind background
+// sweeps on the shared provider transport.
+struct ForegroundSyncScope {
+    ForegroundSyncScope();
+    ~ForegroundSyncScope();
+    ForegroundSyncScope(const ForegroundSyncScope&)            = delete;
+    ForegroundSyncScope& operator=(const ForegroundSyncScope&) = delete;
+};
 
 // Show an immediate error dialog for critical auth failures (e.g. token refresh broken).
 // Called by provider implementations (GDrive, OneDrive) when refresh fails.

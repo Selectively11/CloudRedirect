@@ -74,7 +74,9 @@
         <ui:NavigationView x:Name="RootNavigation"
                            Grid.Row="2"
                            PaneDisplayMode="Left"
-                           IsBackButtonVisible="Collapsed">
+                           IsBackButtonVisible="Collapsed"
+                           Transition="None"
+                           TransitionDuration="0">
 
             <ui:NavigationView.MenuItems>
                 <ui:NavigationViewItem Content="{res:Loc Nav_Dashboard}"

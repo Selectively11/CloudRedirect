@@ -18,7 +18,8 @@ public partial class SetupPage : Page
     private readonly object _logLock = new();
     private bool _isRunning;
 
-
+    // Bumped on every refresh; stale results are discarded.
+    private int _refreshGeneration;
 
     public SetupPage()
     {
@@ -28,17 +29,17 @@ public partial class SetupPage : Page
         {
             try
             {
-            _steamPath = await Task.Run(() => SteamDetector.FindSteamPath());
+                _steamPath = await Task.Run(() => SteamDetector.FindSteamPath());
 
-            var mode = SteamDetector.ReadModeSetting();
-            if (mode == "stfixer")
-            {
-                DescriptionText.Text = S.Get("Setup_Description_STFixer");
-                CloudRedirectPatchHeaderText.Text = S.Get("Setup_CloudRedirectPatchHeader_STFixer");
-                CloudRedirectPatchDescriptionText.Text = S.Get("Setup_CloudRedirectPatchDescription_STFixer");
-            }
+                var mode = SteamDetector.ReadModeSetting();
+                if (mode == "stfixer")
+                {
+                    DescriptionText.Text = S.Get("Setup_Description_STFixer");
+                    CloudRedirectPatchHeaderText.Text = S.Get("Setup_CloudRedirectPatchHeader_STFixer");
+                    CloudRedirectPatchDescriptionText.Text = S.Get("Setup_CloudRedirectPatchDescription_STFixer");
+                }
 
-            RefreshStatuses();
+                await RefreshStatuses();
             }
             catch { }
         };
@@ -83,7 +84,7 @@ public partial class SetupPage : Page
 
         SteamDetector.SetSteamPath(selected);
         _steamPath = selected;
-        RefreshStatuses();
+        await RefreshStatuses();
     }
 
     private void Log(string message)
@@ -128,10 +129,7 @@ public partial class SetupPage : Page
         });
     }
 
-    /// <summary>
-    /// If Steam is running, shuts it down gracefully (then force-kills if needed).
-    /// Logs progress to the setup log output.
-    /// </summary>
+    /// <summary>Graceful Steam shutdown, falling back to Kill after 15s.</summary>
     private async Task EnsureSteamClosed()
     {
         var running = await Task.Run(() =>
@@ -178,10 +176,7 @@ public partial class SetupPage : Page
         Log("Steam closed.");
     }
 
-    /// <summary>
-    /// Starts Steam and waits for the payload cache to appear in appcache/httpcache/3b/.
-    /// Returns true if the payload was found, false on timeout.
-    /// </summary>
+    /// <summary>Starts Steam, waits up to 90s for the payload cache, then closes it.</summary>
     private async Task<bool> BootstrapSteamForPayload()
     {
         var steamExe = Path.Combine(_steamPath, "steam.exe");
@@ -224,53 +219,158 @@ public partial class SetupPage : Page
         return found;
     }
 
-    // M20: RefreshStatuses involves file I/O and AES decryption. While ideally
-    // the heavy lifting would run off the UI thread, the RefreshXxxStatus() helpers
-    // directly set WPF controls and would require significant refactoring to decouple.
-    // The decrypt result is cached (Patcher._cachedPayload), so subsequent calls are fast.
-    // Accept the brief UI thread hit on infrequent page loads / button clicks.
-    private void RefreshStatuses()
+    // Computed off-thread by ComputeStatusSnapshot, applied by ApplyStatusSnapshot.
+    private sealed record StatusSnapshot(
+        long? Version,
+        PatchState OfflineState,
+        PatchState PatchState,
+        int StExeState,
+        bool ProbeFailed,
+        string? ProbeError,
+        bool DllExists,
+        long DllLength,
+        DateTime DllLastWrite,
+        bool? DllIsCurrent,
+        bool EmbeddedAvailable);
+
+    private static StatusSnapshot ComputeStatusSnapshot(string steamPath)
     {
-        // Steam path display
+        var version = SteamDetector.GetSteamVersion(steamPath);
+        var offline = PatchState.NotInstalled;
+        var patchState = PatchState.NotInstalled;
+        var stExe = -1;
+        var probeFailed = false;
+        string? probeError = null;
+
+        try
+        {
+            // One Patcher instance so the AES-decrypted payload cache is reused.
+            var patcher = new Patcher(steamPath, _ => { });
+            offline = patcher.GetOfflinePatchState();
+            stExe = patcher.GetSteamToolsExePatchState();
+            patchState = patcher.GetPatchState();
+        }
+        catch (Exception ex)
+        {
+            probeFailed = true;
+            probeError = ex.Message;
+        }
+
+        var dllExists = false;
+        long dllLength = 0;
+        var dllLastWrite = default(DateTime);
+        bool? dllIsCurrent = null;
+
+        var dllPath = Path.Combine(steamPath, "cloud_redirect.dll");
+        if (File.Exists(dllPath))
+        {
+            try
+            {
+                var info = new FileInfo(dllPath);
+                dllExists = true;
+                dllLength = info.Length;
+                dllLastWrite = info.LastWriteTime;
+                dllIsCurrent = EmbeddedDll.IsDeployedCurrent(dllPath);
+            }
+            catch
+            {
+                // Unreadable: exists, state unknown.
+                dllExists = true;
+                dllIsCurrent = null;
+            }
+        }
+
+        return new StatusSnapshot(
+            Version: version,
+            OfflineState: offline,
+            PatchState: patchState,
+            StExeState: stExe,
+            ProbeFailed: probeFailed,
+            ProbeError: probeError,
+            DllExists: dllExists,
+            DllLength: dllLength,
+            DllLastWrite: dllLastWrite,
+            DllIsCurrent: dllIsCurrent,
+            EmbeddedAvailable: EmbeddedDll.IsAvailable());
+    }
+
+    private async Task RefreshStatuses()
+    {
+        var gen = System.Threading.Interlocked.Increment(ref _refreshGeneration);
+
+        // Sync prefix: instant "no Steam" feedback is worth a tiny order race.
         SteamPathText.Text = _steamPath ?? S.Get("Setup_SteamNotFoundManual");
-
-        // Steam version check
-        RefreshVersionStatus();
-
         if (_steamPath == null)
         {
             OfflineStatusText.Text = S.Get("Setup_SteamNotFound");
             StExeStatusText.Text = S.Get("Setup_SteamNotFound");
             PatchStatusText.Text = S.Get("Setup_SteamNotFound");
             DeployStatusText.Text = S.Get("Setup_SteamNotFound");
+            VersionStatusText.Text = S.Get("Setup_VersionCouldNotDetermine");
+            VersionIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.Warning24;
             return;
         }
 
-        // Offline setup status, SteamTools.exe status, Patch status
-        // Share a single Patcher instance for all three checks
+        // Capture path so a racing path-flip can't apply a stale result.
+        var capturedPath = _steamPath;
+        StatusSnapshot snap;
         try
         {
-            var patcher = new Patcher(_steamPath, _ => { });
-            RefreshOfflineStatus(patcher);
-            RefreshStExeStatus(patcher);
-            RefreshPatchStatus(patcher);
+            snap = await Task.Run(() => ComputeStatusSnapshot(capturedPath));
         }
         catch (Exception ex)
         {
+            // Unexpected (snapshot already swallows the expected ones).
+            if (gen != _refreshGeneration) return;
             OfflineStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
             StExeStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
             PatchStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
+            return;
         }
 
-        // DLL deploy status
-        var dllPath = Path.Combine(_steamPath, "cloud_redirect.dll");
-        if (File.Exists(dllPath))
+        // Discard if newer refresh started or path changed (covers ABA).
+        if (gen != _refreshGeneration || capturedPath != _steamPath)
+            return;
+
+        try
         {
-            var info = new FileInfo(dllPath);
-            var current = EmbeddedDll.IsDeployedCurrent(dllPath);
-            if (current == false)
+            ApplyStatusSnapshot(snap);
+        }
+        catch (Exception ex)
+        {
+            // S.Format / brush / control writes can throw on a navigated-away page.
+            try
             {
-                DeployStatusText.Text = S.Format("Setup_DllInstalledOutdated", info.LastWriteTime.ToString("g"));
+                OfflineStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
+                StExeStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
+                PatchStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
+            }
+            catch { }
+        }
+    }
+
+    private void ApplyStatusSnapshot(StatusSnapshot snap)
+    {
+        ApplyVersionStatus(snap.Version);
+
+        if (snap.ProbeFailed)
+        {
+            OfflineStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError);
+            StExeStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError);
+            PatchStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError);
+        }
+        else
+        {
+            ApplyOfflineStatus(snap.OfflineState);
+            ApplyStExeStatus(snap.StExeState);
+            ApplyPatchStatus(snap.PatchState);
+        }
+
+        if (snap.DllExists)
+        {
+            if (snap.DllIsCurrent == false)
+            {
+                DeployStatusText.Text = S.Format("Setup_DllInstalledOutdated", snap.DllLastWrite.ToString("g"));
                 DeployStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
                     System.Windows.Media.Color.FromRgb(0xFF, 0xAA, 0x00));
                 DeployButton.Content = S.Get("Setup_UpdateDll");
@@ -278,13 +378,13 @@ public partial class SetupPage : Page
             }
             else
             {
-                DeployStatusText.Text = S.Format("Setup_DllInstalled", info.Length.ToString("N0"), info.LastWriteTime.ToString("g"));
+                DeployStatusText.Text = S.Format("Setup_DllInstalled", snap.DllLength.ToString("N0"), snap.DllLastWrite.ToString("g"));
                 DeployButton.Content = S.Get("Setup_Deploy");
                 DeployButton.Visibility = Visibility.Collapsed;
             }
             UninstallDllButton.Visibility = Visibility.Visible;
         }
-        else if (EmbeddedDll.IsAvailable())
+        else if (snap.EmbeddedAvailable)
         {
             DeployStatusText.Text = S.Get("Setup_DllNotInstalledReady");
             DeployButton.Content = S.Get("Setup_Deploy");
@@ -296,12 +396,10 @@ public partial class SetupPage : Page
             DeployButton.Content = S.Get("Setup_Deploy");
             UninstallDllButton.Visibility = Visibility.Collapsed;
         }
-
     }
 
-    private void RefreshVersionStatus()
+    private void ApplyVersionStatus(long? version)
     {
-        var version = SteamDetector.GetSteamVersion();
         if (version == null)
         {
             VersionStatusText.Text = S.Get("Setup_VersionCouldNotDetermine");
@@ -332,75 +430,106 @@ public partial class SetupPage : Page
         }
     }
 
-    private void RefreshPatchStatus(Patcher patcher)
+    private void ApplyPatchStatus(PatchState state)
     {
+        PatchStatusText.Text = state switch
+        {
+            PatchState.Patched => S.Get("Setup_PatchState_Patched"),
+            PatchState.Unpatched => S.Get("Setup_PatchState_Unpatched"),
+            PatchState.PartiallyPatched => S.Get("Setup_PatchState_PartiallyPatched"),
+            PatchState.NotInstalled => S.Get("Setup_PatchState_NotInstalled"),
+            PatchState.UnknownVersion => S.Get("Setup_PatchState_UnknownVersion"),
+            PatchState.OutOfDate => S.Get("Setup_PatchState_OutOfDate"),
+            _ => S.Get("Setup_PatchState_Unknown")
+        };
+        PatchRevertButton.Visibility = (state == PatchState.Patched || state == PatchState.PartiallyPatched)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void ApplyOfflineStatus(PatchState state)
+    {
+        OfflineStatusText.Text = state switch
+        {
+            PatchState.Patched => S.Get("Setup_OfflinePatched"),
+            PatchState.Unpatched => S.Get("Setup_PatchState_Unpatched"),
+            PatchState.PartiallyPatched => S.Get("Setup_PatchState_PartiallyPatched"),
+            PatchState.NotInstalled => S.Get("Setup_PatchState_NotInstalled"),
+            PatchState.UnknownVersion => S.Get("Setup_PatchState_UnknownVersion"),
+            PatchState.OutOfDate => S.Get("Setup_PatchState_OutOfDate"),
+            _ => S.Get("Setup_PatchState_Unknown")
+        };
+        OfflineRevertButton.Visibility = (state == PatchState.Patched || state == PatchState.PartiallyPatched)
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void ApplyStExeStatus(int state)
+    {
+        StExeStatusText.Text = state switch
+        {
+            0 => S.Get("Setup_StExePatched"),
+            1 => S.Get("Setup_StExeActive"),
+            _ => S.Get("Setup_StExeNotFound")
+        };
+        StExeUnpatchButton.Visibility = state == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    // Per-button post-action refreshers; off-thread to avoid stalling the UI.
+    private async Task RefreshPatchStatusAsync()
+    {
+        var gen = System.Threading.Interlocked.Increment(ref _refreshGeneration);
+        var capturedPath = _steamPath;
+        if (capturedPath == null) return;
         try
         {
-            var state = patcher.GetPatchState();
-            PatchStatusText.Text = state switch
-            {
-                PatchState.Patched => S.Get("Setup_PatchState_Patched"),
-                PatchState.Unpatched => S.Get("Setup_PatchState_Unpatched"),
-                PatchState.PartiallyPatched => S.Get("Setup_PatchState_PartiallyPatched"),
-                PatchState.NotInstalled => S.Get("Setup_PatchState_NotInstalled"),
-                PatchState.UnknownVersion => S.Get("Setup_PatchState_UnknownVersion"),
-                PatchState.OutOfDate => S.Get("Setup_PatchState_OutOfDate"),
-                _ => S.Get("Setup_PatchState_Unknown")
-            };
-            PatchRevertButton.Visibility = (state == PatchState.Patched || state == PatchState.PartiallyPatched)
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            var state = await Task.Run(() => new Patcher(capturedPath, _ => { }).GetPatchState());
+            if (gen != _refreshGeneration || capturedPath != _steamPath) return;
+            ApplyPatchStatus(state);
         }
         catch (Exception ex)
         {
+            if (gen != _refreshGeneration) return;
             PatchStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
             PatchRevertButton.Visibility = Visibility.Collapsed;
         }
     }
 
-    private void RefreshOfflineStatus(Patcher patcher)
+    private async Task RefreshOfflineStatusAsync()
     {
+        var gen = System.Threading.Interlocked.Increment(ref _refreshGeneration);
+        var capturedPath = _steamPath;
+        if (capturedPath == null) return;
         try
         {
-            var state = patcher.GetOfflinePatchState();
-            OfflineStatusText.Text = state switch
-            {
-                PatchState.Patched => S.Get("Setup_OfflinePatched"),
-                PatchState.Unpatched => S.Get("Setup_PatchState_Unpatched"),
-                PatchState.PartiallyPatched => S.Get("Setup_PatchState_PartiallyPatched"),
-                PatchState.NotInstalled => S.Get("Setup_PatchState_NotInstalled"),
-                PatchState.UnknownVersion => S.Get("Setup_PatchState_UnknownVersion"),
-                PatchState.OutOfDate => S.Get("Setup_PatchState_OutOfDate"),
-                _ => S.Get("Setup_PatchState_Unknown")
-            };
-            OfflineRevertButton.Visibility = (state == PatchState.Patched || state == PatchState.PartiallyPatched)
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            var state = await Task.Run(() => new Patcher(capturedPath, _ => { }).GetOfflinePatchState());
+            if (gen != _refreshGeneration || capturedPath != _steamPath) return;
+            ApplyOfflineStatus(state);
         }
         catch (Exception ex)
         {
+            if (gen != _refreshGeneration) return;
             OfflineStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
             OfflineRevertButton.Visibility = Visibility.Collapsed;
         }
     }
 
-    private void RefreshStExeStatus(Patcher patcher)
+    private async Task RefreshStExeStatusAsync()
     {
+        var gen = System.Threading.Interlocked.Increment(ref _refreshGeneration);
+        var capturedPath = _steamPath;
+        if (capturedPath == null) return;
         try
         {
-            var state = patcher.GetSteamToolsExePatchState();
-            StExeStatusText.Text = state switch
-            {
-                0 => S.Get("Setup_StExePatched"),
-                1 => S.Get("Setup_StExeActive"),
-                _ => S.Get("Setup_StExeNotFound")
-            };
-            StExeUnpatchButton.Visibility = state == 0
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            var state = await Task.Run(() => new Patcher(capturedPath, _ => { }).GetSteamToolsExePatchState());
+            if (gen != _refreshGeneration || capturedPath != _steamPath) return;
+            ApplyStExeStatus(state);
         }
         catch (Exception ex)
         {
+            if (gen != _refreshGeneration) return;
             StExeStatusText.Text = S.Format("Setup_CouldNotCheck", ex.Message);
             StExeUnpatchButton.Visibility = Visibility.Collapsed;
         }
@@ -463,12 +592,8 @@ public partial class SetupPage : Page
             Log("═══ Pre-step: Download SteamTools Core DLLs ═══");
             try
             {
-                PatchResult repairResult = null;
-                await Task.Run(() =>
-                {
-                    var patcher = new Patcher(_steamPath, Log);
-                    repairResult = patcher.RepairCoreDlls();
-                });
+                var patcher = new Patcher(_steamPath, Log);
+                PatchResult repairResult = await patcher.RepairCoreDllsAsync();
 
                 if (repairResult?.Succeeded != true)
                 {
@@ -548,14 +673,14 @@ public partial class SetupPage : Page
                 stResult = patcher.PatchSteamToolsExe();
             });
 
-            RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
+            await RefreshStExeStatusAsync();
             if (stResult == 0)
                 Log("Skipped (not installed)");
             else if (stResult == 1)
                 Log("OK");
             else
             {
-                Log("FAILED — see detail above");
+                Log("FAILED -- see detail above");
                 allSucceeded = false;
             }
         }
@@ -627,18 +752,13 @@ public partial class SetupPage : Page
 
         Log("");
 
-        // Refresh all statuses
-        try
-        {
-            var p = new Patcher(_steamPath, _ => { });
-            RefreshOfflineStatus(p);
-            RefreshStExeStatus(p);
-        }
-        catch { }
+        // Refresh all statuses (off-thread; both methods swallow their own errors)
+        await RefreshOfflineStatusAsync();
+        await RefreshStExeStatusAsync();
 
         if (!allSucceeded)
         {
-            Log("Some steps failed — review the log above.");
+            Log("Some steps failed -- review the log above.");
         }
         else
         {
@@ -755,7 +875,7 @@ public partial class SetupPage : Page
                 result = patcher.RevertOfflineSetup();
             });
 
-            RefreshOfflineStatus(new Patcher(_steamPath, _ => { }));
+            await RefreshOfflineStatusAsync();
 
             if (result?.Succeeded == true)
             {
@@ -805,11 +925,11 @@ public partial class SetupPage : Page
                 stResult = patcher.PatchSteamToolsExe();
             });
 
-            RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
+            await RefreshStExeStatusAsync();
             Log("");
             Log(stResult == 1 ? "SteamTools.exe patched."
-              : stResult == 0 ? "SteamTools.exe not found — nothing to patch."
-              : "Patch failed — see log above.");
+              : stResult == 0 ? "SteamTools.exe not found -- nothing to patch."
+              : "Patch failed -- see log above.");
         }
         catch (Exception ex)
         {
@@ -847,9 +967,9 @@ public partial class SetupPage : Page
                 success = patcher.UnpatchSteamToolsExe();
             });
 
-            RefreshStExeStatus(new Patcher(_steamPath, _ => { }));
+            await RefreshStExeStatusAsync();
             Log("");
-            Log(success ? "SteamTools.exe restored." : "Restore failed — see log above.");
+            Log(success ? "SteamTools.exe restored." : "Restore failed -- see log above.");
         }
         catch (Exception ex)
         {
@@ -935,8 +1055,7 @@ public partial class SetupPage : Page
                 result = patcher.RevertCloudRedirectNamespace();
             });
 
-            var p = new Patcher(_steamPath, _ => { });
-            RefreshPatchStatus(p);
+            await RefreshPatchStatusAsync();
 
             if (result?.Succeeded == true)
             {

@@ -1,7 +1,7 @@
 #pragma once
 #include "cloud_provider.h"
 
-// LocalDiskProvider — ICloudProvider that stores files on a separate local/network path.
+// LocalDiskProvider -- ICloudProvider that stores files on a separate local/network path.
 
 class LocalDiskProvider : public ICloudProvider {
 public:
@@ -14,7 +14,10 @@ public:
     bool Download(const std::string& path, std::vector<uint8_t>& outData) override;
     bool Remove(const std::string& path) override;
     bool Exists(const std::string& path) override;
+    ExistsStatus CheckExists(const std::string& path) override;
     std::vector<FileInfo> List(const std::string& prefix) override;
+    bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
+                     bool* outComplete = nullptr) override;
 
 private:
     std::string m_root; // absolute path, ends with separator

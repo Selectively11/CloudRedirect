@@ -110,6 +110,9 @@
   <data name="Choice_CurrentMode_CloudRedirect_Desc" xml:space="preserve">
     <value>Todas las funciones están habilitadas. La intercepción de guardado en la nube está activa.</value>
   </data>
+  <data name="Choice_FailedSaveMode" xml:space="preserve">
+    <value>No se pudo guardar tu selección: {0}</value>
+  </data>
 
   <data name="Setup_Title" xml:space="preserve">
     <value>Configuración</value>
@@ -816,6 +819,144 @@ Puedes restaurar desde el panel de Restaurar partidas.</value>
   <data name="Apps_DeleteFailedTitle" xml:space="preserve">
     <value>La eliminación falló</value>
   </data>
+
+  <!-- AppsPage orphan-blob prune -->
+  <data name="Apps_ScanForOrphans" xml:space="preserve">
+    <value>Buscar huérfanos en la nube</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
+    <value>Buscar huérfanos en la nube</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
+    <value>Un "huérfano" es un archivo de partida guardada en tu almacenamiento en la nube al que ninguna aplicación de este PC sigue haciendo referencia: queda rezagado cuando se renombra una partida, se desinstala una aplicación o se interrumpe una sincronización. Ocupan espacio y pueden eclipsar partidas más nuevas al resolver conflictos.
+
+Esta exploración solo lee los listados de tu nube; no se elimina nada. Tras la exploración, cada aplicación afectada mostrará un botón "Revisar huérfanos" para que puedas inspeccionar los archivos y decidir si los eliminas.
+
+Steam debe estar cerrado durante la exploración para que una subida en curso no se confunda con un huérfano. ¿Continuar?</value>
+  </data>
+  <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
+    <value>Escaneando... ({0}/{1})</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyTitle" xml:space="preserve">
+    <value>Sin proveedor en la nube</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect está configurado solo para almacenamiento local. No hay nube para buscar blobs huérfanos.</value>
+  </data>
+  <data name="Apps_ScanFailedTitle" xml:space="preserve">
+    <value>Escaneo fallido</value>
+  </data>
+  <data name="Apps_ScanCompleteCleanFormat" xml:space="preserve">
+    <value>Se escanearon {0} aplicación(es) -- no se encontraron blobs huérfanos.</value>
+  </data>
+  <data name="Apps_ScanCompleteFoundFormat" xml:space="preserve">
+    <value>Se encontraron {0} blob(s) huérfano(s) en {1} aplicación(es).</value>
+  </data>
+  <data name="Apps_ScanCompletePartialFormat" xml:space="preserve">
+    <value>{0} aplicación(es) no pudieron verificarse (listado incompleto).</value>
+  </data>
+  <data name="Apps_OrphanSummaryFormat" xml:space="preserve">
+    <value>{0} blob(s) sin referenciar en la nube</value>
+  </data>
+  <data name="Apps_PruneAll" xml:space="preserve">
+    <value>Eliminar todo</value>
+  </data>
+  <data name="Apps_ReviewOrphans" xml:space="preserve">
+    <value>Revisar huérfanos</value>
+  </data>
+  <data name="Apps_CollapseOrphans" xml:space="preserve">
+    <value>Contraer</value>
+  </data>
+  <data name="Apps_PruneTooltip" xml:space="preserve">
+    <value>Eliminar blobs huérfanos en la nube que ya no estén referenciados por esta aplicación</value>
+  </data>
+  <data name="Apps_PruneScanningTitle" xml:space="preserve">
+    <value>Analizando blobs en la nube...</value>
+  </data>
+  <data name="Apps_PruneButton" xml:space="preserve">
+    <value>Limpiar</value>
+  </data>
+  <data name="Apps_PruneButtonScanning" xml:space="preserve">
+    <value>Analizando...</value>
+  </data>
+  <data name="Apps_PruneButtonPruning" xml:space="preserve">
+    <value>Limpiando...</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyTitle" xml:space="preserve">
+    <value>Sin proveedor en la nube</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect está configurado para almacenamiento local únicamente. No hay ningún proveedor en la nube del que eliminar blobs huérfanos.</value>
+  </data>
+  <data name="Apps_PruneNoOrphansTitle" xml:space="preserve">
+    <value>Sin blobs huérfanos</value>
+  </data>
+  <data name="Apps_PruneNoOrphansMessageFormat" xml:space="preserve">
+    <value>Los {0} blob(s) en la nube de {1} están referenciados por el índice local de partidas. No hay nada que limpiar.</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteTitle" xml:space="preserve">
+    <value>Listado de la nube incompleto</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteMessage" xml:space="preserve">
+    <value>No se pudo obtener la lista completa de blobs en la nube. Limpiar con datos parciales podría eliminar partidas legítimas, así que la operación se ha cancelado. Inténtalo de nuevo cuando la conexión con el proveedor en la nube sea estable.
+
+Detalles: {0}</value>
+  </data>
+  <data name="Apps_PruneConfirmTitle" xml:space="preserve">
+    <value>Limpiar blobs huérfanos de la nube</value>
+  </data>
+  <data name="Apps_PruneConfirmHeaderFormat" xml:space="preserve">
+    <value>¿Eliminar {0} blob(s) huérfano(s) de la nube para {1} ({2})?
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmExplanation" xml:space="preserve">
+    <value>Estos blobs existen en tu proveedor en la nube ({0}) pero NO están referenciados por el índice local de partidas (file_tokens.dat). Quedaron de una sesión anterior, un borrado fallido o una intervención manual, y nunca se descargarán ni se limpiarán por la vía de sincronización normal.
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmPreviewHeader" xml:space="preserve">
+    <value>Archivos a eliminar:
+</value>
+  </data>
+  <data name="Apps_PruneConfirmMoreFormat" xml:space="preserve">
+    <value>  ...y {0} más
+</value>
+  </data>
+  <data name="Apps_PruneConfirmWarning" xml:space="preserve">
+    <value>Esta operación no se puede deshacer. Las partidas locales NO se verán afectadas.</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmTitle" xml:space="preserve">
+    <value>Confirmar limpieza</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmMessageFormat" xml:space="preserve">
+    <value>¿Eliminar permanentemente {0} blob(s) huérfano(s) de la nube para {1}? Esto no se puede deshacer.</value>
+  </data>
+  <data name="Apps_PruneCompleteTitle" xml:space="preserve">
+    <value>Limpieza completada</value>
+  </data>
+  <data name="Apps_PruneCompleteMessageFormat" xml:space="preserve">
+    <value>Se eliminaron {0} blob(s) huérfano(s) de la nube para {1}.</value>
+  </data>
+  <data name="Apps_PrunePartialTitle" xml:space="preserve">
+    <value>Limpieza parcialmente completada</value>
+  </data>
+  <data name="Apps_PrunePartialMessageFormat" xml:space="preserve">
+    <value>Se eliminaron {0} de {1} blob(s) huérfano(s) de la nube para {2}. No se pudieron eliminar {3} archivo(s):
+
+{4}
+
+Detalles: {5}</value>
+  </data>
+  <data name="Apps_PruneFailedTitle" xml:space="preserve">
+    <value>La limpieza falló</value>
+  </data>
+  <data name="Apps_PruneFailedMessageFormat" xml:space="preserve">
+    <value>No se pudo eliminar ninguno de los {0} blob(s) huérfano(s) para {1}.
+
+Detalles: {2}</value>
+  </data>
+
   <data name="Apps_SteamNotFound" xml:space="preserve">
     <value>Steam no encontrado</value>
   </data>
@@ -1267,7 +1408,7 @@ Esto puede causar pérdida de datos en algunos casos.
     <value>Steam está en ejecución</value>
   </data>
   <data name="Steam_IsRunningMessage" xml:space="preserve">
-    <value>Steam debe estar cerrado antes de restaurar partidas. Cierra Steam e intenta de nuevo.</value>
+    <value>Steam debe estar cerrado antes de continuar. Cierra Steam e intenta de nuevo.</value>
   </data>
 
   <data name="Provider_GoogleDrive" xml:space="preserve">
@@ -1373,6 +1514,12 @@ Esto puede causar pérdida de datos en algunos casos.
   <data name="Settings_RestartNow" xml:space="preserve">
     <value>Reiniciar ahora</value>
   </data>
+  <data name="Settings_FailedSaveLanguage" xml:space="preserve">
+    <value>No se pudo guardar la preferencia de idioma: {0}</value>
+  </data>
+  <data name="Settings_FailedSaveSync" xml:space="preserve">
+    <value>No se pudo guardar la configuración de sincronización: {0}</value>
+  </data>
   <data name="Settings_SystemDefault" xml:space="preserve">
     <value>Predeterminado del sistema</value>
   </data>
@@ -1462,6 +1609,9 @@ Esto puede causar pérdida de datos en algunos casos.
   </data>
   <data name="Pin_AppFallbackName" xml:space="preserve">
     <value>App {0}</value>
+  </data>
+  <data name="Pin_FailedSavePinConfig" xml:space="preserve">
+    <value>No se pudo guardar la configuración de fijado: {0}</value>
   </data>
 
   <data name="Search_Placeholder" xml:space="preserve">

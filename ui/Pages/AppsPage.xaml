@@ -3,7 +3,13 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
       xmlns:res="clr-namespace:CloudRedirect.Resources"
+      xmlns:conv="clr-namespace:CloudRedirect.Converters"
       ScrollViewer.CanContentScroll="False">
+
+    <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+        <conv:UrlToImageSourceConverter x:Key="UrlToImageSource" />
+    </Page.Resources>
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
         <StackPanel>
@@ -25,87 +31,143 @@
                                Icon="{ui:SymbolIcon ArrowUndo24}"
                                Click="RestoreSavesButton_Click"
                                Margin="0,0,8,0" />
+                    <ui:Button x:Name="ScanOrphansButton"
+                               Content="{res:Loc Apps_ScanForOrphans}"
+                               Icon="{ui:SymbolIcon Broom24}"
+                               Click="ScanOrphans_Click"
+                               Margin="0,0,8,0" />
                     <ui:TextBox x:Name="AppSearchBox"
                                 PlaceholderText="{res:Loc Search_Placeholder}"
                                 Width="250"
                                 TextChanged="AppSearchBox_TextChanged"
-                                Margin="0,0,0,0" />
+                                Margin="0,0,8,0" />
+                    <TextBlock x:Name="ScanStatusText"
+                               Text=""
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               VerticalAlignment="Center" />
                 </WrapPanel>
 
                 <ItemsControl x:Name="AppList">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <ui:CardControl Margin="0,0,0,8">
-                                <ui:CardControl.Header>
-                                    <Grid>
+                            <StackPanel Margin="0,0,0,8">
+                                <ui:CardControl>
+                                    <ui:CardControl.Header>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+
+                                            <Border Grid.Column="0"
+                                                    Width="92" Height="43"
+                                                    CornerRadius="4"
+                                                    Margin="0,0,12,0"
+                                                    VerticalAlignment="Center"
+                                                    ClipToBounds="True">
+                                                <Border.Background>
+                                                    <ImageBrush ImageSource="{Binding HeaderUrl, Converter={StaticResource UrlToImageSource}}"
+                                                                Stretch="UniformToFill"
+                                                                RenderOptions.BitmapScalingMode="HighQuality" />
+                                                </Border.Background>
+                                            </Border>
+
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding DisplayName}"
+                                                           FontSize="15" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <WrapPanel Margin="0,3,0,0">
+                                                    <TextBlock Text="{Binding AppId}"
+                                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                               FontSize="12"
+                                                               Margin="0,0,12,0" />
+                                                    <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                               FontSize="12"
+                                                               Margin="0,0,12,0">
+                                                        <Run Text="{Binding FileCount, Mode=OneWay}" />
+                                                        <Run Text="{res:Loc Apps_Files}" />
+                                                    </TextBlock>
+                                                    <TextBlock Text="{Binding TotalSize}"
+                                                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                               FontSize="12"
+                                                               Margin="0,0,12,0" />
+                                                    <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                               FontSize="12"
+                                                               Margin="0,0,12,0">
+                                                        <Run Text="{res:Loc Apps_ChangeNumber}" />
+                                                        <Run Text="{Binding ChangeNumber, Mode=OneWay}" />
+                                                    </TextBlock>
+                                                    <TextBlock Text="{Binding RootTokens}"
+                                                               Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                                                               FontSize="12" />
+                                                </WrapPanel>
+                                            </StackPanel>
+
+                                            <StackPanel Grid.Column="2"
+                                                        Orientation="Horizontal"
+                                                        VerticalAlignment="Center">
+                                                <ui:Button Content="{res:Loc Apps_ReviewOrphans}"
+                                                           Appearance="Caution"
+                                                           VerticalAlignment="Center"
+                                                           Click="OrphansToggle_Click"
+                                                           Visibility="{Binding HasOrphans, Converter={StaticResource BoolToVis}}"
+                                                           Margin="0,0,8,0" />
+                                                <Button Click="DeleteApp_Click"
+                                                        ToolTip="{res:Loc Apps_DeleteTooltip}"
+                                                        Padding="8,6"
+                                                        Margin="4,0,0,0"
+                                                        Background="Transparent"
+                                                        BorderBrush="Transparent">
+                                                    <ui:SymbolIcon Symbol="Delete24"
+                                                                   FontSize="18"
+                                                                   Foreground="#E74C3C" />
+                                                </Button>
+                                            </StackPanel>
+                                        </Grid>
+                                    </ui:CardControl.Header>
+                                </ui:CardControl>
+
+                                <!--
+                                    Detail panel is a sibling of the CardControl, not a child,
+                                    so it inherits the ItemsControl's full horizontal bounds.
+                                    The symmetric 16px left/right margin keeps content inside
+                                    the card's visual footprint; without a right margin the
+                                    Prune button pokes past the card's right edge and, when
+                                    the page's vertical scrollbar appears, past the viewport.
+                                -->
+                                <StackPanel Visibility="Collapsed"
+                                            Margin="16,8,16,0">
+                                    <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="Auto" />
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-
-                                        <Border Grid.Column="0"
-                                                Width="92" Height="43"
-                                                CornerRadius="4"
-                                                Margin="0,0,12,0"
-                                                VerticalAlignment="Center"
-                                                ClipToBounds="True">
-                                            <Border.Background>
-                                                <ImageBrush ImageSource="{Binding HeaderUrl}"
-                                                            Stretch="UniformToFill"
-                                                            RenderOptions.BitmapScalingMode="HighQuality" />
-                                            </Border.Background>
-                                        </Border>
-
-                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding DisplayName}"
-                                                       FontSize="15" FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                                                       TextTrimming="CharacterEllipsis" />
-                                            <WrapPanel Margin="0,3,0,0">
-                                                <TextBlock Text="{Binding AppId}"
-                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                           FontSize="12"
-                                                           Margin="0,0,12,0" />
-                                                <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                           FontSize="12"
-                                                           Margin="0,0,12,0">
-                                                    <Run Text="{Binding FileCount, Mode=OneWay}" />
-                                                    <Run Text="{res:Loc Apps_Files}" />
-                                                </TextBlock>
-                                                <TextBlock Text="{Binding TotalSize}"
-                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                           FontSize="12"
-                                                           Margin="0,0,12,0" />
-                                                <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                                           FontSize="12"
-                                                           Margin="0,0,12,0">
-                                                    <Run Text="{res:Loc Apps_ChangeNumber}" />
-                                                    <Run Text="{Binding ChangeNumber, Mode=OneWay}" />
-                                                </TextBlock>
-                                                <TextBlock Text="{Binding RootTokens}"
-                                                           Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                                                           FontSize="12" />
-                                            </WrapPanel>
-                                        </StackPanel>
-
-                                        <StackPanel Grid.Column="2"
-                                                    Orientation="Horizontal"
-                                                    VerticalAlignment="Center">
-                                            <Button Click="DeleteApp_Click"
-                                                    ToolTip="{res:Loc Apps_DeleteTooltip}"
-                                                    Padding="8,6"
-                                                    Margin="4,0,0,0"
-                                                    Background="Transparent"
-                                                    BorderBrush="Transparent">
-                                                <ui:SymbolIcon Symbol="Delete24"
-                                                               FontSize="18"
-                                                               Foreground="#E74C3C" />
-                                            </Button>
-                                        </StackPanel>
+                                        <TextBlock Grid.Column="0"
+                                                   Text="{Binding OrphanSummary}"
+                                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                   VerticalAlignment="Center" />
+                                        <ui:Button Grid.Column="1"
+                                                   Content="{res:Loc Apps_PruneAll}"
+                                                   Icon="{ui:SymbolIcon Delete24}"
+                                                   Appearance="Danger"
+                                                   Click="PruneOrphans_Click" />
                                     </Grid>
-                                </ui:CardControl.Header>
-                            </ui:CardControl>
+                                    <ItemsControl ItemsSource="{Binding OrphanFilesPreview}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding}"
+                                                           FontFamily="Cascadia Code,Consolas,Courier New"
+                                                           FontSize="12"
+                                                           Margin="0,1"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+                            </StackPanel>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>

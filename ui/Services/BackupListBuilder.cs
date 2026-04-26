@@ -83,7 +83,7 @@ internal static class BackupListBuilder
                     ? storeInfo.Name : S.Format("Apps_AppFallbackName", appId));
             string? headerUrl = storeInfo?.HeaderUrl;
 
-            // -- Game card ---------------------------------------------------
+            // Game card
             var card = new Border
             {
                 Background = (Brush)findResource("ControlFillColorDefaultBrush"),
@@ -107,15 +107,29 @@ internal static class BackupListBuilder
                 Stretch = Stretch.UniformToFill,
                 Margin = new Thickness(0, 0, 10, 0)
             };
-            if (!string.IsNullOrEmpty(headerUrl) && SteamStoreClient.IsValidSteamCdnUrl(headerUrl))
+            if (!string.IsNullOrEmpty(headerUrl) && SteamStoreClient.IsValidImageUrl(headerUrl))
             {
                 try
                 {
+                    var uri = new Uri(headerUrl);
                     var bitmap = new BitmapImage();
                     bitmap.BeginInit();
-                    bitmap.UriSource = new Uri(headerUrl);
+                    if (uri.IsFile)
+                    {
+                        // OnLoad decodes immediately and releases the backing
+                        // file handle; without it a file:// URI keeps the
+                        // cached JPEG locked, blocking eviction and the
+                        // File.Move(overwrite:true) that installs a refreshed
+                        // asset after a Steam CDN hash rotation.
+                        bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    }
+                    // HTTP URIs: leave CacheOption at Default so the download
+                    // streams async rather than blocking the UI thread.
+                    bitmap.UriSource = uri;
                     bitmap.DecodePixelWidth = 64;
                     bitmap.EndInit();
+                    if (uri.IsFile)
+                        bitmap.Freeze();
                     iconImage.Source = bitmap;
                 }
                 catch { /* icon load failure is fine */ }
@@ -147,7 +161,7 @@ internal static class BackupListBuilder
 
             cardContent.Children.Add(gameHeader);
 
-            // -- Backup rows -------------------------------------------------
+            // Backup rows
             foreach (var backup in sorted)
             {
                 bool isRecent = highlightAfterUtc.HasValue &&

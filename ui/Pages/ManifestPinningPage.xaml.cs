@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using CloudRedirect.Resources;
@@ -27,10 +28,7 @@ public partial class ManifestPinningPage : Page
             _loading = true;
             try
             {
-                LoadConfig();
-                ScanLuaFiles();
-                ApplyPinnedState();
-                RefreshList();
+                await LoadInitialDataAsync();
                 await ResolveAppNamesAsync();
             }
             finally
@@ -40,12 +38,57 @@ public partial class ManifestPinningPage : Page
         };
     }
 
-    private void LoadConfig()
+    /// <summary>
+    /// Snapshot gathered off the UI thread so Loaded never blocks on
+    /// JsonDocument.Parse(pin config) or the lua dir walk.
+    /// </summary>
+    private sealed record InitialDataSnapshot(
+        bool ManifestPinning,
+        bool AutoComment,
+        HashSet<uint> PinnedApps,
+        List<LuaApp> Apps);
+
+    // M17: Move pin-config read + lua dir scan off the UI thread.
+    // Loaded used to call LoadConfig + ScanLuaFiles synchronously,
+    // which can stall if the Steam dir is on a network drive or AV
+    // is scanning *.lua. Gather everything in Task.Run and only
+    // mutate controls / collections in the dispatcher continuation.
+    private async Task LoadInitialDataAsync()
     {
+        var snapshot = await Task.Run(() =>
+        {
+            var (mp, ac, pinned) = ReadPinConfig();
+            var apps = ScanLuaFilesOffThread();
+            return new InitialDataSnapshot(mp, ac, pinned, apps);
+        });
+
+        ManifestPinningToggle.IsChecked = snapshot.ManifestPinning;
+        AutoCommentToggle.IsChecked = snapshot.AutoComment;
+
+        _pinnedApps.Clear();
+        foreach (var id in snapshot.PinnedApps)
+            _pinnedApps.Add(id);
+
+        _apps.Clear();
+        _apps.AddRange(snapshot.Apps);
+
+        ApplyPinnedState();
+        RefreshList();
+    }
+
+    /// <summary>
+    /// Reads the pin config off-thread. Returns defaults on any error
+    /// so the UI never sees a half-applied state.
+    /// </summary>
+    private static (bool ManifestPinning, bool AutoComment, HashSet<uint> Pinned) ReadPinConfig()
+    {
+        var pinned = new HashSet<uint>();
+        bool mp = false, ac = false;
         try
         {
             var path = SteamDetector.GetPinConfigPath();
-            if (path == null || !File.Exists(path)) return;
+            if (path == null || !File.Exists(path))
+                return (mp, ac, pinned);
 
             var json = File.ReadAllText(path);
             using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
@@ -54,38 +97,43 @@ public partial class ManifestPinningPage : Page
             });
             var root = doc.RootElement;
 
-            if (root.TryGetProperty("manifest_pinning", out var mp) && mp.ValueKind == JsonValueKind.True)
-                ManifestPinningToggle.IsChecked = true;
-            if (root.TryGetProperty("auto_comment", out var ac) && ac.ValueKind == JsonValueKind.True)
-                AutoCommentToggle.IsChecked = true;
+            if (root.TryGetProperty("manifest_pinning", out var mpEl) && mpEl.ValueKind == JsonValueKind.True)
+                mp = true;
+            if (root.TryGetProperty("auto_comment", out var acEl) && acEl.ValueKind == JsonValueKind.True)
+                ac = true;
 
-            _pinnedApps.Clear();
             if (root.TryGetProperty("pinned_apps", out var arr) && arr.ValueKind == JsonValueKind.Array)
             {
                 foreach (var el in arr.EnumerateArray())
                 {
                     if (el.TryGetUInt32(out var appId))
-                        _pinnedApps.Add(appId);
+                        pinned.Add(appId);
                 }
             }
         }
         catch { }
+        return (mp, ac, pinned);
     }
 
     private static readonly Regex ManifestIdRegex = new(
         @"setManifestid\s*\(\s*(\d+)\s*,\s*""(\d+)""",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    private void ScanLuaFiles()
+    /// <summary>
+    /// Off-thread version of the lua scan. Returns a fresh list rather
+    /// than mutating <see cref="_apps"/> so the dispatcher path owns
+    /// the only writer of that collection.
+    /// </summary>
+    private static List<LuaApp> ScanLuaFilesOffThread()
     {
-        _apps.Clear();
+        var result = new List<LuaApp>();
         try
         {
             var steamPath = SteamDetector.FindSteamPath();
-            if (steamPath == null) return;
+            if (steamPath == null) return result;
 
             var luaDir = Path.Combine(steamPath, "config", "stplug-in");
-            if (!Directory.Exists(luaDir)) return;
+            if (!Directory.Exists(luaDir)) return result;
 
             foreach (var file in Directory.GetFiles(luaDir, "*.lua"))
             {
@@ -114,7 +162,7 @@ public partial class ManifestPinningPage : Page
 
                 if (depots.Count == 0) continue;
 
-                _apps.Add(new LuaApp
+                result.Add(new LuaApp
                 {
                     AppId = appId,
                     DisplayName = S.Format("Pin_AppFallbackName", appId),
@@ -122,9 +170,10 @@ public partial class ManifestPinningPage : Page
                 });
             }
 
-            _apps.Sort((a, b) => a.AppId.CompareTo(b.AppId));
+            result.Sort((a, b) => a.AppId.CompareTo(b.AppId));
         }
         catch { }
+        return result;
     }
 
     private void ApplyPinnedState()
@@ -170,16 +219,46 @@ public partial class ManifestPinningPage : Page
         catch { }
     }
 
-    private void PinToggle_Changed(object sender, RoutedEventArgs e)
+    private async void PinToggle_Changed(object sender, RoutedEventArgs e)
     {
         if (_loading) return;
-        SaveConfig();
+
+        // The toggle state has already flipped by the time this handler
+        // runs. If SaveConfig throws (disk full, AV lock, etc.) we revert
+        // to the previous state so the UI doesn't lie about what's on disk.
+        var toggle = sender as Wpf.Ui.Controls.ToggleSwitch;
+        var prev = toggle?.IsChecked != true;
+
+        try
+        {
+            SaveConfig();
+        }
+        catch (Exception ex)
+        {
+            if (toggle != null)
+            {
+                _loading = true;
+                try { toggle.IsChecked = prev; }
+                finally { _loading = false; }
+            }
+            await Dialog.ShowErrorAsync(
+                S.Get("Common_Error"),
+                S.Format("Pin_FailedSavePinConfig", ex.Message));
+            return;
+        }
+
         NotifyRestartNeeded();
     }
 
-    private void AppPin_Changed(object sender, RoutedEventArgs e)
+    private async void AppPin_Changed(object sender, RoutedEventArgs e)
     {
         if (_loading) return;
+
+        // Two-way binding has already mutated app.IsPinned. Snapshot the
+        // pre-write pinned set so we can roll back the LuaApp + UI state
+        // if SaveConfig fails (atomic write means disk is intact either
+        // way; we only need to revert what we changed in-process).
+        var prevPinned = new HashSet<uint>(_pinnedApps);
 
         _pinnedApps.Clear();
         foreach (var app in _apps)
@@ -188,7 +267,30 @@ public partial class ManifestPinningPage : Page
                 _pinnedApps.Add(app.AppId);
         }
 
-        SaveConfig();
+        try
+        {
+            SaveConfig();
+        }
+        catch (Exception ex)
+        {
+            // Restore _pinnedApps and the per-app IsPinned flags, then
+            // re-bind the list so the toggle switch reflects the
+            // reverted state (LuaApp doesn't implement INPC).
+            _pinnedApps.Clear();
+            foreach (var id in prevPinned) _pinnedApps.Add(id);
+            foreach (var app in _apps)
+                app.IsPinned = _pinnedApps.Contains(app.AppId);
+
+            _loading = true;
+            try { RefreshList(); }
+            finally { _loading = false; }
+
+            await Dialog.ShowErrorAsync(
+                S.Get("Common_Error"),
+                S.Format("Pin_FailedSavePinConfig", ex.Message));
+            return;
+        }
+
         NotifyRestartNeeded();
     }
 
@@ -215,60 +317,62 @@ public partial class ManifestPinningPage : Page
         "manifest_pinning", "auto_comment", "pinned_apps"
     };
 
+    /// <summary>
+    /// Writes the current pin config to disk. Throws on real I/O failure
+    /// so callers can surface the error instead of silently dropping the
+    /// user's toggle action; the inner old-file parse catch is kept (corrupt
+    /// existing file → write fresh, intentional).
+    /// </summary>
     private void SaveConfig()
     {
-        try
+        var path = SteamDetector.GetPinConfigPath();
+        if (path == null) return;
+
+        JsonElement existing = default;
+        if (File.Exists(path))
         {
-            var path = SteamDetector.GetPinConfigPath();
-            if (path == null) return;
-
-            JsonElement existing = default;
-            if (File.Exists(path))
+            try
             {
-                try
+                var raw = File.ReadAllText(path);
+                using var doc = JsonDocument.Parse(raw, new JsonDocumentOptions
                 {
-                    var raw = File.ReadAllText(path);
-                    using var doc = JsonDocument.Parse(raw, new JsonDocumentOptions
-                    {
-                        CommentHandling = JsonCommentHandling.Skip
-                    });
-                    existing = doc.RootElement.Clone();
-                }
-                catch { }
+                    CommentHandling = JsonCommentHandling.Skip
+                });
+                existing = doc.RootElement.Clone();
             }
-
-            using var ms = new MemoryStream();
-            using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
-            {
-                writer.WriteStartObject();
-                writer.WriteBoolean("manifest_pinning", ManifestPinningToggle.IsChecked == true);
-                writer.WriteBoolean("auto_comment", AutoCommentToggle.IsChecked == true);
-
-                writer.WriteStartArray("pinned_apps");
-                foreach (var appId in _pinnedApps.OrderBy(x => x))
-                    writer.WriteNumberValue(appId);
-                writer.WriteEndArray();
-
-                if (existing.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in existing.EnumerateObject())
-                    {
-                        if (_ownedKeys.Contains(prop.Name)) continue;
-                        prop.WriteTo(writer);
-                    }
-                }
-
-                writer.WriteEndObject();
-            }
-
-            var dir = Path.GetDirectoryName(path)!;
-            if (!Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-
-            var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
-            FileUtils.AtomicWriteAllText(path, json);
+            catch { }
         }
-        catch { }
+
+        using var ms = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteBoolean("manifest_pinning", ManifestPinningToggle.IsChecked == true);
+            writer.WriteBoolean("auto_comment", AutoCommentToggle.IsChecked == true);
+
+            writer.WriteStartArray("pinned_apps");
+            foreach (var appId in _pinnedApps.OrderBy(x => x))
+                writer.WriteNumberValue(appId);
+            writer.WriteEndArray();
+
+            if (existing.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in existing.EnumerateObject())
+                {
+                    if (_ownedKeys.Contains(prop.Name)) continue;
+                    prop.WriteTo(writer);
+                }
+            }
+
+            writer.WriteEndObject();
+        }
+
+        var dir = Path.GetDirectoryName(path)!;
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+
+        var json = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        FileUtils.AtomicWriteAllText(path, json);
     }
 
     internal class LuaApp

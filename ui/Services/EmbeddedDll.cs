@@ -68,24 +68,32 @@ internal static class EmbeddedDll
 
     /// <summary>
     /// Atomically deploys the embedded cloud_redirect.dll to the given destination path.
-    /// Writes to a .tmp file first, then renames to avoid partial DLL on crash/interruption.
+    /// Routes through FileUtils.AtomicWriteAllBytes so the bytes are forced
+    /// out of the OS page cache (FlushFileBuffers) before the .tmp is
+    /// renamed over destPath -- without that, a power loss between the
+    /// write and the OS lazy-flush leaves the published file pointing at
+    /// an inode whose data blocks were never written, even though NTFS
+    /// journaled the rename. The DLL is ~900 KB so reading it into a
+    /// byte[] up front is trivial.
     /// </summary>
     /// <returns>null on success, or an error message string on failure.</returns>
     public static string? DeployTo(string destPath)
     {
-        using var stream = typeof(EmbeddedDll).Assembly
-            .GetManifestResourceStream(ResourceName);
-        if (stream == null)
-            return S.Get("EmbeddedDll_NotEmbedded");
+        byte[] payload;
+        using (var stream = typeof(EmbeddedDll).Assembly
+            .GetManifestResourceStream(ResourceName))
+        {
+            if (stream == null)
+                return S.Get("EmbeddedDll_NotEmbedded");
+
+            using var ms = new MemoryStream(checked((int)stream.Length));
+            stream.CopyTo(ms);
+            payload = ms.ToArray();
+        }
 
         try
         {
-            var tmpPath = destPath + ".tmp";
-            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write))
-            {
-                stream.CopyTo(fs);
-            }
-            File.Move(tmpPath, destPath, overwrite: true);
+            FileUtils.AtomicWriteAllBytes(destPath, payload);
             return null;
         }
         catch (IOException ex) when (ex.Message.Contains("used by another process", StringComparison.OrdinalIgnoreCase)

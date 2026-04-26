@@ -3,7 +3,12 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
       xmlns:res="clr-namespace:CloudRedirect.Resources"
+      xmlns:conv="clr-namespace:CloudRedirect.Converters"
       ScrollViewer.CanContentScroll="False">
+
+    <Page.Resources>
+        <conv:UrlToImageSourceConverter x:Key="UrlToImageSource" />
+    </Page.Resources>
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
         <StackPanel MaxWidth="800">
@@ -114,7 +119,7 @@
                                                 VerticalAlignment="Center"
                                                 ClipToBounds="True">
                                             <Border.Background>
-                                                <ImageBrush ImageSource="{Binding HeaderUrl}"
+                                                <ImageBrush ImageSource="{Binding HeaderUrl, Converter={StaticResource UrlToImageSource}}"
                                                             Stretch="UniformToFill"
                                                             RenderOptions.BitmapScalingMode="HighQuality" />
                                             </Border.Background>

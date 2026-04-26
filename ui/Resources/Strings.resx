@@ -116,6 +116,9 @@
   <data name="Choice_CurrentMode_CloudRedirect_Desc" xml:space="preserve">
     <value>All features are enabled. Cloud save interception is active.</value>
   </data>
+  <data name="Choice_FailedSaveMode" xml:space="preserve">
+    <value>Couldn't save your selection: {0}</value>
+  </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- SetupPage XAML                                                     -->
@@ -838,6 +841,144 @@ You can restore from the Restore Saves panel.</value>
   <data name="Apps_DeleteFailedTitle" xml:space="preserve">
     <value>Delete Failed</value>
   </data>
+
+  <!-- AppsPage orphan-blob scan + prune -->
+  <data name="Apps_PruneTooltip" xml:space="preserve">
+    <value>Delete orphan cloud blobs no longer referenced by this app</value>
+  </data>
+  <data name="Apps_ScanForOrphans" xml:space="preserve">
+    <value>Scan Cloud for Orphans</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
+    <value>Scan Cloud for Orphans</value>
+  </data>
+  <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
+    <value>An "orphan" is a save file in your cloud storage that no app on this PC still references -- left behind when a save was renamed, an app was uninstalled, or a sync was interrupted. They take up space and can shadow newer saves on conflict.
+
+This scan only reads your cloud listings; nothing is deleted. After the scan, each affected app gets a "Review Orphans" button so you can inspect the files and decide whether to prune them.
+
+Steam must be closed during the scan so an in-flight upload can't be misread as an orphan. Continue?</value>
+  </data>
+  <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
+    <value>Scanning... ({0}/{1})</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyTitle" xml:space="preserve">
+    <value>No Cloud Provider</value>
+  </data>
+  <data name="Apps_ScanLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect is configured for local-only storage. There is no cloud to scan for orphan blobs.</value>
+  </data>
+  <data name="Apps_ScanFailedTitle" xml:space="preserve">
+    <value>Scan Failed</value>
+  </data>
+  <data name="Apps_ScanCompleteCleanFormat" xml:space="preserve">
+    <value>Scanned {0} app(s) -- no orphan cloud blobs found.</value>
+  </data>
+  <data name="Apps_ScanCompleteFoundFormat" xml:space="preserve">
+    <value>Found {0} orphan cloud blob(s) across {1} app(s).</value>
+  </data>
+  <data name="Apps_ScanCompletePartialFormat" xml:space="preserve">
+    <value>{0} app(s) could not be verified (listing incomplete).</value>
+  </data>
+  <data name="Apps_OrphanSummaryFormat" xml:space="preserve">
+    <value>{0} unreferenced cloud blob(s)</value>
+  </data>
+  <data name="Apps_PruneAll" xml:space="preserve">
+    <value>Prune All</value>
+  </data>
+  <data name="Apps_ReviewOrphans" xml:space="preserve">
+    <value>Review Orphans</value>
+  </data>
+  <data name="Apps_CollapseOrphans" xml:space="preserve">
+    <value>Collapse</value>
+  </data>
+  <data name="Apps_PruneScanningTitle" xml:space="preserve">
+    <value>Scanning cloud blobs...</value>
+  </data>
+  <data name="Apps_PruneButton" xml:space="preserve">
+    <value>Prune</value>
+  </data>
+  <data name="Apps_PruneButtonScanning" xml:space="preserve">
+    <value>Scanning...</value>
+  </data>
+  <data name="Apps_PruneButtonPruning" xml:space="preserve">
+    <value>Pruning...</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyTitle" xml:space="preserve">
+    <value>No Cloud Provider</value>
+  </data>
+  <data name="Apps_PruneLocalOnlyMessage" xml:space="preserve">
+    <value>CloudRedirect is configured for local-only storage. There is no cloud provider to prune orphan blobs from.</value>
+  </data>
+  <data name="Apps_PruneNoOrphansTitle" xml:space="preserve">
+    <value>No Orphan Blobs</value>
+  </data>
+  <data name="Apps_PruneNoOrphansMessageFormat" xml:space="preserve">
+    <value>All {0} cloud blob(s) for {1} are referenced by the local save index. Nothing to prune.</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteTitle" xml:space="preserve">
+    <value>Cloud Listing Incomplete</value>
+  </data>
+  <data name="Apps_PruneListingIncompleteMessage" xml:space="preserve">
+    <value>Could not retrieve a complete list of cloud blobs. Pruning on partial data would risk deleting legitimate saves, so the operation has been aborted. Try again when your connection to the cloud provider is stable.
+
+Details: {0}</value>
+  </data>
+  <data name="Apps_PruneConfirmTitle" xml:space="preserve">
+    <value>Prune Orphan Cloud Blobs</value>
+  </data>
+  <data name="Apps_PruneConfirmHeaderFormat" xml:space="preserve">
+    <value>Delete {0} orphan cloud blob(s) for {1} ({2})?
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmExplanation" xml:space="preserve">
+    <value>These blobs exist in your cloud provider ({0}) but are NOT referenced by the local save index (file_tokens.dat). They were left behind by a prior session, a failed delete, or a manual override, and will never be downloaded or cleaned up by the normal sync path.
+
+</value>
+  </data>
+  <data name="Apps_PruneConfirmPreviewHeader" xml:space="preserve">
+    <value>Files to delete:
+</value>
+  </data>
+  <data name="Apps_PruneConfirmMoreFormat" xml:space="preserve">
+    <value>  ...and {0} more
+</value>
+  </data>
+  <data name="Apps_PruneConfirmWarning" xml:space="preserve">
+    <value>This operation cannot be undone. Local saves will NOT be affected.</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmTitle" xml:space="preserve">
+    <value>Confirm Prune</value>
+  </data>
+  <data name="Apps_PruneFinalConfirmMessageFormat" xml:space="preserve">
+    <value>Permanently delete {0} orphan cloud blob(s) for {1}? This cannot be undone.</value>
+  </data>
+  <data name="Apps_PruneCompleteTitle" xml:space="preserve">
+    <value>Prune Complete</value>
+  </data>
+  <data name="Apps_PruneCompleteMessageFormat" xml:space="preserve">
+    <value>Deleted {0} orphan cloud blob(s) for {1}.</value>
+  </data>
+  <data name="Apps_PrunePartialTitle" xml:space="preserve">
+    <value>Prune Partially Complete</value>
+  </data>
+  <data name="Apps_PrunePartialMessageFormat" xml:space="preserve">
+    <value>Deleted {0} of {1} orphan cloud blob(s) for {2}. {3} file(s) could not be deleted:
+
+{4}
+
+Details: {5}</value>
+  </data>
+  <data name="Apps_PruneFailedTitle" xml:space="preserve">
+    <value>Prune Failed</value>
+  </data>
+  <data name="Apps_PruneFailedMessageFormat" xml:space="preserve">
+    <value>Could not delete any of the {0} orphan blob(s) for {1}.
+
+Details: {2}</value>
+  </data>
+
   <data name="Apps_SteamNotFound" xml:space="preserve">
     <value>Steam not found</value>
   </data>
@@ -1309,7 +1450,7 @@ Are you sure?</value>
     <value>Steam Is Running</value>
   </data>
   <data name="Steam_IsRunningMessage" xml:space="preserve">
-    <value>Steam must be closed before restoring saves. Please close Steam and try again.</value>
+    <value>Steam must be closed before continuing. Please close Steam and try again.</value>
   </data>
 
   <!-- CloudConfig.DisplayName -->
@@ -1430,6 +1571,12 @@ Are you sure?</value>
   <data name="Settings_RestartNow" xml:space="preserve">
     <value>Restart Now</value>
   </data>
+  <data name="Settings_FailedSaveLanguage" xml:space="preserve">
+    <value>Couldn't save language preference: {0}</value>
+  </data>
+  <data name="Settings_FailedSaveSync" xml:space="preserve">
+    <value>Couldn't save sync settings: {0}</value>
+  </data>
   <data name="Settings_SystemDefault" xml:space="preserve">
     <value>System Default</value>
   </data>
@@ -1528,6 +1675,9 @@ Are you sure?</value>
   </data>
   <data name="Pin_AppFallbackName" xml:space="preserve">
     <value>App {0}</value>
+  </data>
+  <data name="Pin_FailedSavePinConfig" xml:space="preserve">
+    <value>Couldn't save pin configuration: {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->

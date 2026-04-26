@@ -4,12 +4,14 @@
 #include <cstdint>
 #include <memory>
 
-// ICloudProvider — abstract interface for cloud storage backends.
+// ICloudProvider -- abstract interface for cloud storage backends.
 // All paths are relative with forward slashes: "{accountId}/{appId}/blobs/{filename}"
 // Implementations: GoogleDriveProvider, OneDriveProvider, LocalDiskProvider.
 
 class ICloudProvider {
 public:
+    enum class ExistsStatus { Missing, Exists, Error };
+
     virtual ~ICloudProvider() = default;
 
     // Human-readable name ("Google Drive", "OneDrive", "Local Disk").
@@ -20,7 +22,7 @@ public:
     // For LocalDisk: path to the storage root directory.
     virtual bool Init(const std::string& configPath) = 0;
 
-    // Shut down gracefully — drain pending operations, release resources.
+    // Shut down gracefully -- drain pending operations, release resources.
     virtual void Shutdown() = 0;
 
     // True if the provider has valid credentials (or doesn't need them).
@@ -44,6 +46,9 @@ public:
     // Check if a file exists.
     virtual bool Exists(const std::string& path) = 0;
 
+    // Check if a file exists, preserving provider/API errors when available.
+    virtual ExistsStatus CheckExists(const std::string& path) = 0;
+
     // Listing
 
     struct FileInfo {
@@ -55,6 +60,19 @@ public:
     // List all files under a prefix (e.g., "54303850/1229490/blobs/").
     // Returns empty vector if the prefix doesn't exist.
     virtual std::vector<FileInfo> List(const std::string& prefix) = 0;
+
+    // Like List() but returns false on API/filesystem error (missing prefix
+    // is success with an empty listing). When outComplete is non-null,
+    // overrides must init it to false at entry and only write true after
+    // verifying full enumeration; callers refuse destructive prunes on
+    // incomplete listings.
+    virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
+                             bool* outComplete = nullptr) {
+        if (outComplete) *outComplete = false;
+        outFiles = List(prefix);
+        if (outComplete) *outComplete = true;
+        return true;
+    }
 };
 
 // Factory: create a provider by name.

@@ -396,6 +396,77 @@ public class BackupDiscoveryTests
         finally { Directory.Delete(dir, true); }
     }
 
+    // ── Concurrent migration regression ────────────────────────────────
+
+    [Fact]
+    public void ListBackups_ConcurrentMigration_DoesNotRaceOnDirectoryMove()
+    {
+        // Reproduces the W4 race: CleanupPage and AppsPage both spawn
+        // Task.Run(() => BackupDiscovery.List...) from their Loaded
+        // handlers. Without serialization both threads pass the
+        // un-set guard and race on Directory.Move, surfacing
+        // "destination already exists" IOExceptions.
+        BackupDiscovery.ResetMigrationState();
+        var dir = GetTempDir();
+        try
+        {
+            // Seed a legacy tree with both cleanup and app-delete entries
+            // so MigrateLegacyBackups has real work to do.
+            var legacyAccount = Path.Combine(dir, "cloud_redirect", BackupPaths.LegacyDir, "12345678");
+            for (int i = 0; i < 5; i++)
+            {
+                var subDir = Path.Combine(legacyAccount, $"ts_2025040{i}");
+                Directory.CreateDirectory(subDir);
+                File.WriteAllText(Path.Combine(subDir, "undo_log.json"),
+                    MakeUndoLogJson($"2025-04-0{i}T10:00:00Z", (@"C:\orig\save.dat", @"C:\dummy", (uint)(100 + i))));
+            }
+            for (int i = 0; i < 5; i++)
+            {
+                var subDir = Path.Combine(legacyAccount, $"delete_60{i}_2025040{i}");
+                Directory.CreateDirectory(subDir);
+                File.WriteAllText(Path.Combine(subDir, "undo_log.json"),
+                    MakeUndoLogJson($"2025-04-0{i}T10:00:00Z", (@"C:\orig\save.dat", @"C:\dummy", (uint)(600 + i))));
+            }
+
+            // Fire several callers in parallel and use a barrier so
+            // they all attempt the migration body concurrently. Without
+            // serialization the second-mover's Directory.Move will fail
+            // with "destination already exists" and surface as an
+            // IOException out of the threadpool task.
+            const int callers = 6;
+            var barrier = new Barrier(callers);
+            var exceptions = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+            var threads = new Thread[callers];
+            for (int i = 0; i < callers; i++)
+            {
+                int idx = i;
+                threads[i] = new Thread(() =>
+                {
+                    barrier.SignalAndWait();
+                    try
+                    {
+                        if (idx % 2 == 0) BackupDiscovery.ListCleanupBackups(dir);
+                        else BackupDiscovery.ListAppDeleteBackups(dir);
+                    }
+                    catch (Exception ex) { exceptions.Add(ex); }
+                });
+            }
+            foreach (var t in threads) t.Start();
+            foreach (var t in threads) t.Join();
+
+            Assert.Empty(exceptions);
+
+            // Migration must have completed exactly once: both new
+            // roots populated, legacy root removed.
+            Assert.False(Directory.Exists(Path.Combine(dir, "cloud_redirect", BackupPaths.LegacyDir)));
+            var cleanupBackups = BackupDiscovery.ListCleanupBackups(dir);
+            var appBackups = BackupDiscovery.ListAppDeleteBackups(dir);
+            Assert.Equal(5, cleanupBackups.Count);
+            Assert.Equal(5, appBackups.Count);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     // ── Backups sorted by timestamp (newest first) ─────────────────────
 
     [Fact]

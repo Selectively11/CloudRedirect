@@ -1,34 +1,37 @@
 #include "common.h"
 #include "log.h"
 #include "cloud_intercept.h"
+#include "file_util.h"
+#include <atomic>
 #include <mutex>
 
 static HMODULE g_thisModule = nullptr;
 static std::once_flag g_initFlag;
 
-// get Steam directory from the DLL's own location
+// Steam dir from the DLL's own location, UTF-8.
+// All "narrow" std::string paths in the DLL are UTF-8; ACP narrowing here
+// would corrupt every non-ASCII Steam install.
 static std::string GetSteamPath() {
-    char dllPath[MAX_PATH];
-    GetModuleFileNameA(g_thisModule, dllPath, MAX_PATH);
-    std::string dir(dllPath);
-    auto pos = dir.rfind('\\');
-    if (pos != std::string::npos)
-        return dir.substr(0, pos + 1);
-    return {};
+    wchar_t wdllPath[MAX_PATH];
+    DWORD n = GetModuleFileNameW(g_thisModule, wdllPath, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+
+    // Trim to parent on wide data so we don't split a multi-byte sequence.
+    DWORD endIdx = n;
+    for (DWORD i = n; i > 0; --i) {
+        if (wdllPath[i - 1] == L'\\') { endIdx = i; break; }
+    }
+
+    // WideToUtf8 rejects ill-formed UTF-16 (init then logs+skips).
+    return FileUtil::WideToUtf8(wdllPath, (size_t)endIdx);
 }
 
-// exported function called by the SteamTools payload code cave
-// signature: int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recvPktFn)
-// returns non-zero if packet was handled (caller should skip original SendPkt handler)
-// returns zero to let the original SteamTools SendPkt handler process it
+// Entry point from the SteamTools payload code cave.
+// Returns nonzero if we handled the packet; zero lets Steam's SendPkt run.
 extern "C" __declspec(dllexport)
 int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recvPktFn) {
-    // one-time init on first call (we're inside the Steam process by now)
-    // If call_once throws, the flag remains unset and the next call retries.
-    // We catch internally to prevent partial initialization from leaving the system
-    // in an inconsistent state — if init fails, we log and mark as failed so
-    // subsequent calls skip init and return 0 (let Steam handle the packet).
-    static bool g_initFailed = false;
+    // One-time init; init failure -> return 0 (let Steam handle).
+    static std::atomic<bool> g_initFailed{false};
     std::call_once(g_initFlag, [&]() {
         try {
             std::string steamPath = GetSteamPath();
@@ -38,7 +41,7 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
             LOG("CloudRedirect loaded via code cave, PID=%u", GetCurrentProcessId());
             LOG("Steam path: %s", steamPath.c_str());
 
-            // Log module bases for mapping runtime addresses to IDA
+            // Module bases (for IDA mapping).
             HMODULE hSteamClient = GetModuleHandleA("steamclient64.dll");
             LOG("steamclient64.dll base: %p", hSteamClient);
 
@@ -47,31 +50,26 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
             if (recvPktFn) {
                 CloudIntercept::SetSendPktAddr(recvPktFn);
 
-                // install RecvPkt monitor hook for response interception
-                // recvPktFn points to the RecvPkt vtable slot (RVA 0x1CAB48)
-                // the saved original RecvPkt is at RVA 0x1CAB20
+                // recvPktFn = RecvPkt slot (RVA 0x1CAB48); saved orig at RVA 0x1CAB20.
                 uintptr_t recvPktGlobal = (uintptr_t)recvPktFn;
                 uintptr_t payloadBase = recvPktGlobal - 0x1CAB48;
                 uintptr_t savedOrigAddr = payloadBase + 0x1CAB20;
                 CloudIntercept::InstallRecvPktMonitor((void*)savedOrigAddr);
             }
 
-            // install inline detour on steamclient64 for manifest pinning
             CloudIntercept::InstallManifestPinHook();
 
             LOG("CloudRedirect fully initialized with hooks");
         } catch (const std::exception& ex) {
             LOG("CloudRedirect init FAILED: %s", ex.what());
-            g_initFailed = true;
+            g_initFailed.store(true, std::memory_order_relaxed);
         } catch (...) {
             LOG("CloudRedirect init FAILED: unknown exception");
-            g_initFailed = true;
+            g_initFailed.store(true, std::memory_order_relaxed);
         }
     });
 
-    if (g_initFailed) return 0;
-
-    // delegate to intercept handler
+    if (g_initFailed.load(std::memory_order_relaxed)) return 0;
     return CloudIntercept::OnSendPkt(thisptr, data, size) ? 1 : 0;
 }
 
@@ -81,9 +79,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         g_thisModule = hModule;
         DisableThreadLibraryCalls(hModule);
 
-        // Pin the DLL so FreeLibrary can never unload it.
-        // This prevents crashes from threads still executing hook code
-        // after the loader tears us down.
+        // Pin against FreeLibrary so hook threads survive.
         {
             HMODULE pinned = nullptr;
             GetModuleHandleExA(
@@ -94,12 +90,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
         break;
 
     case DLL_PROCESS_DETACH:
-        // reserved != NULL means process is terminating (ExitProcess).
-        // Other threads are already dead — joining them or acquiring mutexes
-        // would deadlock. Only run cleanup on explicit FreeLibrary (reserved == NULL).
+        // FreeLibrary path only (we're pinned, so unreachable today). ExitProcess
+        // path runs from an atexit hook installed in CloudIntercept::Init.
         if (reserved == nullptr) {
             CloudIntercept::Shutdown();
-            Log::Shutdown();
         }
         break;
     }

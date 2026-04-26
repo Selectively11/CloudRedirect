@@ -1,12 +1,8 @@
 #pragma once
+#include "cloud_metadata_paths.h"
 #include "common.h"
 
 namespace CloudIntercept {
-
-inline constexpr const char* kPlaytimeMetadataPath = ".cloudredirect/Playtime.bin";
-inline constexpr const char* kStatsMetadataPath = ".cloudredirect/UserGameStats.bin";
-inline constexpr const char* kLegacyPlaytimeMetadataPath = "Playtime.bin";
-inline constexpr const char* kLegacyStatsMetadataPath = "UserGameStats.bin";
 
 // CNetPacket struct (passed as second arg to RecvPkt)
 // Layout confirmed from IDA: sub_138E59C30 (AddRef), sub_138D02530 (wrapper creator)

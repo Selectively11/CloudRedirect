@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using CloudRedirect.Resources;
@@ -18,6 +19,13 @@ public partial class SettingsPage : Page
     private bool _languageLoading;
     private bool _syncLoading;
     /// <summary>
+    /// Index of the last LanguageOptions entry that was successfully
+    /// persisted to settings.json. Used to roll back the combo if a
+    /// later selection-change save fails so the UI never shows a
+    /// language different from what's actually on disk.
+    /// </summary>
+    private int _lastSavedLanguageIndex;
+    /// <summary>
     /// Language options: display key -> culture code (or "system").
     /// </summary>
     private static readonly (string ResourceKey, string Code)[] LanguageOptions =
@@ -31,38 +39,69 @@ public partial class SettingsPage : Page
     public SettingsPage()
     {
         InitializeComponent();
-        Loaded += (_, _) =>
+        Loaded += async (_, _) =>
         {
             LoadAbout();
-            LoadLanguageSelector();
-
-            var mode = Services.SteamDetector.ReadModeSetting();
-            if (mode == "cloud_redirect")
-            {
-                SyncSection.Visibility = Visibility.Visible;
-                LoadSyncToggles();
-            }
-            else
-            {
-                SyncSection.Visibility = Visibility.Collapsed;
-            }
+            try { await LoadSettingsAsync(); }
+            catch { }
         };
     }
 
-    private void LoadAbout()
+    /// <summary>
+    /// Snapshot of everything LoadSettingsAsync gathers off the UI thread.
+    /// All disk reads (settings.json language, settings.json mode,
+    /// config.json sync toggles) happen in Task.Run; the dispatcher
+    /// continuation only mutates controls.
+    /// </summary>
+    private sealed record SettingsSnapshot(
+        string Language,
+        string? Mode,
+        bool? SyncAchievements,
+        bool? SyncPlaytime,
+        bool? SyncLuas);
+
+    // M15: Move language/mode/sync-toggle config reads off the UI thread.
+    // Loaded used to call ReadLanguageSetting + ReadModeSetting +
+    // LoadSyncToggles synchronously, which can stall on a slow disk
+    // (network drive, AV scan). Mirror DashboardPage.LoadStatusAsync:
+    // gather a snapshot in Task.Run, apply controls afterward.
+    private async Task LoadSettingsAsync()
     {
-        var version = Assembly.GetExecutingAssembly().GetName().Version;
-        VersionText.Text = version != null
-            ? S.Format("Settings_VersionFormat", version.Major, version.Minor, version.Build)
-            : S.Get("Settings_CloudRedirect");
+        var snapshot = await Task.Run(() =>
+        {
+            var lang = ReadLanguageSetting();
+            var mode = Services.SteamDetector.ReadModeSetting();
+
+            bool? a = null, p = null, l = null;
+            if (mode == "cloud_redirect")
+                ReadSyncTogglesInto(ref a, ref p, ref l);
+
+            return new SettingsSnapshot(lang, mode, a, p, l);
+        });
+
+        ApplySettingsSnapshot(snapshot);
     }
 
-    private void LoadLanguageSelector()
+    private void ApplySettingsSnapshot(SettingsSnapshot snap)
+    {
+        ApplyLanguageSelector(snap.Language);
+
+        if (snap.Mode == "cloud_redirect")
+        {
+            SyncSection.Visibility = Visibility.Visible;
+            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas);
+        }
+        else
+        {
+            SyncSection.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void ApplyLanguageSelector(string saved)
     {
         _languageLoading = true;
         try
         {
-            var saved = ReadLanguageSetting();
             LanguageComboBox.Items.Clear();
 
             int selectedIndex = 0;
@@ -75,6 +114,7 @@ public partial class SettingsPage : Page
             }
 
             LanguageComboBox.SelectedIndex = selectedIndex;
+            _lastSavedLanguageIndex = selectedIndex;
         }
         finally
         {
@@ -82,7 +122,56 @@ public partial class SettingsPage : Page
         }
     }
 
-    private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas)
+    {
+        _syncLoading = true;
+        try
+        {
+            if (achievements == true) SyncAchievementsToggle.IsChecked = true;
+            if (playtime == true) SyncPlaytimeToggle.IsChecked = true;
+            if (luas == true) SyncLuasToggle.IsChecked = true;
+        }
+        finally
+        {
+            _syncLoading = false;
+        }
+    }
+
+    /// <summary>
+    /// Reads the sync toggle booleans from config.json on the calling
+    /// thread. Used by LoadSettingsAsync inside Task.Run so the dispatcher
+    /// path never opens config.json synchronously.
+    /// </summary>
+    private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas)
+    {
+        try
+        {
+            var path = GetConfigPath();
+            if (!File.Exists(path)) return;
+
+            var json = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("sync_achievements", out var a) && a.ValueKind == JsonValueKind.True)
+                achievements = true;
+            if (root.TryGetProperty("sync_playtime", out var p) && p.ValueKind == JsonValueKind.True)
+                playtime = true;
+            if (root.TryGetProperty("sync_luas", out var l) && l.ValueKind == JsonValueKind.True)
+                luas = true;
+        }
+        catch { }
+    }
+
+    private void LoadAbout()
+    {
+        var version = Assembly.GetExecutingAssembly().GetName().Version;
+        VersionText.Text = version != null
+            ? S.Format("Settings_VersionFormat", version.Major, version.Minor, version.Build)
+            : S.Get("Settings_CloudRedirect");
+    }
+
+    private async void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_languageLoading) return;
 
@@ -90,7 +179,26 @@ public partial class SettingsPage : Page
         if (idx < 0 || idx >= LanguageOptions.Length) return;
 
         var code = LanguageOptions[idx].Code;
-        SaveLanguageSetting(code);
+        try
+        {
+            SaveLanguageSetting(code);
+        }
+        catch (Exception ex)
+        {
+            // Revert the combo to the last successfully-persisted index so
+            // the user doesn't see a fake selection that won't survive
+            // restart. Suppress the re-fire via _languageLoading.
+            _languageLoading = true;
+            try { LanguageComboBox.SelectedIndex = _lastSavedLanguageIndex; }
+            finally { _languageLoading = false; }
+
+            await Services.Dialog.ShowErrorAsync(
+                S.Get("Common_Error"),
+                S.Format("Settings_FailedSaveLanguage", ex.Message));
+            return;
+        }
+
+        _lastSavedLanguageIndex = idx;
         LanguageHintText.Text = S.Get("Settings_RestartRequired");
         RestartButton.Visibility = Visibility.Visible;
     }
@@ -124,51 +232,53 @@ public partial class SettingsPage : Page
         return "system";
     }
 
+    /// <summary>
+    /// Writes the language preference to settings.json. Throws on real
+    /// I/O failure so the caller can revert the combo and surface the
+    /// error; the inner old-file parse catch is intentional (corrupt
+    /// settings → write fresh, preserving language only).
+    /// </summary>
     private static void SaveLanguageSetting(string code)
     {
-        try
+        var path = GetSettingsPath();
+        var dir = Path.GetDirectoryName(path)!;
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+
+        // Read existing settings to preserve other fields
+        JsonElement existing = default;
+        if (File.Exists(path))
         {
-            var path = GetSettingsPath();
-            var dir = Path.GetDirectoryName(path)!;
-            if (!Directory.Exists(dir))
-                Directory.CreateDirectory(dir);
-
-            // Read existing settings to preserve other fields
-            JsonElement existing = default;
-            if (File.Exists(path))
+            try
             {
-                try
-                {
-                    var oldJson = File.ReadAllText(path);
-                    using var oldDoc = JsonDocument.Parse(oldJson);
-                    existing = oldDoc.RootElement.Clone();
-                }
-                catch { }
+                var oldJson = File.ReadAllText(path);
+                using var oldDoc = JsonDocument.Parse(oldJson);
+                existing = oldDoc.RootElement.Clone();
             }
-
-            using var ms = new System.IO.MemoryStream();
-            using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
-            {
-                writer.WriteStartObject();
-                writer.WriteString("language", code);
-
-                // Copy any other properties from the existing file
-                if (existing.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in existing.EnumerateObject())
-                    {
-                        if (prop.Name == "language") continue;
-                        prop.WriteTo(writer);
-                    }
-                }
-
-                writer.WriteEndObject();
-            }
-
-            var newJson = System.Text.Encoding.UTF8.GetString(ms.ToArray());
-            Services.FileUtils.AtomicWriteAllText(path, newJson);
+            catch { }
         }
-        catch { }
+
+        using var ms = new System.IO.MemoryStream();
+        using (var writer = new Utf8JsonWriter(ms, new JsonWriterOptions { Indented = true }))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("language", code);
+
+            // Copy any other properties from the existing file
+            if (existing.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in existing.EnumerateObject())
+                {
+                    if (prop.Name == "language") continue;
+                    prop.WriteTo(writer);
+                }
+            }
+
+            writer.WriteEndObject();
+        }
+
+        var newJson = System.Text.Encoding.UTF8.GetString(ms.ToArray());
+        Services.FileUtils.AtomicWriteAllText(path, newJson);
     }
 
     private static string GetConfigPath()
@@ -176,53 +286,50 @@ public partial class SettingsPage : Page
         return Services.SteamDetector.GetConfigFilePath();
     }
 
-    private void LoadSyncToggles()
-    {
-        _syncLoading = true;
-        try
-        {
-            var path = GetConfigPath();
-            if (!File.Exists(path)) return;
-
-            var json = File.ReadAllText(path);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("sync_achievements", out var a) && a.ValueKind == JsonValueKind.True)
-                SyncAchievementsToggle.IsChecked = true;
-            if (root.TryGetProperty("sync_playtime", out var p) && p.ValueKind == JsonValueKind.True)
-                SyncPlaytimeToggle.IsChecked = true;
-            if (root.TryGetProperty("sync_luas", out var l) && l.ValueKind == JsonValueKind.True)
-                SyncLuasToggle.IsChecked = true;
-        }
-        catch { }
-        finally
-        {
-            _syncLoading = false;
-        }
-    }
-
-    private void SyncToggle_Changed(object sender, RoutedEventArgs e)
+    private async void SyncToggle_Changed(object sender, RoutedEventArgs e)
     {
         if (_syncLoading) return;
-        SaveSyncToggles();
-    }
 
-    private void SaveSyncToggles()
-    {
         try
         {
-            var path = GetConfigPath();
-            Services.ConfigHelper.SaveConfig(path,
-                new[] { "sync_achievements", "sync_playtime", "sync_luas" },
-                writer =>
-                {
-                    writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
-                    writer.WriteBoolean("sync_playtime", SyncPlaytimeToggle.IsChecked == true);
-                    writer.WriteBoolean("sync_luas", SyncLuasToggle.IsChecked == true);
-                });
+            SaveSyncToggles();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // Only the toggle that just fired diverges from the on-disk
+            // value — flip it back and surface the error. The
+            // _syncLoading guard suppresses the recursive Changed event
+            // that the programmatic IsChecked set will trigger.
+            if (sender is Wpf.Ui.Controls.ToggleSwitch toggle)
+            {
+                _syncLoading = true;
+                try { toggle.IsChecked = !(toggle.IsChecked == true); }
+                finally { _syncLoading = false; }
+            }
+
+            await Services.Dialog.ShowErrorAsync(
+                S.Get("Common_Error"),
+                S.Format("Settings_FailedSaveSync", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Persists the three sync toggles into config.json via ConfigHelper
+    /// (which preserves caller-unowned keys and atomic-writes). Throws on
+    /// real I/O failure so the caller can revert UI state and surface
+    /// the error.
+    /// </summary>
+    private void SaveSyncToggles()
+    {
+        var path = GetConfigPath();
+        Services.ConfigHelper.SaveConfig(path,
+            new[] { "sync_achievements", "sync_playtime", "sync_luas" },
+            writer =>
+            {
+                writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
+                writer.WriteBoolean("sync_playtime", SyncPlaytimeToggle.IsChecked == true);
+                writer.WriteBoolean("sync_luas", SyncLuasToggle.IsChecked == true);
+            });
     }
 
     private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)

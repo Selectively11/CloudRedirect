@@ -4,12 +4,11 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 
 namespace CloudRedirect.Services
 {
-    /// <summary>
-    /// Information about a single backup (for display in the Restore tab).
-    /// </summary>
+    /// <summary>One backup entry, as displayed in the Restore tab.</summary>
     internal class BackupInfo
     {
         public string Id { get; set; }
@@ -23,9 +22,7 @@ namespace CloudRedirect.Services
         public List<uint> AppIds { get; set; } = new();
         public bool IsLegacy { get; set; }
 
-        /// <summary>
-        /// Which backup category this came from: "cleanup" or "app_delete".
-        /// </summary>
+        /// <summary>"cleanup" or "app_delete".</summary>
         public string Category { get; set; } = "";
     }
 
@@ -54,9 +51,7 @@ namespace CloudRedirect.Services
     }
 
     /// <summary>
-    /// Discovers and lists all available backups across all accounts.
-    /// On first call, migrates legacy backups from cleanup_backup/ to the
-    /// new cleanup_tab_backup/ and app_tab_backup/ directories.
+    /// Lists backups across accounts; migrates legacy cleanup_backup/ on first call.
     /// </summary>
     internal static class BackupDiscovery
     {
@@ -84,10 +79,7 @@ namespace CloudRedirect.Services
             return backups.OrderByDescending(b => b.Timestamp).ToList();
         }
 
-        /// <summary>
-        /// Scans a backup root directory (e.g. cleanup_tab_backup/ or app_tab_backup/)
-        /// for account subdirectories containing backup entries.
-        /// </summary>
+        /// <summary>Scan one backup root for account/timestamp entries.</summary>
         private static void ScanBackupRoot(List<BackupInfo> backups, string backupRoot, string category)
         {
             if (!Directory.Exists(backupRoot)) return;
@@ -97,7 +89,7 @@ namespace CloudRedirect.Services
                 string accountId = Path.GetFileName(accountDir);
                 if (!uint.TryParse(accountId, out _)) continue;
 
-                // New format: timestamped subdirectories with undo_log.json
+                // New: timestamped subdirs with undo_log.json
                 foreach (var subDir in Directory.GetDirectories(accountDir))
                 {
                     var logPath = Path.Combine(subDir, "undo_log.json");
@@ -112,7 +104,7 @@ namespace CloudRedirect.Services
                     }
                 }
 
-                // Legacy format: undo_log_*.json at account root (from old code)
+                // Legacy: undo_log_*.json at account root
                 foreach (var logPath in Directory.GetFiles(accountDir, "undo_log_*.json"))
                 {
                     if (logPath.EndsWith(".reverted.json", StringComparison.OrdinalIgnoreCase))
@@ -127,39 +119,44 @@ namespace CloudRedirect.Services
             }
         }
 
-        // ── Legacy migration ────────────────────────────────────────────
-
         private static bool _legacyMigrationDone;
+        private static readonly object _legacyMigrationGate = new();
 
-        /// <summary>
-        /// Resets the migration guard so MigrateLegacyBackups will run again.
-        /// Used by tests to ensure isolation between test cases.
-        /// </summary>
+        /// <summary>Test-only: re-arm the migration guard.</summary>
         internal static void ResetMigrationState()
         {
-            _legacyMigrationDone = false;
+            lock (_legacyMigrationGate)
+            {
+                _legacyMigrationDone = false;
+            }
         }
 
         /// <summary>
-        /// Moves backups from the legacy cleanup_backup/ dir into the new
-        /// cleanup_tab_backup/ and app_tab_backup/ dirs. Also fixes any
-        /// previously-migrated dirs that still have the delete_ prefix.
-        /// Idempotent: no-ops if nothing needs migrating.
-        /// Guarded so the migration scan only runs once per process lifetime.
+        /// Idempotent + once-per-process migration of cleanup_backup/ into the
+        /// new split layout. Locked to defeat concurrent CleanupPage/AppsPage init.
         /// </summary>
         private static void MigrateLegacyBackups(string steamPath)
         {
-            if (_legacyMigrationDone) return;
-            _legacyMigrationDone = true;
+            if (Volatile.Read(ref _legacyMigrationDone)) return;
 
+            lock (_legacyMigrationGate)
+            {
+                if (_legacyMigrationDone) return;
+                MigrateLegacyBackupsLocked(steamPath);
+                _legacyMigrationDone = true;
+            }
+        }
+
+        // Caller must hold _legacyMigrationGate.
+        private static void MigrateLegacyBackupsLocked(string steamPath)
+        {
             string cleanupRoot = BackupPaths.GetCleanupRoot(steamPath);
             string appDeleteRoot = BackupPaths.GetAppDeleteRoot(steamPath);
 
-            // ── Phase 1: Fix already-migrated-but-broken dirs in app_tab_backup/ ──
-            // A previous buggy migration moved delete_* dirs without stripping the prefix.
+            // Phase 1: fix delete_-prefixed dirs left by a prior buggy migration.
             FixBrokenAppDeleteDirs(appDeleteRoot);
 
-            // ── Phase 2: Migrate remaining legacy backups ───────────────────────
+            // Phase 2: migrate remaining legacy backups.
             string legacyRoot = BackupPaths.GetLegacyRoot(steamPath);
             if (!Directory.Exists(legacyRoot)) return;
 
@@ -168,7 +165,6 @@ namespace CloudRedirect.Services
                 string accountId = Path.GetFileName(accountDir);
                 if (!uint.TryParse(accountId, out _)) continue;
 
-                // Move subdirectories to the appropriate new location
                 foreach (var subDir in Directory.GetDirectories(accountDir))
                 {
                     string dirName = Path.GetFileName(subDir);
@@ -177,14 +173,13 @@ namespace CloudRedirect.Services
 
                     if (dirName.StartsWith("delete_", StringComparison.OrdinalIgnoreCase))
                     {
-                        // App delete backup -> app_tab_backup/
-                        // Strip "delete_" prefix: "delete_12345_20250407" -> "12345_20250407"
+                        // delete_{appId}_{ts} -> {appId}_{ts} under app_tab_backup/.
                         destRoot = appDeleteRoot;
                         destDirName = dirName.Substring("delete_".Length);
                     }
                     else
                     {
-                        // Cleanup backup (timestamp dirs) -> cleanup_tab_backup/
+                        // Timestamp dir -> cleanup_tab_backup/.
                         destRoot = cleanupRoot;
                         destDirName = dirName;
                     }
@@ -200,11 +195,11 @@ namespace CloudRedirect.Services
                     }
                     catch
                     {
-                        // Best-effort migration; if a move fails, leave it in legacy
+                        // Best-effort; failed moves stay in legacy.
                     }
                 }
 
-                // Move legacy undo_log_*.json files to cleanup_tab_backup/
+                // Legacy account-root logs -> cleanup_tab_backup/.
                 foreach (var logFile in Directory.GetFiles(accountDir, "undo_log_*.json"))
                 {
                     string fileName = Path.GetFileName(logFile);
@@ -216,13 +211,10 @@ namespace CloudRedirect.Services
                         Directory.CreateDirectory(Path.Combine(cleanupRoot, accountId));
                         File.Move(logFile, destFile);
                     }
-                    catch
-                    {
-                        // Best-effort
-                    }
+                    catch { }
                 }
 
-                // If the account dir is now empty, remove it
+                // Remove now-empty account dir.
                 try
                 {
                     if (!Directory.EnumerateFileSystemEntries(accountDir).Any())
@@ -231,7 +223,7 @@ namespace CloudRedirect.Services
                 catch { }
             }
 
-            // If the legacy root is now empty, remove it
+            // Remove now-empty legacy root.
             try
             {
                 if (!Directory.EnumerateFileSystemEntries(legacyRoot).Any())
@@ -240,10 +232,7 @@ namespace CloudRedirect.Services
             catch { }
         }
 
-        /// <summary>
-        /// Fixes app_tab_backup dirs that were migrated with the delete_ prefix still intact.
-        /// Renames delete_{appId}_{ts} -> {appId}_{ts} and rewrites undo_log.json paths.
-        /// </summary>
+        /// <summary>Strip leftover delete_ prefix on already-moved app_tab dirs.</summary>
         private static void FixBrokenAppDeleteDirs(string appDeleteRoot)
         {
             if (!Directory.Exists(appDeleteRoot)) return;
@@ -261,27 +250,19 @@ namespace CloudRedirect.Services
 
                     string fixedName = dirName.Substring("delete_".Length);
                     string fixedDir = Path.Combine(accountDir, fixedName);
-                    if (Directory.Exists(fixedDir)) continue; // target already exists
+                    if (Directory.Exists(fixedDir)) continue;
 
                     try
                     {
                         Directory.Move(subDir, fixedDir);
                         RewriteUndoLogPaths(fixedDir, subDir, fixedDir);
                     }
-                    catch
-                    {
-                        // Best-effort
-                    }
+                    catch { }
                 }
             }
         }
 
-        /// <summary>
-        /// Rewrites DestPath entries in undo_log.json so that any path referencing
-        /// <paramref name="oldDir"/> is updated to reference <paramref name="newDir"/>.
-        /// This is necessary after moving a backup directory so that file lookups
-        /// and restore operations find files at their new locations.
-        /// </summary>
+        /// <summary>Repoint DestPath entries in undo_log.json from oldDir to newDir.</summary>
         private static void RewriteUndoLogPaths(string backupDir, string oldDir, string newDir)
         {
             string logPath = Path.Combine(backupDir, "undo_log.json");
@@ -293,21 +274,16 @@ namespace CloudRedirect.Services
                 var log = JsonSerializer.Deserialize(json, CleanupJsonContext.Default.UndoLog);
                 if (log == null) return;
 
-                // Normalize both to consistent separators for comparison
                 string oldPrefix = oldDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     + Path.DirectorySeparatorChar;
                 string newPrefix = newDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                     + Path.DirectorySeparatorChar;
 
-                // Also handle the case where DestPath points to the old legacy cleanup_backup/ location.
-                // After migration the dir was moved, so the undo log still has the old base path.
-                // We need to detect the old base from the existing DestPath values.
                 bool changed = false;
                 foreach (var op in log.Operations)
                 {
                     if (string.IsNullOrEmpty(op.DestPath)) continue;
 
-                    // Replace any occurrence of the old directory path with the new one
                     if (op.DestPath.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
                     {
                         op.DestPath = newPrefix + op.DestPath.Substring(oldPrefix.Length);
@@ -320,12 +296,7 @@ namespace CloudRedirect.Services
                     }
                 }
 
-                // Also handle paths that reference the legacy cleanup_backup/ base path
-                // (from before any migration ran). These paths won't match oldDir because
-                // oldDir is the immediate source dir, but the DestPath might reference an
-                // even older location. Always run this (not gated on !changed) because a
-                // mixed undo log can have some ops fixed by prefix matching above while
-                // others still reference an older base path.
+                // Fall back to relative-tail rebinding for paths older than oldDir.
                 {
                     var filesOnDisk = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     try
@@ -343,9 +314,7 @@ namespace CloudRedirect.Services
                         if (string.IsNullOrEmpty(op.DestPath)) continue;
                         if (op.DestPath.StartsWith(newPrefix, StringComparison.OrdinalIgnoreCase)) continue;
 
-                        // Use relative tail matching (preserves subdirectory structure)
-                        // instead of filename-only matching which can pick the wrong file
-                        // when multiple files share the same name in different subdirs.
+                        // Tail match preserves subdir structure (filename match is ambiguous).
                         string relativeTail = ExtractRelativeTail(op.DestPath, backupId);
                         if (relativeTail != null)
                         {
@@ -366,13 +335,8 @@ namespace CloudRedirect.Services
                     FileUtils.AtomicWriteAllText(logPath, updated);
                 }
             }
-            catch
-            {
-                // Best-effort; don't break migration if log rewriting fails
-            }
+            catch { }
         }
-
-        // ── Parsing ─────────────────────────────────────────────────────
 
         private static BackupInfo ParseBackupFromLog(string logPath, string id, string backupDir, string accountId, bool isLegacy)
         {
@@ -385,9 +349,7 @@ namespace CloudRedirect.Services
                 var fileMoves = log.Operations.Where(op => op.Type == "file_move").ToList();
                 var appIds = fileMoves.Select(op => op.AppId).Where(a => a > 0).Distinct().OrderBy(a => a).ToList();
 
-                // Count files that still exist in backup and sum their sizes.
-                // For new-format backups, enumerate the backup dir once instead of
-                // doing per-file File.Exists calls (one directory traversal vs N syscalls).
+                // One directory enumeration replaces N File.Exists calls.
                 long totalBytes = 0;
                 int existingFiles = 0;
                 if (!isLegacy && Directory.Exists(backupDir))
@@ -401,11 +363,7 @@ namespace CloudRedirect.Services
                     }
                     catch { }
 
-                    // Build a suffix index for fallback matching. After migration,
-                    // undo_log destPaths may still reference the old base dir
-                    // (e.g. cleanup_backup/ instead of cleanup_tab_backup/).
-                    // The relative tail within the backup dir is stable, so we
-                    // can match on that when the exact path fails.
+                    // Suffix index: rebind by relative tail when exact paths miss.
                     string normalizedBackupDir = backupDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                         + Path.DirectorySeparatorChar;
                     Dictionary<string, long> suffixIndex = null;
@@ -419,8 +377,7 @@ namespace CloudRedirect.Services
                         }
                         else
                         {
-                            // Fallback: extract the relative tail from the destPath
-                            // and look it up under the actual backup dir.
+                            // Fallback: rebind via relative tail.
                             if (suffixIndex == null)
                             {
                                 suffixIndex = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -434,13 +391,10 @@ namespace CloudRedirect.Services
                                 }
                             }
 
-                            // Try to extract the relative portion from destPath.
-                            // The destPath format is: {someOldBase}/{accountId}/{backupId}/...
-                            // We want everything after the backup folder name.
+                            // destPath: {someOldBase}/{accountId}/{backupId}/{tail}.
                             string relativeTail = ExtractRelativeTail(op.DestPath, id);
                             if (relativeTail != null)
                             {
-                                // Normalize separators
                                 relativeTail = relativeTail.Replace('/', Path.DirectorySeparatorChar);
                                 if (suffixIndex.TryGetValue(relativeTail, out long fallbackSize))
                                 {
@@ -488,14 +442,9 @@ namespace CloudRedirect.Services
             }
         }
 
-        /// <summary>
-        /// Given a destPath like "C:\...\cleanup_backup\54303850\1221480\files\1229490\foo.bin"
-        /// and a backup ID like "1221480", extracts the relative tail after the backup ID segment:
-        /// "files\1229490\foo.bin". Returns null if the ID isn't found in the path.
-        /// </summary>
+        /// <summary>Returns the path tail after the backupId segment, or null.</summary>
         private static string ExtractRelativeTail(string destPath, string backupId)
         {
-            // Normalize to consistent separators for searching
             string normalized = destPath.Replace('/', Path.DirectorySeparatorChar);
             string needle = Path.DirectorySeparatorChar + backupId + Path.DirectorySeparatorChar;
             int idx = normalized.IndexOf(needle, StringComparison.OrdinalIgnoreCase);
@@ -504,19 +453,12 @@ namespace CloudRedirect.Services
             return start < normalized.Length ? normalized.Substring(start) : null;
         }
 
-        /// <summary>
-        /// Resolves a potentially-stale DestPath from an undo_log to an actual file on disk.
-        /// After migration, legacy undo_log files may reference the old "cleanup_backup" directory
-        /// while files actually live under "cleanup_tab_backup". This method tries the original
-        /// path first, then attempts the corrected path.
-        /// Returns the resolved path if the file exists, or null if not found anywhere.
-        /// </summary>
+        /// <summary>Try the original path then the cleanup_backup→cleanup_tab_backup rewrite.</summary>
         internal static string ResolveDestPath(string destPath)
         {
             if (string.IsNullOrEmpty(destPath)) return null;
             if (File.Exists(destPath)) return destPath;
 
-            // Try replacing the legacy backup dir name with the new one
             string normalized = destPath.Replace('/', Path.DirectorySeparatorChar);
             string legacySeg = Path.DirectorySeparatorChar + BackupPaths.LegacyDir + Path.DirectorySeparatorChar;
             string newSeg = Path.DirectorySeparatorChar + BackupPaths.CleanupDir + Path.DirectorySeparatorChar;

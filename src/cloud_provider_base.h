@@ -14,12 +14,21 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
 class CloudProviderBase : public ICloudProvider {
 public:
     virtual ~CloudProviderBase() = default;
+
+    // Callback invoked when token refresh fails permanently (refresh-token
+    // rejected). Wired by the factory so this layer does not reverse-depend
+    // on cloud_storage. Pass the provider's display name, e.g. "Google Drive".
+    using AuthFailureCallback = std::function<void(const std::string&)>;
+    void SetAuthFailureCallback(AuthFailureCallback cb) {
+        m_authFailureCb = std::move(cb);
+    }
 
     // ICloudProvider shared implementations
     bool Init(const std::string& configPath) override;
@@ -78,6 +87,7 @@ protected:
     static constexpr int64_t REFRESH_BACKOFF_SECS = 30;
     std::atomic<ULONGLONG> m_lastApiCallTick{0};
     bool m_initialized = false;
+    AuthFailureCallback m_authFailureCb;
 
     // Shared methods
 

@@ -1,5 +1,4 @@
 #include "cloud_provider_base.h"
-#include "cloud_storage.h"
 #include "dpapi_util.h"
 #include "json.h"
 #include "log.h"
@@ -87,9 +86,13 @@ bool CloudProviderBase::RefreshAccessToken() {
     if (r.status != 200) {
         std::string truncBody = r.body.size() > 200 ? r.body.substr(0, 200) + "..." : r.body;
         LOG("%s Token refresh failed: HTTP %d: %s", LogTag(), r.status, truncBody.c_str());
-        std::lock_guard<std::mutex> lock(m_mtx);
-        m_lastRefreshFailTime = (int64_t)time(nullptr);
-        CloudStorage::NotifyAuthFailure(AuthFailureName());
+        {
+            std::lock_guard<std::mutex> lock(m_mtx);
+            m_lastRefreshFailTime = (int64_t)time(nullptr);
+        }
+        // Fire the callback outside the lock to keep the notification path
+        // (which may show a dialog) off the token mutex.
+        if (m_authFailureCb) m_authFailureCb(AuthFailureName());
         return false;
     }
     auto j = Json::Parse(r.body);

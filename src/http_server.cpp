@@ -48,9 +48,7 @@ struct ClientSlot {
 };
 static std::vector<ClientSlot> g_clientSlots;
 
-// Try to decompress a ZIP archive produced by Steam's cloud compression.
-// Returns true if the data was a ZIP and was successfully decompressed (output in 'out').
-// Returns false if the data is not a ZIP or decompression fails; caller should store as-is.
+// Decompress Steam's cloud-compression ZIP. Returns false (and leaves out untouched) on non-ZIP or failure.
 static bool TryDecompressZip(const std::vector<uint8_t>& data, std::vector<uint8_t>& out) {
     if (data.size() < 4) return false;
     if (data[0] != 0x50 || data[1] != 0x4B || data[2] != 0x03 || data[3] != 0x04)
@@ -62,9 +60,7 @@ static bool TryDecompressZip(const std::vector<uint8_t>& data, std::vector<uint8
         return false;
     }
 
-    // Steam's cloud compression always produces a single-entry ZIP with
-    // inner filename "z". Reject anything else to avoid decompressing
-    // game saves that are natively ZIP archives.
+    // Steam cloud ZIP is single-entry, inner name "z"; anything else is a game save that's natively ZIP.
     if (mz_zip_reader_get_num_files(&zip) != 1) {
         mz_zip_reader_end(&zip);
         return false;
@@ -119,10 +115,7 @@ static std::string BlobPath(uint32_t accountId, uint32_t appId, const std::strin
     return path;
 }
 
-// parse a URL path like "/upload/12345/saves/game.sav" into appId + filename.
-// prefix is "/upload/" or "/download/".
-// returns true if parse succeeded.
-// rejects path traversal attempts (e.g. "../" sequences after URL decoding).
+// Parse "/upload/<account>/<app>/<file>" or "/download/..."; rejects "../" after URL decoding.
 static bool ParseBlobPath(const char* path, const char* prefix,
                           uint32_t& accountId, uint32_t& appId, std::string& filename) {
     size_t prefixLen = strlen(prefix);
@@ -161,8 +154,7 @@ static bool ParseBlobPath(const char* path, const char* prefix,
 
 // handle one accepted connection: parse request line, dispatch GET or PUT
 static void HandleClient(SOCKET client) {
-    // read headers line by line until we see the blank line (\r\n\r\n)
-    // Cap header accumulation at 64KB to prevent abuse
+    // Read headers until \r\n\r\n; cap at 64KB.
     static constexpr int MAX_HEADER_SIZE = 65536;
     char buf[8192];
     int total = 0;
@@ -202,7 +194,7 @@ static void HandleClient(SOCKET client) {
     int bodyReceived = total - headerEnd;
 
     if (_stricmp(method, "PUT") == 0) {
-        // Reject PUT without Content-Length — we can't safely read the body
+        // PUT without Content-Length -> 411; body length is otherwise unbounded.
         if (contentLength < 0) {
             LOG("[HTTP] PUT %s -> REJECTED: no Content-Length header", path);
             const char* response =
@@ -256,7 +248,7 @@ static void HandleClient(SOCKET client) {
                 }
             }
 
-            // Reject partial body — recv returned 0/-1 before all bytes arrived
+            // Reject partial body -- recv returned 0/-1 before all bytes arrived
             if (contentLength > 0 && (int64_t)bodyData.size() != contentLength) {
                 LOG("[HTTP] PUT %s -> PARTIAL BODY (%zu of %lld bytes), rejecting",
                     path, bodyData.size(), (long long)contentLength);
@@ -271,8 +263,7 @@ static void HandleClient(SOCKET client) {
                 return;
             }
 
-            // Steam may send compressed (ZIP) data. Decompress before storing
-            // so blob storage always contains raw file content.
+            // Decompress Steam's optional ZIP wrapper so blob storage holds raw content.
             std::vector<uint8_t> decompressed;
             if (TryDecompressZip(bodyData, decompressed)) {
                 LOG("[HTTP] PUT %s -> decompressed %zu -> %zu bytes",
@@ -280,10 +271,24 @@ static void HandleClient(SOCKET client) {
                 bodyData = std::move(decompressed);
             }
 
-            // write blob to disk
+            // ec overload: a thrown filesystem_error would leak the socket and wedge the slot.
             std::string blobPath = BlobPath(accountId, appId, filename);
-            auto parent = std::filesystem::path(blobPath).parent_path();
-            std::filesystem::create_directories(parent);
+            auto parent = FileUtil::Utf8ToPath(blobPath).parent_path();
+            std::error_code mkEc;
+            std::filesystem::create_directories(parent, mkEc);
+            if (mkEc) {
+                LOG("[HTTP] PUT %s -> create_directories '%s' FAILED: %s",
+                    path, FileUtil::PathToUtf8(parent).c_str(), mkEc.message().c_str());
+                const char* errResponse =
+                    "HTTP/1.1 500 Internal Server Error\r\n"
+                    "Content-Length: 0\r\n"
+                    "Connection: close\r\n"
+                    "\r\n";
+                send(client, errResponse, (int)strlen(errResponse), 0);
+                shutdown(client, SD_SEND);
+                closesocket(client);
+                return;
+            }
 
             // Atomic write blob to disk
             if (!FileUtil::AtomicWriteBinary(blobPath, bodyData.data(), bodyData.size())) {
@@ -309,7 +314,7 @@ static void HandleClient(SOCKET client) {
                 "\r\n";
             send(client, response, (int)strlen(response), 0);
         } else {
-            // unrecognized PUT path — drain and return 200 OK
+            // unrecognized PUT path -- drain and return 200 OK
             int64_t remaining = contentLength - bodyReceived;
             if (remaining > 0) {
                 char drain[4096];
@@ -336,7 +341,7 @@ static void HandleClient(SOCKET client) {
 
         if (ParseBlobPath(path, "/download/", accountId, appId, filename)) {
             std::string blobPath = BlobPath(accountId, appId, filename);
-            std::ifstream f(blobPath, std::ios::binary | std::ios::ate);
+            std::ifstream f(FileUtil::Utf8ToPath(blobPath), std::ios::binary | std::ios::ate);
 
             if (f) {
                 auto pos = f.tellg();
@@ -427,8 +432,7 @@ static void HandleClient(SOCKET client) {
     closesocket(client);
 }
 
-// Validate that the connecting client is our own process (Steam).
-// Uses GetExtendedTcpTable to look up the PID that owns the client's source port.
+// PID-of-source-port check via GetExtendedTcpTable; rejects anything not from our own process.
 static bool IsConnectionFromSteam(SOCKET client) {
     // Get the peer's (client's) port
     sockaddr_in peer{};
@@ -462,7 +466,7 @@ static bool IsConnectionFromSteam(SOCKET client) {
         }
     }
 
-    // Connection not found in table — race condition, reject to be safe
+    // Connection not found in table -- race condition, reject to be safe
     return false;
 }
 
@@ -490,9 +494,11 @@ static void AcceptLoop() {
             continue;
         }
 
-        // Set receive timeout to prevent slow/stalled clients from blocking a thread
-        DWORD rcvTimeout = 30000; // 30 seconds
+        // SO_SNDTIMEO matters too: a stalled final send() can wedge a slot and saturate the 16-thread cap.
+        DWORD rcvTimeout = 30000; // 30s
+        DWORD sndTimeout = 30000; // 30s
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
+        setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&sndTimeout, sizeof(sndTimeout));
 
         // handle each connection on its own thread so parallel uploads don't queue up
         {
@@ -522,7 +528,12 @@ bool Start(const std::string& blobRoot, uint32_t accountId) {
     g_accountId.store(accountId);
     if (!g_blobRoot.empty() && g_blobRoot.back() != '\\')
         g_blobRoot += '\\';
-    std::filesystem::create_directories(g_blobRoot);
+    std::error_code rootEc;
+    std::filesystem::create_directories(FileUtil::Utf8ToPath(g_blobRoot), rootEc);
+    if (rootEc) {
+        LOG("[HTTP] create_directories '%s' FAILED: %s (continuing -- later PUT writes will retry)",
+            g_blobRoot.c_str(), rootEc.message().c_str());
+    }
     LOG("[HTTP] Blob storage root: %s (accountId=%u)", g_blobRoot.c_str(), g_accountId.load());
 
     WSADATA wsa;
@@ -613,8 +624,7 @@ uint16_t GetPort() {
     return g_port.load();
 }
 
-// Validate that a resolved blob path stays within the blob root.
-// Same traversal check as ParseBlobPath, used by the RPC-facing functions below.
+// Traversal guard for RPC-facing paths (mirror of ParseBlobPath's check).
 static bool ValidateBlobPath(const std::string& blobPath) {
     if (!FileUtil::IsPathWithin(g_blobRoot, blobPath)) {
         LOG("[HTTP] BLOCKED path traversal (RPC): path='%s' root='%s'",
@@ -627,21 +637,23 @@ static bool ValidateBlobPath(const std::string& blobPath) {
 bool HasBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
-    return std::filesystem::exists(path);
+    std::error_code ec;
+    bool ex = std::filesystem::exists(FileUtil::Utf8ToPath(path), ec);
+    return !ec && ex;
 }
 
 uint64_t GetBlobSize(uint32_t accountId, uint32_t appId, const std::string& filename) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return 0;
     std::error_code ec;
-    auto sz = std::filesystem::file_size(path, ec);
+    auto sz = std::filesystem::file_size(FileUtil::Utf8ToPath(path), ec);
     return ec ? 0 : (uint64_t)sz;
 }
 
 std::vector<uint8_t> ReadBlob(uint32_t accountId, uint32_t appId, const std::string& filename) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return {};
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(FileUtil::Utf8ToPath(path), std::ios::binary);
     if (!f) return {};
     return std::vector<uint8_t>(
         std::istreambuf_iterator<char>(f),
@@ -653,15 +665,21 @@ bool DeleteBlob(uint32_t accountId, uint32_t appId, const std::string& filename)
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
     std::error_code ec;
-    return std::filesystem::remove(path, ec);
+    return std::filesystem::remove(FileUtil::Utf8ToPath(path), ec);
 }
 
 bool WriteBlob(uint32_t accountId, uint32_t appId, const std::string& filename,
                const uint8_t* data, size_t len) {
     std::string path = BlobPath(accountId, appId, filename);
     if (!ValidateBlobPath(path)) return false;
-    auto parent = std::filesystem::path(path).parent_path();
-    std::filesystem::create_directories(parent);
+    auto parent = FileUtil::Utf8ToPath(path).parent_path();
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        LOG("[HTTP] WriteBlob create_directories '%s' FAILED: %s",
+            FileUtil::PathToUtf8(parent).c_str(), ec.message().c_str());
+        return false;
+    }
     return FileUtil::AtomicWriteBinary(path, data, len);
 }
 

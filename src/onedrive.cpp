@@ -15,7 +15,7 @@ using HttpUtil::Iso8601ToUnix;
 using HttpUtil::UnixToIso8601;
 using HttpUtil::HttpResp;
 
-// user registers their own Azure AD app -- this is the Application (client) ID.
+// Azure AD Application (client) ID.
 static constexpr const char* CLIENT_ID = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
 
 std::string OneDriveProvider::BuildRefreshBody(const std::string& refreshToken) const {
@@ -30,7 +30,7 @@ bool OneDriveProvider::IsRateLimited(int status, const std::string& /*body*/) co
 }
 
 DWORD OneDriveProvider::ExtraRequestFlags() const {
-    // disable WinHTTP's built-in escaping -- we encode paths ourselves via EncodePath
+    // We encode paths via EncodePath; disable WinHTTP's built-in escaping.
     return WINHTTP_FLAG_ESCAPE_DISABLE;
 }
 
@@ -55,7 +55,7 @@ std::string OneDriveProvider::EncodePath(const std::string& path) {
     return out;
 }
 
-// build the OneDrive path for a file: /me/drive/root:/CloudRedirect/{acct}/{app}/{filename}:
+// /me/drive/root:/CloudRedirect/{acct}/{app}/{filename}:
 std::string OneDriveProvider::BuildItemPath(uint32_t accountId, uint32_t appId,
                                              const std::string& filename) {
     std::string raw = "CloudRedirect/" + std::to_string(accountId) + "/"
@@ -63,20 +63,23 @@ std::string OneDriveProvider::BuildItemPath(uint32_t accountId, uint32_t appId,
     return "/v1.0/me/drive/root:/" + EncodePath(raw) + ":";
 }
 
-// build path for a folder: /me/drive/root:/CloudRedirect/{acct}/{app}:
+// /me/drive/root:/CloudRedirect/{acct}/{app}:
 std::string OneDriveProvider::BuildFolderPath(uint32_t accountId, uint32_t appId) {
     std::string raw = "CloudRedirect/" + std::to_string(accountId) + "/"
         + std::to_string(appId);
     return "/v1.0/me/drive/root:/" + EncodePath(raw) + ":";
 }
 
-// list children of a folder by item ID (for recursive listing)
-void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
-                                         std::vector<RemoteFile>& out, int depth) {
+// Recursive children listing by item ID.
+bool OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
+                                          std::vector<RemoteFile>& out,
+                                          bool* outComplete, int depth) {
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[OneDrive] ListChildrenById: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
-        return;
+        // Cap reached: not an error, but mark incomplete.
+        if (outComplete) *outComplete = false;
+        return true;
     }
     std::string url = "/v1.0/me/drive/items/" + itemId +
         "/children?$select=id,name,size,fileSystemInfo,folder";
@@ -86,19 +89,18 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
         auto r = ApiGet(url);
         if (r.status != 200) {
             LOG("[OneDrive] ListChildren failed: HTTP %d: %s", r.status, r.body.c_str());
-            return;
+            return false;
         }
         auto j = Json::Parse(r.body);
         auto& items = j["value"];
         for (size_t i = 0; i < items.size(); ++i) {
             auto& item = items[i];
-            // decode %XX sequences -- existing files may have double-encoded names
+            // Existing files may have double-encoded names.
             std::string name = UrlDecode(item["name"].str());
             std::string path = prefix.empty() ? name : prefix + "/" + name;
 
-            if (!item["folder"].isNull()) {
-                // recurse into subfolder
-                ListChildrenById(item["id"].str(), path, out, depth + 1);
+        if (!item["folder"].isNull()) {
+                if (!ListChildrenById(item["id"].str(), path, out, outComplete, depth + 1)) return false;
             } else {
                 RemoteFile rf;
                 rf.id = item["id"].str();
@@ -110,31 +112,41 @@ void OneDriveProvider::ListChildrenById(const std::string& itemId, const std::st
             }
         }
 
-        // pagination: @odata.nextLink is a full URL
+        // Pagination: @odata.nextLink is a full URL; extract path+query.
         auto nextLink = j["@odata.nextLink"].str();
         if (nextLink.empty()) break;
 
-        // nextLink is a full URL -- extract just the path+query part
+        // Graph docs don't guarantee "/v1.0/" (beta endpoints, regional hosts).
+        // Unparseable nextLink: stop, but mark listing incomplete.
         size_t pathStart = nextLink.find("/v1.0/");
         if (pathStart != std::string::npos) {
             url = nextLink.substr(pathStart);
         } else {
+            LOG("[OneDrive] ListChildrenById: unparseable @odata.nextLink, "
+                "marking listing incomplete: %s", nextLink.c_str());
+            if (outComplete) *outComplete = false;
             url.clear();
         }
     }
+    return true;
 }
 
-// list all files under an app folder using path-based addressing
+// All files under an app folder, via path-based addressing.
 std::vector<OneDriveProvider::RemoteFile>
-OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
+OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId, bool* ok, bool* outComplete) {
     std::vector<RemoteFile> result;
+    if (ok) *ok = false;
+    // Pessimistic default; only the verified-success tail sets true.
+    if (outComplete) *outComplete = false;
 
-    // get the app folder item to find its ID for recursive listing
     auto folderPath = BuildFolderPath(accountId, appId);
     LOG("[OneDrive] ListAppFiles: looking up folder: %s", folderPath.c_str());
     auto r = ApiGet(folderPath + "?$select=id");
     if (r.status == 404) {
+        // Folder absent: empty-complete listing.
         LOG("[OneDrive] ListAppFiles: folder not found (404)");
+        if (ok) *ok = true;
+        if (outComplete) *outComplete = true;
         return result;
     }
     if (r.status != 200) {
@@ -151,7 +163,12 @@ OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId) {
     }
 
     LOG("[OneDrive] ListAppFiles: folder ID=%s, listing children", folderId.c_str());
-    ListChildrenById(folderId, "", result);
+    bool childrenComplete = true;
+    if (!ListChildrenById(folderId, "", result, &childrenComplete)) {
+        return result;
+    }
+    if (ok) *ok = true;
+    if (outComplete) *outComplete = childrenComplete;
     return result;
 }
 
@@ -161,10 +178,8 @@ bool OneDriveProvider::HasAppFolder(uint32_t accountId, uint32_t appId) {
     return r.status == 200;
 }
 
-// download file by item ID. returns nullopt on error, empty vector for 0-byte files.
-// the /content endpoint returns a 302 redirect to a pre-authenticated CDN URL.
-// we must NOT send the Bearer token to the CDN -- it rejects Graph tokens with 401.
-// Retries on 429/503 (3 attempts with backoff).
+// /content returns a 302 to a pre-authenticated CDN URL; Bearer token must
+// be stripped before following or the CDN returns 401. Retries 429/503.
 std::optional<std::vector<uint8_t>>
 OneDriveProvider::DownloadFileById(const std::string& itemId) {
     for (int attempt = 0; attempt <= 3; ++attempt) {
@@ -176,7 +191,7 @@ OneDriveProvider::DownloadFileById(const std::string& itemId) {
             return std::nullopt;
         }
 
-        // step 1: GET /content with WINHTTP_DISABLE_REDIRECTS to get the 302 Location
+        // Step 1: GET /content with redirects disabled to capture the 302 Location.
         if (!m_session) return std::nullopt;
         auto wHost = Widen("graph.microsoft.com");
         HINTERNET hConn = WinHttpConnect(m_session, wHost.c_str(),
@@ -323,10 +338,7 @@ bool OneDriveProvider::SimpleUpload(uint32_t accountId, uint32_t appId,
     return true;
 }
 
-// upload session for files >4MB
-// If the process crashes mid-upload, the OneDrive upload session will remain
-// open server-side until it expires (~7 days). This is a known limitation.
-// OneDrive automatically expires abandoned sessions; no client-side cleanup is needed.
+// Upload session for files >4MB. Abandoned sessions auto-expire server-side.
 bool OneDriveProvider::SessionUpload(uint32_t accountId, uint32_t appId,
                                       const std::string& filename,
                                       const uint8_t* data, size_t len, int64_t timestamp) {
@@ -384,8 +396,8 @@ bool OneDriveProvider::SessionUpload(uint32_t accountId, uint32_t appId,
         }
     }
 
-    // set timestamp -- if lastBody is empty (final chunk was 202, not 200/201),
-    // look up the item ID by path so we can still PATCH the timestamp
+    // If lastBody is empty (final chunk was 202), look up item ID by path
+    // so we can still PATCH the timestamp.
     if (timestamp > 0) {
         std::string itemId;
         if (!lastBody.empty()) {
@@ -467,7 +479,7 @@ bool OneDriveProvider::Download(const std::string& path,
         return false;
     }
 
-    // OneDrive uses path-based addressing -- look up item by path to get its ID
+    // Path-based addressing: resolve the item by path to get its ID.
     auto itemPath = BuildItemPath(accountId, appId, relFilename);
     auto r = ApiGet(itemPath + "?$select=id");
     if (r.status == 404) {
@@ -513,27 +525,48 @@ bool OneDriveProvider::Remove(const std::string& path) {
 }
 
 bool OneDriveProvider::Exists(const std::string& path) {
+    return CheckExists(path) == ExistsStatus::Exists;
+}
+
+ICloudProvider::ExistsStatus OneDriveProvider::CheckExists(const std::string& path) {
     uint32_t accountId, appId;
     std::string relFilename;
     if (!ParsePath(path, accountId, appId, relFilename) || relFilename.empty())
-        return false;
+        return ExistsStatus::Error;
 
     auto itemPath = BuildItemPath(accountId, appId, relFilename);
     auto r = ApiGet(itemPath + "?$select=id");
-    return r.status == 200;
+    if (r.status == 200) return ExistsStatus::Exists;
+    if (r.status == 404) return ExistsStatus::Missing;
+    return ExistsStatus::Error;
 }
 
 std::vector<ICloudProvider::FileInfo>
 OneDriveProvider::List(const std::string& prefix) {
     std::vector<FileInfo> result;
+    ListChecked(prefix, result);
+    return result;
+}
+
+bool OneDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result,
+                                    bool* outComplete) {
+    result.clear();
+    // Pessimistic default; only the verified-success tail sets true.
+    if (outComplete) *outComplete = false;
 
     uint32_t accountId, appId;
     std::string relPrefix;
-    if (!ParsePath(prefix, accountId, appId, relPrefix))
-        return result;
+    if (!ParsePath(prefix, accountId, appId, relPrefix)) {
+        return false;
+    }
 
-    // List all files under the app folder
-    auto remoteFiles = ListAppFiles(accountId, appId);
+    // Local completeness flag so only the success tail flips outComplete.
+    bool ok = false;
+    bool listComplete = true;
+    auto remoteFiles = ListAppFiles(accountId, appId, &ok, &listComplete);
+    if (!ok) {
+        return false;
+    }
 
     std::string basePrefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
 
@@ -553,6 +586,8 @@ OneDriveProvider::List(const std::string& prefix) {
         result.push_back(std::move(fi));
     }
 
-    LOG("[OneDriveProvider] List '%s': %zu files", prefix.c_str(), result.size());
-    return result;
+    LOG("[OneDriveProvider] List '%s': %zu files (complete=%d)",
+        prefix.c_str(), result.size(), (int)listComplete);
+    if (outComplete) *outComplete = listComplete;
+    return true;
 }

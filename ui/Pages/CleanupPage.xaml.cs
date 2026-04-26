@@ -219,7 +219,7 @@ public partial class CleanupPage : Page
             {
                 var cleanup = _cleanup ?? new CloudCleanup(_steamPath, _ => { });
 
-                // Group by account first, then by app — each account gets its own batch/undo log
+                // Group by account first, then by app -- each account gets its own batch/undo log
                 var byAccount = allSuspect.GroupBy(x => x.app.AccountId);
 
                 foreach (var accountGroup in byAccount)
@@ -752,15 +752,31 @@ public partial class CleanupPage : Page
                 Stretch = Stretch.UniformToFill,
                 Margin = new Thickness(0, 0, 10, 0)
             };
-            if (_storeCache.TryGetValue(app.AppId, out var storeInfo2) && SteamStoreClient.IsValidSteamCdnUrl(storeInfo2.HeaderUrl))
+            if (_storeCache.TryGetValue(app.AppId, out var storeInfo2) && SteamStoreClient.IsValidImageUrl(storeInfo2.HeaderUrl))
             {
                 try
                 {
+                    var uri = new Uri(storeInfo2.HeaderUrl);
                     var bitmap = new BitmapImage();
                     bitmap.BeginInit();
-                    bitmap.UriSource = new Uri(storeInfo2.HeaderUrl);
+                    if (uri.IsFile)
+                    {
+                        // OnLoad decodes immediately and releases the backing
+                        // file handle; without it a file:// URI keeps the
+                        // cached JPEG locked, blocking eviction and the
+                        // File.Move(overwrite:true) that installs a refreshed
+                        // asset after a Steam CDN hash rotation.
+                        bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    }
+                    // HTTP URIs: leave CacheOption at Default so the download
+                    // streams async rather than blocking the UI thread with a
+                    // synchronous fetch (which was causing cold-cache renders
+                    // to drop images silently).
+                    bitmap.UriSource = uri;
                     bitmap.DecodePixelWidth = 64;
                     bitmap.EndInit();
+                    if (uri.IsFile)
+                        bitmap.Freeze();
                     iconImage.Source = bitmap;
                 }
                 catch { /* icon load failure is fine */ }

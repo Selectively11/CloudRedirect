@@ -35,10 +35,7 @@ namespace CloudRedirect.Services
         public uint AppId { get; set; }
     }
 
-    /// <summary>
-    /// Complete log of all operations performed during a single cleanup run.
-    /// Stored at cloud_redirect/cleanup_tab_backup/{accountId}/{timestamp}/undo_log.json
-    /// </summary>
+    /// <summary>Operation log for one cleanup run; stored under cloud_redirect/cleanup_tab_backup/{accountId}/{timestamp}/undo_log.json.</summary>
     internal class UndoLog
     {
         [JsonPropertyName("timestamp")]
@@ -51,11 +48,7 @@ namespace CloudRedirect.Services
         public List<UndoOperation> Operations { get; set; } = new();
     }
 
-    /// <summary>
-    /// A parsed entry from remotecache.vdf with full metadata.
-    /// Used to distinguish real saves (valid SHA, non-zero size) from ghost/contamination
-    /// entries (SHA=all-zeros, size=0, syncstate=2) injected by SteamTools' app 760 redirect.
-    /// </summary>
+    /// <summary>Parsed remotecache.vdf entry; used to distinguish real saves from ghost contamination.</summary>
     internal class RemotecacheEntry
     {
         public string FileName { get; set; }
@@ -66,12 +59,7 @@ namespace CloudRedirect.Services
         public long LocalTime { get; set; }
         public long RemoteTime { get; set; }
 
-        /// <summary>
-        /// A ghost entry has SHA=all-zeros, size=0, syncstate=2.
-        /// These are cloud sync artifacts from SteamTools redirecting all namespace apps
-        /// to app 760's cloud bucket — the server pushed every game's files into every
-        /// other namespace app's manifest.
-        /// </summary>
+        /// <summary>Ghost = SHA=all-zeros, size=0, syncstate=2 (SteamTools app 760 cross-app sync artifact).</summary>
         public bool IsGhost =>
             Size == 0 &&
             SyncState == 2 &&
@@ -102,10 +90,7 @@ namespace CloudRedirect.Services
         public long SizeBytes { get; set; }            // File size on disk
     }
 
-    /// <summary>
-    /// Result of scanning a single app's remote/ directory.
-    /// Used by the CleanupPage UI to display per-game file lists.
-    /// </summary>
+    /// <summary>Result of scanning one app's remote/ dir for the Cleanup UI.</summary>
     internal class AppScanResult
     {
         public uint AppId { get; set; }
@@ -120,10 +105,7 @@ namespace CloudRedirect.Services
         public long PollutedBytes { get; private set; }
         public long TotalBytes { get; private set; }
 
-        /// <summary>
-        /// Compute all stats in a single pass over Files.
-        /// Call once after all files have been classified and added.
-        /// </summary>
+        /// <summary>Compute counts/sizes in one pass after classification.</summary>
         public void ComputeStats()
         {
             int polluted = 0, legit = 0, unknown = 0;
@@ -199,10 +181,7 @@ namespace CloudRedirect.Services
             _log = log ?? (_ => { });
         }
 
-        /// <summary>
-        /// Scan all namespace apps and return structured per-app results.
-        /// Used by CleanupPage to present files to the user for manual selection.
-        /// </summary>
+        /// <summary>Scan all namespace apps; results feed CleanupPage's selection list.</summary>
         public List<AppScanResult> ScanApps()
         {
             var results = new List<AppScanResult>();
@@ -285,11 +264,7 @@ namespace CloudRedirect.Services
             return results;
         }
 
-        /// <summary>
-        /// Start a cleanup batch. All subsequent CleanFiles() calls will put their
-        /// backed-up files into the same timestamped backup directory.
-        /// Call EndBatch() when done to finalize the undo log.
-        /// </summary>
+        /// <summary>Begin a batch; CleanFiles backups go into one timestamped dir until EndBatch.</summary>
         public void BeginBatch()
         {
             _backupTimestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
@@ -297,9 +272,7 @@ namespace CloudRedirect.Services
             _batchActive = true;
         }
 
-        /// <summary>
-        /// Finalize a cleanup batch: save the undo log and reset batch state.
-        /// </summary>
+        /// <summary>Save the undo log and reset batch state.</summary>
         public void EndBatch(string accountId)
         {
             if (_undoLog?.Operations.Count > 0)
@@ -310,10 +283,8 @@ namespace CloudRedirect.Services
         }
 
         /// <summary>
-        /// Remove specific files from an app's remote/ directory, backing up everything first.
-        /// If a batch is active (via BeginBatch), files go into the batch's backup directory.
-        /// Otherwise, a standalone backup directory is created for this call.
-        /// Returns the number of files successfully moved to backup.
+        /// Move specified files out of an app's remote/ dir into a backup dir
+        /// (batch dir if BeginBatch is active). Returns count moved.
         /// </summary>
         public int CleanFiles(string accountId, uint appId, string appDir, List<ClassifiedFile> filesToRemove)
         {
@@ -342,12 +313,8 @@ namespace CloudRedirect.Services
         }
 
         /// <summary>
-        /// Detect namespace apps by scanning {steamPath}/config/stplug-in/*.lua files.
-        /// Only includes "self-unlocking" luas -- those where the lua file contains
-        /// addappid(&lt;own_appid&gt;), meaning the base game itself is lua-unlocked.
-        /// DLC-only luas (where the user owns the base game and the lua only unlocks
-        /// DLC with different appIds) are excluded.
-        /// Same detection logic as the DLL uses in cloud_intercept.cpp Init().
+        /// Find namespace apps via stplug-in/*.lua. Only self-unlocking luas
+        /// (addappid(&lt;own_appid&gt;) present) count, matching the DLL's logic.
         /// </summary>
         private HashSet<uint> DetectNamespaceApps()
         {
@@ -373,12 +340,7 @@ namespace CloudRedirect.Services
             return apps;
         }
 
-        /// <summary>
-        /// Check if a lua file is "self-unlocking" -- i.e. it contains an addappid() call
-        /// for its own appId (the filename). This means the base game is not owned and is
-        /// being unlocked by the lua. DLC-only luas never call addappid() with the base
-        /// game's appId.
-        /// </summary>
+        /// <summary>True if the lua contains addappid(&lt;appId&gt;) for its own filename appId.</summary>
         internal static bool IsSelfUnlockingLua(string filePath, uint appId)
         {
             // The pattern we're looking for: addappid(<appId>) at the start of a line,
@@ -410,10 +372,8 @@ namespace CloudRedirect.Services
         }
 
         /// <summary>
-        /// Build a map of filename → set of appIds across ALL namespace apps' remotecache.vdf files.
-        /// This detects cross-app contamination: when SteamTools redirected all namespace apps to app 760's
-        /// cloud bucket, Steam synced every game's saves into every other namespace app's remotecache.
-        /// Files appearing in 2+ apps' remotecaches are definitively contamination.
+        /// Map filename → set of appIds across all namespace remotecaches.
+        /// Files appearing in 2+ apps are cross-app contamination.
         /// </summary>
         private Dictionary<string, HashSet<uint>> BuildCrossAppRemotecacheMap()
         {
@@ -459,10 +419,7 @@ namespace CloudRedirect.Services
             return map;
         }
 
-        /// <summary>
-        /// Get the backup base directory for a given account.
-        /// Uses cloud_redirect/cleanup_tab_backup/{accountId}/ -- outside userdata, safe from Steam.
-        /// </summary>
+        /// <summary>Backup base for an account (outside userdata, safe from Steam).</summary>
         private string GetBackupBase(string accountId)
         {
             return Path.Combine(BackupPaths.GetCleanupRoot(_steamPath), accountId);
@@ -494,17 +451,8 @@ namespace CloudRedirect.Services
         }
 
         /// <summary>
-        /// Classify a single file as legitimate or polluted.
-        /// 
-        /// Hybrid approach: combines ghost detection, cross-app remotecache overlap, and heuristics.
-        /// 
-        /// Check order:
-        /// 1. Ghost remotecache entry → definite contamination (PollutionCrossApp)
-        /// 2. Real remotecache entry + filename in 2+ apps' remotecaches → cross-app contamination
-        /// 3. Real remotecache entry + filename unique to this app → Legitimate
-        /// 4. Heuristic pattern checks (AppID dirs, mangled names)
-        /// 5. AutoCloud rule matching
-        /// 6. File not in any remotecache → Unknown (conservative)
+        /// Classify a file: ghost entry, cross-app overlap, unique remotecache hit,
+        /// AppID/mangled-name heuristics, AutoCloud rule, else Unknown.
         /// </summary>
         private ClassifiedFile ClassifyFile(
             uint appId,
@@ -595,10 +543,8 @@ namespace CloudRedirect.Services
                 return result;
             }
 
-            // We do NOT mark these as PollutionOrphan because files can legitimately exist
-            // on disk without remotecache entries (e.g., cc_save.dat in Castle Crashers).
-            // The cross-app overlap check above catches synced contamination; anything left
-            // over that's not in any remotecache is ambiguous.
+            // Files absent from remotecache can be legitimate (e.g. cc_save.dat),
+            // so leave them Unknown rather than calling them PollutionOrphan.
             result.Classification = FileClassification.Unknown;
             if (remotecacheEntries != null && remotecacheEntries.Count > 0)
             {
@@ -677,12 +623,7 @@ namespace CloudRedirect.Services
             return regex.IsMatch(input);
         }
 
-        /// <summary>
-        /// Parse remotecache.vdf to get full entry details for each tracked file.
-        /// Returns a dictionary of filename → RemotecacheEntry with SHA, size, syncstate etc.
-        /// This allows distinguishing real saves (valid SHA, non-zero size) from ghost entries
-        /// (SHA=all-zeros, size=0, syncstate=2) that are contamination from SteamTools' app 760 redirect.
-        /// </summary>
+        /// <summary>Parse remotecache.vdf into filename → RemotecacheEntry.</summary>
         private Dictionary<string, RemotecacheEntry> ParseRemotecache(string appDir, uint appId)
         {
             string vdfPath = Path.Combine(appDir, "remotecache.vdf");
@@ -786,10 +727,7 @@ namespace CloudRedirect.Services
             return entries;
         }
 
-        /// <summary>
-        /// Move polluted files to a timestamped backup directory.
-        /// Each cleanup batch gets its own isolated directory — no files are ever overwritten.
-        /// </summary>
+        /// <summary>Move polluted files into a timestamped per-batch backup dir.</summary>
         private (int moved, List<ClassifiedFile> movedFiles) MoveToHoldover(string accountId, uint appId, string appDir, List<ClassifiedFile> pollutedFiles)
         {
             // Each cleanup batch gets its own timestamped directory

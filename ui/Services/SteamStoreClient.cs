@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -40,29 +42,25 @@ internal class StoreCache
     public Dictionary<uint, StoreAppInfo> Entries { get; set; } = new();
 }
 
-/// <summary>
-/// Fetches app names and header images from Steam's public IStoreBrowseService/GetItems API.
-/// Results are cached in memory and on disk (%APPDATA%/CloudRedirect/store_cache.json).
-/// </summary>
+/// <summary>Fetches app names/headers from Steam's IStoreBrowseService; caches in memory and on disk.</summary>
 internal sealed class SteamStoreClient : IDisposable
 {
-    /// <summary>
-    /// Shared singleton instance. Lives for the app's lifetime -- HttpClient is designed
-    /// to be long-lived and reuse connections. Avoids the IDisposable-never-called problem
-    /// when WPF Pages each create their own instance.
-    /// </summary>
+    /// <summary>Process-wide singleton; HttpClient is long-lived by design.</summary>
     public static SteamStoreClient Shared { get; } = new();
 
     private static readonly TimeSpan DiskCacheTtl = TimeSpan.FromDays(7);
+    private static readonly TimeSpan ImageCacheTtl = TimeSpan.FromDays(60);
+    private const long MaxCachedImageBytes = 5 * 1024 * 1024; // 5 MB sanity cap
     private static readonly string CachePath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "CloudRedirect", "store_cache.json");
 
-    /// <summary>
-    /// Known Steam CDN domains. URLs from the disk cache are validated against these
-    /// before being used as image sources to prevent tampered cache entries from
-    /// loading images from attacker-controlled servers.
-    /// </summary>
+    /// <summary>Cache dir for JPEG headers; filenames are SHA-256 prefixes of the CDN URL.</summary>
+    private static readonly string ImageCacheDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "CloudRedirect", "store_images");
+
+    /// <summary>Allow-list of Steam CDN hosts; URLs from disk cache are validated against these.</summary>
     private static readonly string[] AllowedCdnHosts = new[]
     {
         ".steamstatic.com",
@@ -75,16 +73,15 @@ internal sealed class SteamStoreClient : IDisposable
     private volatile bool _diskLoaded;
     private readonly SemaphoreSlim _diskLock = new(1, 1);
 
+    /// <summary>Per-URL in-flight download dedup so concurrent callers share one download.</summary>
+    private readonly ConcurrentDictionary<string, Task> _inFlightDownloads = new();
+
     public SteamStoreClient()
     {
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
     }
 
-    /// <summary>
-    /// Returns true if the URL is a valid HTTPS URL pointing to a known Steam CDN domain.
-    /// Used to validate header image URLs loaded from the disk cache before passing them
-    /// to BitmapImage.
-    /// </summary>
+    /// <summary>True if the URL is HTTPS on an allow-listed Steam CDN host.</summary>
     public static bool IsValidSteamCdnUrl(string? url)
     {
         if (string.IsNullOrEmpty(url)) return false;
@@ -100,10 +97,46 @@ internal sealed class SteamStoreClient : IDisposable
         return false;
     }
 
-    /// <summary>
-    /// Look up names and header images for the given app IDs.
-    /// Returns a dictionary keyed by app ID. Missing/failed apps are omitted.
-    /// </summary>
+    /// <summary>True if the URL is a file:// URI inside the image cache dir (traversal-checked).</summary>
+    public static bool IsValidCachedImagePath(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return false;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
+        if (uri.Scheme != "file") return false;
+
+        string normalizedLocal;
+        string normalizedCache;
+        try
+        {
+            normalizedLocal = Path.GetFullPath(uri.LocalPath);
+            normalizedCache = Path.GetFullPath(ImageCacheDir);
+        }
+        catch
+        {
+            return false;
+        }
+
+        var prefix = normalizedCache.EndsWith(Path.DirectorySeparatorChar)
+            ? normalizedCache
+            : normalizedCache + Path.DirectorySeparatorChar;
+
+        return normalizedLocal.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Accepts a Steam CDN URL or a file:// URI under the local image cache.</summary>
+    public static bool IsValidImageUrl(string? url)
+        => IsValidSteamCdnUrl(url) || IsValidCachedImagePath(url);
+
+    /// <summary>SHA-256-prefixed cache path for a CDN URL.</summary>
+    private static string GetCachedImagePath(string cdnUrl)
+    {
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(Encoding.UTF8.GetBytes(cdnUrl), hash);
+        var hex = Convert.ToHexString(hash[..8]); // 16 hex chars is plenty for uniqueness
+        return Path.Combine(ImageCacheDir, $"{hex}.jpg");
+    }
+
+    /// <summary>Look up names/headers for the given app IDs; missing apps are omitted.</summary>
     public async Task<Dictionary<uint, StoreAppInfo>> GetAppInfoAsync(IReadOnlyList<uint> appIds)
     {
         if (appIds.Count == 0)
@@ -136,7 +169,134 @@ internal sealed class SteamStoreClient : IDisposable
             _ = SaveDiskCacheAsync();
         }
 
+        // Prefer a locally cached JPEG; otherwise kick off a background fetch.
+        // Keys snapshotted because the loop writes back into result.
+        foreach (var key in result.Keys.ToArray())
+        {
+            var info = result[key];
+            if (!IsValidSteamCdnUrl(info.HeaderUrl)) continue;
+
+            var localPath = GetCachedImagePath(info.HeaderUrl!);
+            if (File.Exists(localPath))
+            {
+                var rewritten = new StoreAppInfo
+                {
+                    Name = info.Name,
+                    HeaderUrl = new Uri(localPath).AbsoluteUri,
+                    FetchedUtc = info.FetchedUtc
+                };
+                result[key] = rewritten;
+            }
+            else
+            {
+                // GetOrAdd ensures concurrent callers with the same URL share one
+                // download task instead of each racing to write the same .tmp file.
+                _ = _inFlightDownloads.GetOrAdd(localPath, lp =>
+                    DownloadImageToCacheAsync(info.HeaderUrl!, lp)
+                        .ContinueWith(t =>
+                        {
+                            _inFlightDownloads.TryRemove(lp, out _);
+                        }, TaskScheduler.Default));
+            }
+        }
+
         return result;
+    }
+
+    /// <summary>
+    /// Stream a CDN image into the cache, capped at MaxCachedImageBytes,
+    /// via a GUID-suffixed .tmp + atomic Move. Failures are swallowed.
+    /// </summary>
+    private async Task DownloadImageToCacheAsync(string cdnUrl, string localPath)
+    {
+        if (!IsValidSteamCdnUrl(cdnUrl)) return;
+
+        string? tmp = null;
+        try
+        {
+            Directory.CreateDirectory(ImageCacheDir);
+
+            // Recheck: another caller may have produced the file already.
+            if (File.Exists(localPath)) return;
+
+            // ResponseHeadersRead lets us reject oversize before buffering.
+            using var resp = await _http.GetAsync(cdnUrl, HttpCompletionOption.ResponseHeadersRead);
+            if (!resp.IsSuccessStatusCode) return;
+
+            if (resp.Content.Headers.ContentLength is long declared && declared > MaxCachedImageBytes)
+                return;
+
+            tmp = $"{localPath}.{Guid.NewGuid():N}.tmp";
+
+            // Running byte count bounds chunked responses lacking Content-Length.
+            long written = 0;
+            await using (var src = await resp.Content.ReadAsStreamAsync())
+            await using (var dst = new FileStream(
+                tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+            {
+                var buf = new byte[81920];
+                int n;
+                while ((n = await src.ReadAsync(buf.AsMemory())) > 0)
+                {
+                    written += n;
+                    if (written > MaxCachedImageBytes)
+                        return; // tmp is cleaned up in finally
+                    await dst.WriteAsync(buf.AsMemory(0, n));
+                }
+            }
+
+            if (written == 0) return; // empty body -- treat as failure
+
+            File.Move(tmp, localPath, overwrite: true);
+            tmp = null; // don't delete the file we just moved
+        }
+        catch
+        {
+            // Non-fatal: caller will fall back to the CDN URL this session.
+        }
+        finally
+        {
+            if (tmp != null)
+            {
+                try { File.Delete(tmp); } catch { /* best-effort */ }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Delete cached images older than ImageCacheTtl and abandoned .tmp
+    /// sidecars older than 10 minutes. Run off the UI thread.
+    /// </summary>
+    private static void EvictStaleImages()
+    {
+        try
+        {
+            if (!Directory.Exists(ImageCacheDir)) return;
+            var cutoff = DateTime.UtcNow - ImageCacheTtl;
+
+            foreach (var file in Directory.EnumerateFiles(ImageCacheDir, "*.jpg"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(file) < cutoff)
+                        File.Delete(file);
+                }
+                catch { /* skip files we can't stat/delete */ }
+            }
+
+            // Sweep .tmp sidecars older than any realistic HTTP timeout.
+            var tmpCutoff = DateTime.UtcNow - TimeSpan.FromMinutes(10);
+            foreach (var file in Directory.EnumerateFiles(ImageCacheDir, "*.tmp"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(file) < tmpCutoff)
+                        File.Delete(file);
+                }
+                catch { /* skip files we can't stat/delete */ }
+            }
+        }
+        catch { /* non-fatal */ }
     }
 
     // ── API call ────────────────────────────────────────────────────────
@@ -229,6 +389,9 @@ internal sealed class SteamStoreClient : IDisposable
                         _mem.TryAdd(id, info);
                 }
             }
+
+            // Age out stale image-cache entries off the UI thread.
+            _ = Task.Run(EvictStaleImages);
 
             _diskLoaded = true;
         }

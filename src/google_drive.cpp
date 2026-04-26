@@ -5,6 +5,7 @@
 
 #include <wincrypt.h>
 #include <ctime>
+#include <sstream>
 
 #pragma comment(lib, "Advapi32.lib")
 
@@ -52,8 +53,8 @@ void GoogleDriveProvider::InvalidateFolderById(const std::string& folderId) {
     }
 }
 
-std::string GoogleDriveProvider::FindDriveFolder(const std::string& name,
-                                                  const std::string& parentId) {
+GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindDriveFolderStatus(
+    const std::string& name, const std::string& parentId, std::string* outId) {
     std::string q = "name='" + EscapeQuery(name) + "'"
                     " and mimeType='application/vnd.google-apps.folder'"
                     " and trashed=false";
@@ -64,12 +65,12 @@ std::string GoogleDriveProvider::FindDriveFolder(const std::string& name,
                     "&fields=files(id,createdTime)&orderBy=createdTime&pageSize=10");
     if (r.status == 404 && !parentId.empty()) {
         InvalidateFolderById(parentId);
-        return {};
+        return LookupStatus::Missing;
     }
-    if (r.status != 200) return {};
+    if (r.status != 200) return LookupStatus::Error;
     auto j = Json::Parse(r.body);
     auto& files = j["files"];
-    if (files.size() == 0) return {};
+    if (files.size() == 0) return LookupStatus::Missing;
     // Keep the oldest folder (first by createdTime ascending)
     std::string keepId = files[(size_t)0]["id"].str();
     // clean up duplicate folders (can happen from eventual consistency)
@@ -79,7 +80,14 @@ std::string GoogleDriveProvider::FindDriveFolder(const std::string& name,
             name.c_str(), dupId.c_str(), keepId.c_str());
         DeleteById(dupId);
     }
-    return keepId;
+    if (outId) *outId = keepId;
+    return LookupStatus::Exists;
+}
+
+std::string GoogleDriveProvider::FindDriveFolder(const std::string& name,
+                                                  const std::string& parentId) {
+    std::string id;
+    return FindDriveFolderStatus(name, parentId, &id) == LookupStatus::Exists ? id : std::string();
 }
 
 std::string GoogleDriveProvider::CreateDriveFolder(const std::string& name,
@@ -236,13 +244,15 @@ std::string GoogleDriveProvider::EnsureSubfolders(const std::string& parentId,
 }
 
 std::vector<GoogleDriveProvider::DriveFileInfo>
-GoogleDriveProvider::ListFolder(const std::string& folderId) {
+GoogleDriveProvider::ListFolder(const std::string& folderId, bool* ok) {
     std::vector<DriveFileInfo> result;
+    if (ok) *ok = false;
 
     std::string q = "'" + EscapeQuery(folderId) + "' in parents and trashed=false";
     std::string baseUrl = "/drive/v3/files?q=" + UrlEncode(q) +
         "&fields=nextPageToken,files(id,name,mimeType,modifiedTime,size)&pageSize=1000";
     std::string pageToken;
+    bool firstPage = true;
 
     do {
         std::string url = baseUrl;
@@ -252,9 +262,20 @@ GoogleDriveProvider::ListFolder(const std::string& folderId) {
         auto r = ApiGet(url);
         if (r.status == 404) {
             InvalidateFolderById(folderId);
+            // First-page 404 = empty listing. Mid-pagination 404 means the
+            // folder vanished between pages; partial result is unsafe to
+            // mark complete, so report failure.
+            if (firstPage) {
+                if (ok) *ok = true;
+            } else {
+                LOG("[GDrive] ListFolder %s: mid-pagination 404; folder removed "
+                    "between pages, reporting listing failure", folderId.c_str());
+                // *ok remains false
+            }
             return result;
         }
-        if (r.status != 200) break;
+        if (r.status != 200) return result;
+        firstPage = false;
 
         auto j = Json::Parse(r.body);
         auto& files = j["files"];
@@ -272,27 +293,35 @@ GoogleDriveProvider::ListFolder(const std::string& folderId) {
         pageToken = j["nextPageToken"].str();
     } while (!pageToken.empty());
 
+    if (ok) *ok = true;
     return result;
 }
 
 static constexpr int MAX_RECURSION_DEPTH = 32;
 
-void GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::string& prefix,
-                                         std::vector<RemoteFile>& out, int depth) {
+bool GoogleDriveProvider::ListRecursive(const std::string& folderId, const std::string& prefix,
+                                          std::vector<RemoteFile>& out,
+                                          bool* outComplete, int depth) {
     if (depth >= MAX_RECURSION_DEPTH) {
         LOG("[GDrive] ListRecursive: max depth %d reached at %s, stopping",
             MAX_RECURSION_DEPTH, prefix.c_str());
-        return;
+        // Cap reached: not an error, but mark incomplete so destructive
+        // prunes are suppressed.
+        if (outComplete) *outComplete = false;
+        return true;
     }
-    auto items = ListFolder(folderId);
+    bool ok = false;
+    auto items = ListFolder(folderId, &ok);
+    if (!ok) return false;
     for (auto& item : items) {
         std::string path = prefix.empty() ? item.name : prefix + "/" + item.name;
         if (item.isFolder) {
-            ListRecursive(item.id, path, out, depth + 1);
+            if (!ListRecursive(item.id, path, out, outComplete, depth + 1)) return false;
         } else {
             out.push_back({item.id, path, item.modifiedTime, item.size});
         }
     }
+    return true;
 }
 
 std::optional<std::vector<uint8_t>>
@@ -305,8 +334,8 @@ GoogleDriveProvider::DownloadFileById(const std::string& fileId) {
     return std::vector<uint8_t>(r.body.begin(), r.body.end());
 }
 
-std::string GoogleDriveProvider::FindFileInFolder(const std::string& name,
-                                                   const std::string& folderId) {
+GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindFileInFolderStatus(
+    const std::string& name, const std::string& folderId, std::string* outId) {
     std::string q = "name='" + EscapeQuery(name) + "'"
                     " and '" + EscapeQuery(folderId) + "' in parents"
                     " and mimeType!='application/vnd.google-apps.folder'"
@@ -314,12 +343,20 @@ std::string GoogleDriveProvider::FindFileInFolder(const std::string& name,
     auto r = ApiGet("/drive/v3/files?q=" + UrlEncode(q) + "&fields=files(id)&pageSize=1");
     if (r.status == 404) {
         InvalidateFolderById(folderId);
-        return {};
+        return LookupStatus::Missing;
     }
-    if (r.status != 200) return {};
+    if (r.status != 200) return LookupStatus::Error;
     auto j = Json::Parse(r.body);
     auto& files = j["files"];
-    return files.size() > 0 ? files[(size_t)0]["id"].str() : std::string();
+    if (files.size() == 0) return LookupStatus::Missing;
+    if (outId) *outId = files[(size_t)0]["id"].str();
+    return LookupStatus::Exists;
+}
+
+std::string GoogleDriveProvider::FindFileInFolder(const std::string& name,
+                                                   const std::string& folderId) {
+    std::string id;
+    return FindFileInFolderStatus(name, folderId, &id) == LookupStatus::Exists ? id : std::string();
 }
 
 bool GoogleDriveProvider::UploadOrUpdate(const std::string& name, const std::string& folderId,
@@ -507,44 +544,129 @@ bool GoogleDriveProvider::Remove(const std::string& path) {
 }
 
 bool GoogleDriveProvider::Exists(const std::string& path) {
+    return CheckExists(path) == ExistsStatus::Exists;
+}
+
+ICloudProvider::ExistsStatus GoogleDriveProvider::CheckExists(const std::string& path) {
     uint32_t accountId, appId;
     std::string relFilename;
     if (!ParsePath(path, accountId, appId, relFilename) || relFilename.empty())
-        return false;
+        return ExistsStatus::Error;
 
-    std::string parentId, leafName;
-    if (!ResolvePath(accountId, appId, relFilename, parentId, leafName))
-        return false;
+    std::string rootId;
+    auto rootStatus = FindDriveFolderStatus("CloudRedirect", "", &rootId);
+    if (rootStatus == LookupStatus::Error) return ExistsStatus::Error;
+    if (rootStatus == LookupStatus::Missing) return ExistsStatus::Missing;
 
-    return !FindFileInFolder(leafName, parentId).empty();
+    std::string accountFolder;
+    auto accountStatus = FindDriveFolderStatus(std::to_string(accountId), rootId, &accountFolder);
+    if (accountStatus == LookupStatus::Error) return ExistsStatus::Error;
+    if (accountStatus == LookupStatus::Missing) return ExistsStatus::Missing;
+
+    std::string appFolder;
+    auto appStatus = FindDriveFolderStatus(std::to_string(appId), accountFolder, &appFolder);
+    if (appStatus == LookupStatus::Error) return ExistsStatus::Error;
+    if (appStatus == LookupStatus::Missing) return ExistsStatus::Missing;
+
+    size_t lastSlash = relFilename.rfind('/');
+    std::string dirPart = (lastSlash != std::string::npos) ? relFilename.substr(0, lastSlash) : "";
+    std::string leafName = (lastSlash != std::string::npos) ? relFilename.substr(lastSlash + 1) : relFilename;
+    std::string parentId = appFolder;
+    if (!dirPart.empty()) {
+        std::stringstream ss(dirPart);
+        std::string part;
+        while (std::getline(ss, part, '/')) {
+            if (part.empty()) continue;
+            std::string nextId;
+            auto partStatus = FindDriveFolderStatus(part, parentId, &nextId);
+            if (partStatus == LookupStatus::Error) return ExistsStatus::Error;
+            if (partStatus == LookupStatus::Missing) return ExistsStatus::Missing;
+            parentId = std::move(nextId);
+        }
+    }
+
+    auto status = FindFileInFolderStatus(leafName, parentId);
+    if (status == LookupStatus::Exists) return ExistsStatus::Exists;
+    if (status == LookupStatus::Missing) return ExistsStatus::Missing;
+    return ExistsStatus::Error;
 }
 
 std::vector<ICloudProvider::FileInfo>
 GoogleDriveProvider::List(const std::string& prefix) {
     std::vector<FileInfo> result;
+    ListChecked(prefix, result);
+    return result;
+}
+
+bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<FileInfo>& result,
+                                       bool* outComplete) {
+    result.clear();
+    // Pessimistic default; only the verified-complete success path sets true.
+    if (outComplete) *outComplete = false;
+
+    // Absent folder = complete-empty listing.
+    auto returnComplete = [&]() {
+        if (outComplete) *outComplete = true;
+        return true;
+    };
 
     uint32_t accountId, appId;
     std::string relPrefix;
-    if (!ParsePath(prefix, accountId, appId, relPrefix))
-        return result;
+    if (!ParsePath(prefix, accountId, appId, relPrefix)) {
+        return false;
+    }
 
-    auto appFolder = GetAppFolder(accountId, appId);
-    if (appFolder.empty()) return result;
+    std::string appFolder;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
+        auto it = m_folders.find("app_" + std::to_string(accountId) + "_" + std::to_string(appId));
+        if (it != m_folders.end()) appFolder = it->second;
+    }
+    if (appFolder.empty()) {
+        std::string rootId;
+        auto rootStatus = FindDriveFolderStatus("CloudRedirect", "", &rootId);
+        if (rootStatus == LookupStatus::Error) return false;
+        if (rootStatus == LookupStatus::Missing) return returnComplete();
 
-    // If there's a sub-prefix (e.g., "blobs/"), resolve to that subfolder
+        std::string accountFolder;
+        auto accountStatus = FindDriveFolderStatus(std::to_string(accountId), rootId, &accountFolder);
+        if (accountStatus == LookupStatus::Error) return false;
+        if (accountStatus == LookupStatus::Missing) return returnComplete();
+
+        auto appStatus = FindDriveFolderStatus(std::to_string(appId), accountFolder, &appFolder);
+        if (appStatus == LookupStatus::Error) return false;
+        if (appStatus == LookupStatus::Missing) return returnComplete();
+
+        std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
+        m_folders["app_" + std::to_string(accountId) + "_" + std::to_string(appId)] = appFolder;
+    }
+
+    // Resolve any sub-prefix (e.g. "blobs/") to its subfolder.
     std::string listRoot = appFolder;
     std::string pathPrefix;
     if (!relPrefix.empty()) {
         std::string dir = relPrefix;
         if (!dir.empty() && dir.back() == '/') dir.pop_back();
-        listRoot = EnsureSubfolders(appFolder, dir, /*create=*/false);
-        if (listRoot.empty()) return result;
+        std::stringstream ss(dir);
+        std::string part;
+        while (std::getline(ss, part, '/')) {
+            if (part.empty()) continue;
+            std::string nextId;
+            auto status = FindDriveFolderStatus(part, listRoot, &nextId);
+            if (status == LookupStatus::Error) return false;
+            if (status == LookupStatus::Missing) return returnComplete();
+            listRoot = std::move(nextId);
+        }
         pathPrefix = relPrefix;
         if (!pathPrefix.empty() && pathPrefix.back() != '/') pathPrefix += '/';
     }
 
+    // Local flag so the recursion can downgrade completeness independently.
     std::vector<RemoteFile> remoteFiles;
-    ListRecursive(listRoot, "", remoteFiles);
+    bool recursiveComplete = true;
+    if (!ListRecursive(listRoot, "", remoteFiles, &recursiveComplete)) {
+        return false;
+    }
 
     std::string basePrefix = std::to_string(accountId) + "/" + std::to_string(appId) + "/";
     if (!pathPrefix.empty()) basePrefix += pathPrefix;
@@ -558,6 +680,8 @@ GoogleDriveProvider::List(const std::string& prefix) {
         result.push_back(std::move(fi));
     }
 
-    LOG("[GDriveProvider] List '%s': %zu files", prefix.c_str(), result.size());
-    return result;
+    LOG("[GDriveProvider] List '%s': %zu files (complete=%d)",
+        prefix.c_str(), result.size(), (int)recursiveComplete);
+    if (outComplete) *outComplete = recursiveComplete;
+    return true;
 }

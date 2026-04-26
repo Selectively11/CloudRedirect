@@ -5,6 +5,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Threading.Tasks;
 using CloudRedirect.Services;
 using Microsoft.Win32;
 
@@ -97,8 +98,7 @@ namespace CloudRedirect.Services.Patching
 
         static byte[] ReadFileShared(string path)
         {
-            // FileShare.Read prevents concurrent writes from modifying the file
-            // while we're reading, avoiding TOCTOU races with SteamTools deployment
+            // FileShare.Read: avoid TOCTOU with concurrent SteamTools writes.
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             var buf = new byte[fs.Length];
             fs.ReadExactly(buf);
@@ -208,8 +208,9 @@ namespace CloudRedirect.Services.Patching
 
         const string XinputUrl = "https://files.catbox.moe/heom44.dll";
         const string DwmapiUrl = "https://files.catbox.moe/32p6f9.dll";
-        const string XinputFallbackUrl = "http://update.aaasn.com/update";
-        const string DwmapiFallbackUrl = "http://update.aaasn.com/dwmapi";
+        // HTTPS fallbacks; SHA-256 below detects tampering.
+        const string XinputFallbackUrl = "https://update.aaasn.com/update";
+        const string DwmapiFallbackUrl = "https://update.aaasn.com/dwmapi";
         const string XinputHash = "ddb1f0909c7092f06890674f90b5d4f1198724b05b4bf1e656b4063897340243";
         const string DwmapiHash = "1ce49ed63af004ad37a4d2921a5659a17001c4c0026d6245fcc0d543e9c265d0";
 
@@ -219,7 +220,11 @@ namespace CloudRedirect.Services.Patching
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
 
-        public PatchResult RepairCoreDlls()
+        // Sync wrapper; new callers prefer RepairCoreDllsAsync.
+        public PatchResult RepairCoreDlls() =>
+            RepairCoreDllsAsync().GetAwaiter().GetResult();
+
+        public async Task<PatchResult> RepairCoreDllsAsync()
         {
             _verbose = true;
             var result = new PatchResult();
@@ -263,7 +268,7 @@ namespace CloudRedirect.Services.Patching
                     Log($"Downloading {name}..");
                     try
                     {
-                        var dl = http.GetByteArrayAsync(url).ConfigureAwait(false).GetAwaiter().GetResult();
+                        var dl = await http.GetByteArrayAsync(url).ConfigureAwait(false);
                         if (dl != null && dl.Length > 0 && ComputeSha256(dl) == hash)
                             data = dl;
                         else
@@ -279,7 +284,7 @@ namespace CloudRedirect.Services.Patching
                         Log($"  Trying fallback..");
                         try
                         {
-                            var dl = http.GetByteArrayAsync(fallback).ConfigureAwait(false).GetAwaiter().GetResult();
+                            var dl = await http.GetByteArrayAsync(fallback).ConfigureAwait(false);
                             if (dl != null && dl.Length > 0 && ComputeSha256(dl) == hash)
                             {
                                 data = dl;
@@ -457,11 +462,11 @@ namespace CloudRedirect.Services.Patching
                     return result.Fail("Byte mismatch in payload - wrong version?");
                 }
 
-                // all patches verified - now write both files
-                // Write payload first (less dangerous if interrupted: patched payload
-                // without patched DLL just means cloud features don't work yet, while
-                // patched DLL with original payload would bypass SteamTools activation)
-                Backup(cachePath);
+                // Backup both before either write so partial states are recoverable.
+                // Payload first: half-applied means features don't work; reversed
+                // would bypass SteamTools activation.
+                BackupBoth(cachePath, dllPath);
+
                 if (plApplied > 0)
                 {
                     ReEncryptAndWrite(cachePath, patchedPayload, iv);
@@ -473,7 +478,6 @@ namespace CloudRedirect.Services.Patching
                 }
                 result.CachePatched = true;
 
-                Backup(dllPath);
                 if (dllApplied > 0)
                 {
                     FileUtils.AtomicWriteAllBytes(dllPath, patchedDll);
@@ -561,9 +565,14 @@ namespace CloudRedirect.Services.Patching
                     return result.Fail("Byte mismatch in payload");
                 }
 
+                // Backup both before either write (see ApplyOfflineSetup).
+                if (plReverted > 0 || dllReverted > 0)
+                {
+                    BackupBoth(cachePath, dllPath);
+                }
+
                 if (plReverted > 0)
                 {
-                    Backup(cachePath);
                     ReEncryptAndWrite(cachePath, revertedPayload, iv);
                     Log($"  {plReverted} patch(es) reverted in payload" + (plSkipped > 0 ? $", {plSkipped} already original" : ""));
                 }
@@ -574,7 +583,6 @@ namespace CloudRedirect.Services.Patching
 
                 if (dllReverted > 0)
                 {
-                    Backup(dllPath);
                     FileUtils.AtomicWriteAllBytes(dllPath, revertedDll);
                     Log($"  {dllReverted} patch(es) reverted in {hijackDll}" + (dllSkipped > 0 ? $", {dllSkipped} already original" : ""));
                 }
@@ -595,9 +603,8 @@ namespace CloudRedirect.Services.Patching
             return result;
         }
 
-        // SteamTools.exe deploys Core.dll -> xinput1_4.dll on every startup,
-        // overwriting our core patches. Patch out DeployCoreToSteamDir (file
-        // offset 0x282F0: push rbp -> ret) so it never runs.
+        // Patch DeployCoreToSteamDir prologue (push rbp -> ret) so SteamTools
+        // doesn't overwrite Core.dll on startup.
         const int StExePatchOffset = 0x282F0;
         static readonly byte[] StExeOriginal = { 0x40, 0x55 }; // REX push rbp
         static readonly byte[] StExePatched  = { 0xC3, 0x90 }; // ret nop
@@ -630,7 +637,7 @@ namespace CloudRedirect.Services.Patching
             }
         }
 
-        // 0 = already patched, 1 = needs patch, -1 = not found / unrecognized
+        // Returns: 0 already patched, 1 needs patch, -1 not found / unrecognized.
         public int GetSteamToolsExePatchState()
         {
             var exe = FindSteamToolsExe();
@@ -654,14 +661,14 @@ namespace CloudRedirect.Services.Patching
             catch { return -1; }
         }
 
-        // Returns: 1 = patched (or already patched), 0 = not found (skip), -1 = failed
+        // Returns: 1 patched, 0 skipped (not found), -1 failed.
         public int PatchSteamToolsExe()
         {
             _verbose = true;
             var exe = FindSteamToolsExe();
             if (exe == null)
             {
-                Log("  SteamTools.exe not found — skipping");
+                Log("  SteamTools.exe not found -- skipping");
                 return 0;
             }
 
@@ -790,23 +797,27 @@ namespace CloudRedirect.Services.Patching
             var orig = path + ".orig";
             if (!File.Exists(orig))
             {
-                File.Copy(path, orig);
+                // .orig: never overwritten; atomic copy avoids torn recovery point.
+                FileUtils.AtomicCopy(path, orig);
                 Log($"  Original saved to {orig}");
             }
 
+            // .bak: rolling per-cycle backup; atomic copy avoids torn restores.
             var bak = path + ".bak";
-            File.Copy(path, bak, overwrite: true);
+            FileUtils.AtomicCopy(path, bak);
             Log($"  Backed up to {bak}");
+        }
+
+        // Bracket both backups before either write so partial states are recoverable.
+        void BackupBoth(string firstPath, string secondPath)
+        {
+            Backup(firstPath);
+            Backup(secondPath);
         }
 
         void ReEncryptAndWrite(string cachePath, byte[] patchedPayload, byte[] iv)
         {
-            // The original IV is intentionally reused for re-encryption.
-            // This is acceptable because:
-            // 1. The payload is not a protocol message — it's a local cache file.
-            // 2. SteamTools itself uses the same IV when writing the cache.
-            // 3. Generating a new IV would change the file prefix and potentially
-            //    confuse SteamTools' cache validation.
+            // Reuse original IV: SteamTools does the same; new IV would break cache validation.
             Log("  Re-encrypting..");
             using var compMs = new MemoryStream();
             using (var zOut = new ZLibStream(compMs, CompressionLevel.Optimal, leaveOpen: true))
@@ -824,7 +835,7 @@ namespace CloudRedirect.Services.Patching
             _cachedPayload = null;
         }
 
-        // build the cloud redirect code cave with correct relative offsets
+        // Build the cave with caller-relative displacements.
         static byte[] BuildDynamicCloudRedirectCave(int caveRva, int sendPktRva,
             int loadLibAIatRva, int getProcAddrIatRva, int recvPktGlobalRva)
         {
@@ -1050,7 +1061,7 @@ namespace CloudRedirect.Services.Patching
             int caveFileOffset;
             if (isAlreadyJmp)
             {
-                // Decode existing jmp to find where the cave was placed last time
+                // Decode the existing jmp to recover the prior cave location.
                 int existingDisp = BitConverter.ToInt32(payload, sendPkt + 1);
                 int existingCaveRva = sendPktRva + 5 + existingDisp;
                 caveFileOffset = PeSection.RvaToFileOffset(sections, existingCaveRva);
@@ -1085,8 +1096,7 @@ namespace CloudRedirect.Services.Patching
                 return null;
             }
 
-            // recvPktGlobal: scan obfuscated section for the hook installer's
-            // lea rcx, sub_SendPkt -> then find mov cs:qword, rcx nearby
+            // recvPktGlobal: scan for `lea rcx, SendPkt; mov cs:qword, rcx`.
             int recvPktGlobalRva = Signatures.FindRecvPktGlobalRva(payload, sections,
                 sendPktRva, gStart, gEnd);
             if (recvPktGlobalRva < 0)
@@ -1150,11 +1160,7 @@ namespace CloudRedirect.Services.Patching
 
 
 
-        /// <summary>
-        /// Namespace mode: applies core DLL patches + P1/P2/P3 (disabling SteamTools'
-        /// native cloud redirect) + CloudRedirect code cave (so our DLL handles both
-        /// appid rewriting to proxy app and filename namespacing).
-        /// </summary>
+        /// <summary>Core DLL patches + P1/P2/P3 + CloudRedirect cave (namespace mode).</summary>
         public PatchResult ApplyCloudRedirectNamespace()
         {
             _verbose = true;
@@ -1210,7 +1216,8 @@ namespace CloudRedirect.Services.Patching
                 }
 
                 Log("Patching payload (CloudRedirect namespace mode)..");
-                Backup(cachePath);
+                // Backup both before either write (see ApplyOfflineSetup).
+                BackupBoth(cachePath, dllPath);
 
                 var (payload, iv, plErr) = ReadAndDecryptPayload(cachePath);
                 if (payload == null)
@@ -1224,11 +1231,8 @@ namespace CloudRedirect.Services.Patching
                     if (p123Errors.Count > 0)
                     {
                         foreach (var err in p123Errors) Log(err);
-                        // P1/P2/P3 errors are non-fatal: these patches disable SteamTools'
-                        // built-in cloud redirect. If they fail (e.g. SteamTools version mismatch),
-                        // CloudRedirect's namespace hooks still work — the SteamTools redirect
-                        // and ours will simply coexist (our hooks take priority).
-                        Log("  Warning: could not apply some P1/P2/P3 patches (continuing — non-fatal)");
+                        // Non-fatal: SteamTools redirect and ours coexist (ours wins).
+                        Log("  Warning: could not apply some P1/P2/P3 patches (continuing -- non-fatal)");
                     }
                     if (p123Applied > 0)
                         Log($"  Applied {p123Applied} cloud-disable patch(es) (P1/P2/P3)");
@@ -1262,7 +1266,7 @@ namespace CloudRedirect.Services.Patching
                 if (deployErr != null)
                     return result.Fail(deployErr);
 
-                // Write payload first (less dangerous if interrupted mid-write)
+                // Payload first (safer mid-write).
                 Buffer.BlockCopy(resolved.DynamicCodeCave, 0, patchedPayload,
                     resolved.CodeCaveFileOffset, resolved.DynamicCodeCave.Length);
                 ReEncryptAndWrite(cachePath, patchedPayload, iv);
@@ -1270,7 +1274,6 @@ namespace CloudRedirect.Services.Patching
                 Log($"  {total} cave change(s) applied" + (plSkipped > 0 ? $", {plSkipped} already done" : ""));
                 result.CachePatched = true;
 
-                Backup(dllPath);
                 if (dllApplied > 0)
                 {
                     FileUtils.AtomicWriteAllBytes(dllPath, patchedDll);
@@ -1325,7 +1328,7 @@ namespace CloudRedirect.Services.Patching
                 if (payload == null)
                     return result.Fail(plErr);
 
-                // Revert SendPkt hook (CloudRedirect-specific patch)
+                // Revert SendPkt hook.
                 var resolved = ResolveCloudRedirectPatchOffsets(payload);
                 byte[] afterCrRevert = payload;
                 if (resolved != null)
@@ -1361,14 +1364,13 @@ namespace CloudRedirect.Services.Patching
                     afterP123Revert = reverted;
                 }
 
-                // Write files (payload first, DLL second — matches apply order)
-                Backup(cachePath);
+                // Backup both, then payload-first writes (matches apply order).
+                BackupBoth(cachePath, dllPath);
                 ReEncryptAndWrite(cachePath, afterP123Revert, iv);
                 Log("  Payload written.");
 
                 if (dllReverted > 0)
                 {
-                    Backup(dllPath);
                     FileUtils.AtomicWriteAllBytes(dllPath, revertedDll);
                     Log($"  {dllReverted} core patch(es) reverted in {hijackDll}");
                 }

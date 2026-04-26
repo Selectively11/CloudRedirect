@@ -35,5 +35,6 @@ PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqB
 PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBody);
 
 void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
+void ShutdownRpcHandlers();
 
 } // namespace CloudIntercept
