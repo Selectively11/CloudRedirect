@@ -16,11 +16,23 @@ internal static class AppUpdater
 {
     private const string RepoOwner = "Selectively11";
     private const string RepoName = "CloudRedirect";
-    /// <summary>
-    /// Uses /releases (not /releases/latest) because all releases are pre-releases
-    /// and the /latest endpoint only returns non-prerelease.
-    /// </summary>
+    // Uses /releases (not /releases/latest) so prerelease/draft flags and tag
+    // suffixes can be filtered client-side.
     private const string ReleasesApiUrl = $"https://api.github.com/repos/{RepoOwner}/{RepoName}/releases";
+
+    private static readonly string[] PrereleaseTagSuffixes =
+        { "-test", "-pre", "-rc", "-beta", "-alpha" };
+
+    internal static bool IsPrereleaseTag(string? tagName)
+    {
+        if (string.IsNullOrEmpty(tagName)) return false;
+        foreach (var suffix in PrereleaseTagSuffixes)
+        {
+            if (tagName.Contains(suffix, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -56,17 +68,36 @@ internal static class AppUpdater
 
             if (releases.GetArrayLength() == 0) return null;
 
-            // First element is the newest release (includes pre-releases)
-            var root = releases[0];
-
-            var tagName = root.GetProperty("tag_name").GetString() ?? "";
-            var remoteVersionStr = tagName.TrimStart('v');
-
             var localVersion = Assembly.GetExecutingAssembly().GetName().Version;
             if (localVersion == null) return null;
 
-            if (!Version.TryParse(remoteVersionStr, out var remoteVersion))
-                return null;
+            // First non-prerelease, non-draft release with a parseable version tag.
+            JsonElement root = default;
+            string tagName = "";
+            Version? remoteVersion = null;
+            bool foundCandidate = false;
+            foreach (var rel in releases.EnumerateArray())
+            {
+                if (rel.TryGetProperty("prerelease", out var prProp) &&
+                    prProp.ValueKind == JsonValueKind.True)
+                    continue;
+                if (rel.TryGetProperty("draft", out var draftProp) &&
+                    draftProp.ValueKind == JsonValueKind.True)
+                    continue;
+                var candidateTag = rel.GetProperty("tag_name").GetString() ?? "";
+                if (IsPrereleaseTag(candidateTag)) continue;
+
+                var candidateVerStr = candidateTag.TrimStart('v');
+                if (!Version.TryParse(candidateVerStr, out var candidateVer)) continue;
+
+                root = rel;
+                tagName = candidateTag;
+                remoteVersion = candidateVer;
+                foundCandidate = true;
+                break;
+            }
+
+            if (!foundCandidate || remoteVersion == null) return null;
 
             if (remoteVersion <= localVersion)
                 return new CheckResult { UpdateAvailable = false };
