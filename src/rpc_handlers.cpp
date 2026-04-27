@@ -917,8 +917,14 @@ static bool EnsureVdfSectionPath(std::string& vdfContent,
     }
 
     if (sectionCount == 1) {
+        const std::string snapshot = vdfContent;
         if (!vdfContent.empty() && vdfContent.back() != '\n') vdfContent.push_back('\n');
         vdfContent += "\"" + std::string(sections[0]) + "\"\n{\n}\n";
+        // Roll back if the insertion isn't parseable.
+        if (!VdfUtil::FindVdfSectionRange(vdfContent, sections, sectionCount, sectionStart, sectionEnd)) {
+            vdfContent = snapshot;
+            return false;
+        }
         return true;
     }
 
@@ -948,7 +954,15 @@ static bool EnsureVdfSectionPath(std::string& vdfContent,
     insertion += childIndent + "\"" + std::string(sections[sectionCount - 1]) + "\"\n";
     insertion += childIndent + "{\n";
     insertion += childIndent + "}\n";
+
+    const std::string snapshot = vdfContent;
     vdfContent.insert(parentEnd, insertion);
+
+    // Roll back if the new child isn't parseable.
+    if (!VdfUtil::FindVdfSectionRange(vdfContent, sections, sectionCount, sectionStart, sectionEnd)) {
+        vdfContent = snapshot;
+        return false;
+    }
     return true;
 }
 
@@ -1101,14 +1115,37 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
 
     std::string vdfPath = GetSteamPath() + "userdata\\" + std::to_string(accountId)
         + "\\config\\localconfig.vdf";
-    std::ifstream vdfIn(FileUtil::Utf8ToPath(vdfPath));
-    if (!vdfIn.is_open()) {
-        LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u)", appId);
-        return;
-    }
 
-    std::string vdfContent((std::istreambuf_iterator<char>(vdfIn)), {});
-    vdfIn.close();
+    // Shared read; Steam holds localconfig.vdf with no sharing during writes,
+    // and std::ifstream uses dwShareMode=0 -> ERROR_SHARING_VIOLATION.
+    std::string vdfContent;
+    {
+        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
+        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE) {
+            LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u, err=%lu)",
+                appId, GetLastError());
+            // Seed in-memory from cloud since VDF read failed.
+            RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+            return;
+        }
+        DWORD fileSize = GetFileSize(hFile, nullptr);
+        if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
+            vdfContent.resize(fileSize);
+            DWORD bytesRead = 0;
+            if (!ReadFile(hFile, vdfContent.data(), fileSize, &bytesRead, nullptr)) {
+                LOG("[Playtime] ReadFile failed for localconfig.vdf (app %u, err=%lu)",
+                    appId, GetLastError());
+                CloseHandle(hFile);
+                RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+                return;
+            }
+            vdfContent.resize(bytesRead);
+        }
+        CloseHandle(hFile);
+    }
 
     std::string appIdStr = std::to_string(appId);
     const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
@@ -1137,7 +1174,9 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
         std::string newPT = std::to_string(cloudPlaytime);
         std::string newPT2 = std::to_string(cloudPlaytime2wks);
         if (!InsertPlaytimeAppSection(vdfContent, sections, 6, newLP, newPT, newPT2)) {
-            LOG("[Playtime] App %u section not found in localconfig.vdf, skipping merge", appId);
+            // Steam flushes in-memory state to localconfig.vdf on its own cycle.
+            LOG("[Playtime] App %u section synthesis failed; seeding in-memory only", appId);
+            RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
             return;
         }
 
@@ -1146,7 +1185,9 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
             LOG("[Playtime] Created playtime section for app %u: LastPlayed 0->%llu, Playtime 0->%llu, Playtime2wks 0->%llu",
                 appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
         } else {
-            LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+            // VDF write failed but cloud values are valid; seed in-memory anyway.
+            RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
+            LOG("[Playtime] Failed to write localconfig.vdf for app %u; seeded in-memory only", appId);
         }
         return;
     }
@@ -1200,7 +1241,9 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
         LOG("[Playtime] Merged playtime for app %u: LastPlayed %llu->%llu, Playtime %llu->%llu, Playtime2wks %llu->%llu",
             appId, localLastPlayed, mergedLP, localPlaytime, mergedPT, localPlaytime2wks, mergedPT2);
     } else {
-        LOG("[Playtime] Failed to write localconfig.vdf for app %u", appId);
+        // Merge succeeded but VDF write failed; in-memory seed is still safe.
+        RestoreInMemoryPlaytimeMetadata(appId, mergedLP, mergedPT, mergedPT2);
+        LOG("[Playtime] Failed to write localconfig.vdf for app %u; seeded in-memory only", appId);
     }
 }
 
