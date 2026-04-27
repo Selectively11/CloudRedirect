@@ -97,7 +97,8 @@ static std::shared_ptr<std::mutex> AcquireAppSyncMutex(uint32_t accountId, uint3
 
 // Cloud-failure dialog: fires once after FAIL_THRESHOLD, then COOLDOWN_SECS suppression.
 
-static constexpr int    FAIL_THRESHOLD   = 3;
+// 5 absorbs short HTTP 503 bursts; lower trips the dialog on a single hiccup.
+static constexpr int    FAIL_THRESHOLD   = 5;
 static constexpr int    COOLDOWN_SECS    = 300; // 5 minutes
 
 static std::atomic<int> g_consecutiveFails{0};
@@ -173,6 +174,8 @@ struct WorkItem {
     int         existsCheckRetries = 0;  // Upload-only: retries of CheckExists before skipIfExists upload
     int         transferRetries = 0;     // Upload/Delete: retries of the actual Upload/Remove call
     int         drainRequeues = 0;       // Times this item was requeued via RequeueFailedWorkForPrefixLocked
+    // Earliest-eligible time; workers skip items until this deadline elapses.
+    std::chrono::steady_clock::time_point notBefore = std::chrono::steady_clock::time_point{};
     // Delete-only path skips canonicalize-on-clear: an internal legacy-sibling cleanup must not erase a concurrent user DeleteBlob's tombstone.
     bool        suppressTombstoneClear = false;
 };
@@ -241,6 +244,8 @@ static void RequeueFailedWorkForPrefixLocked(const std::string& prefix) {
         // Fresh inline-retry budget; drain-requeue counter preserved for the cap.
         item.existsCheckRetries = 0;
         item.transferRetries = 0;
+        // Drain requeue resets backoff; don't inherit a stale retry deadline.
+        item.notBefore = std::chrono::steady_clock::time_point{};
         ++item.drainRequeues;
         g_failedPaths.erase(it->first);
         if (!g_activePaths.count(item.cloudPath)) {
@@ -462,19 +467,37 @@ static void WorkerLoop(int threadId) {
         WorkItem item;
         {
             std::unique_lock<std::mutex> lock(g_queueMutex);
-            g_queueCV.wait(lock, [] {
+            auto eligibleNow = [](const WorkItem& q) {
+                return !g_activePaths.count(q.cloudPath)
+                    && std::chrono::steady_clock::now() >= q.notBefore;
+            };
+            auto havePending = [&]() {
                 if (!g_workerRunning) return true;
                 for (const auto& queued : g_workQueue) {
-                    if (!g_activePaths.count(queued.cloudPath)) return true;
+                    if (eligibleNow(queued)) return true;
                 }
                 return false;
-            });
+            };
+            while (!havePending()) {
+                // Parens around `max` suppress the windows.h macro.
+                const auto kNoDeferred =
+                    (std::chrono::steady_clock::time_point::max)();
+                auto soonest = kNoDeferred;
+                for (const auto& queued : g_workQueue) {
+                    if (g_activePaths.count(queued.cloudPath)) continue;
+                    if (queued.notBefore < soonest) soonest = queued.notBefore;
+                }
+                if (soonest == kNoDeferred) {
+                    g_queueCV.wait(lock);
+                } else {
+                    g_queueCV.wait_until(lock, soonest);
+                }
+                if (!g_workerRunning && g_workQueue.empty()) break;
+            }
             if (!g_workerRunning && g_workQueue.empty()) break;
 
             auto workIt = std::find_if(g_workQueue.begin(), g_workQueue.end(),
-                [](const WorkItem& queued) {
-                    return !g_activePaths.count(queued.cloudPath);
-                });
+                [&](const WorkItem& queued) { return eligibleNow(queued); });
             if (workIt == g_workQueue.end()) continue;
 
             item = std::move(*workIt);
@@ -521,6 +544,12 @@ static void WorkerLoop(int threadId) {
                         LOG("[CloudStorage] BG upload deferred after existence check failure [%d]: %s",
                             threadId, item.cloudPath.c_str());
                         OnCloudFailure("Exists", item.cloudPath);
+                        // 1-2-4s backoff matches the transfer-retry path.
+                        int delaySecs = 1 << (item.existsCheckRetries - 1);
+                        item.notBefore = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(delaySecs);
+                        LOG("[CloudStorage] Exists retry %d in %ds: %s",
+                            item.existsCheckRetries, delaySecs, item.cloudPath.c_str());
                         requeued = RequeueFromWorker(std::move(item));
                         if (!requeued) droppedAsStale = true;
                         break;
@@ -541,6 +570,12 @@ static void WorkerLoop(int threadId) {
                     LOG("[CloudStorage] BG upload FAILED [%d]: %s", threadId, item.cloudPath.c_str());
                     OnCloudFailure("Upload", item.cloudPath);
                     if (item.transferRetries++ < 3) {
+                        // 1-2-4s backoff stamped on the item so any worker observes it.
+                        int delaySecs = 1 << (item.transferRetries - 1);
+                        item.notBefore = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(delaySecs);
+                        LOG("[CloudStorage] Upload retry %d in %ds: %s",
+                            item.transferRetries, delaySecs, item.cloudPath.c_str());
                         requeued = RequeueFromWorker(std::move(item));
                         if (!requeued) droppedAsStale = true;
                     }
@@ -564,6 +599,11 @@ static void WorkerLoop(int threadId) {
                     LOG("[CloudStorage] BG delete FAILED [%d]: %s", threadId, item.cloudPath.c_str());
                     OnCloudFailure("Delete", item.cloudPath);
                     if (item.transferRetries++ < 3) {
+                        int delaySecs = 1 << (item.transferRetries - 1);
+                        item.notBefore = std::chrono::steady_clock::now()
+                            + std::chrono::seconds(delaySecs);
+                        LOG("[CloudStorage] Delete retry %d in %ds: %s",
+                            item.transferRetries, delaySecs, item.cloudPath.c_str());
                         requeued = RequeueFromWorker(std::move(item));
                         if (!requeued) droppedAsStale = true;
                     }
@@ -637,6 +677,8 @@ static void EnqueueWork(WorkItem item) {
                 // Fresh data resets inline retries; drainRequeues preserved for the cap.
                 existing.existsCheckRetries = item.existsCheckRetries;
                 existing.transferRetries = item.transferRetries;
+                // Fresh upload supersedes any pending backoff deadline.
+                existing.notBefore = item.notBefore;
                 return; // replaced in-place, no need to notify
             }
         }
