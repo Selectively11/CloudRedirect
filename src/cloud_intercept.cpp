@@ -1465,6 +1465,20 @@ static void UploadStatsOnExit(uint32_t appId) {
         return;
     }
 
+    // Steam writes a 38-byte cache{crc,PendingChanges}+END skeleton when no stats
+    // are loaded; uploading it clobbers a richer cloud blob. 64-byte floor matches
+    // PreStage threshold.
+    if (data.size() <= 64) {
+        LOG("[Stats] Skipping upload for app %u: file too small (%zu bytes), likely empty stub",
+            appId, data.size());
+        return;
+    }
+    if (!StatsBlobHasUnlocks(data.data(), data.size())) {
+        LOG("[Stats] Skipping upload for app %u: blob has no unlocked stats/achievements (%zu bytes)",
+            appId, data.size());
+        return;
+    }
+
     // Account-scoped sentinel (appId=0): keeps blob out of per-app namespace so Steam never resolves it under an AutoCloud root. See cloud_metadata_paths.h.
     bool ok = CloudStorage::StoreBlob(accountId, kAccountScopeAppId,
         AccountStatsFilename(appId), data.data(), data.size());

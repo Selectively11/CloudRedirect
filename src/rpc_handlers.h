@@ -37,4 +37,8 @@ PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBod
 void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
 void ShutdownRpcHandlers();
 
+// True if the UserGameStats blob has any non-zero stat/achievement data.
+// Empty stubs and unparseable input return false.
+bool StatsBlobHasUnlocks(const uint8_t* data, size_t len);
+
 } // namespace CloudIntercept

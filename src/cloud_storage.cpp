@@ -1036,47 +1036,93 @@ bool StoreBlob(uint32_t accountId, uint32_t appId,
     return true;
 }
 
+// Account-scope stats/playtime blobs sit outside per-app CN tracking, so the
+// cache has no freshness signal -- a stale local stub would be served forever.
+// RetrieveBlob goes cloud-first for these.
+static bool IsAccountScopeMetadataBlob(uint32_t appId, const std::string& filename) {
+    if (appId != CloudIntercept::kAccountScopeAppId) return false;
+    return filename.compare(0, 14, "UserGameStats/") == 0
+        || filename.compare(0, 9,  "Playtime/")      == 0;
+}
+
+// Reads the local cache copy. Returns true if the file exists and reads cleanly.
+static bool TryReadCachedBlob(const std::string& localPath,
+                              const std::string& filename,
+                              std::vector<uint8_t>& out) {
+    std::ifstream f(FileUtil::Utf8ToPath(localPath), std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    auto rawSize = f.tellg();
+    if (rawSize < 0) {
+        LOG("[CloudStorage] RetrieveBlob: cache tellg failed for %s",
+            filename.c_str());
+        return false;
+    }
+    auto size = static_cast<std::streamoff>(rawSize);
+    out.resize(static_cast<size_t>(size));
+    if (size == 0) return true;
+    f.seekg(0, std::ios::beg);
+    f.read(reinterpret_cast<char*>(out.data()), size);
+    if (f.fail() || f.gcount() != size) {
+        LOG("[CloudStorage] RetrieveBlob: cache read failed for %s (gcount=%lld of %lld, fail=%d)",
+            filename.c_str(),
+            static_cast<long long>(f.gcount()),
+            static_cast<long long>(size),
+            f.fail() ? 1 : 0);
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
 std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
                                   const std::string& filename) {
-    // 1. Check local cache
     std::string localPath = LocalBlobPath(accountId, appId, filename);
     if (localPath.empty()) return {}; // path traversal blocked
-    {
-        std::ifstream f(FileUtil::Utf8ToPath(localPath), std::ios::binary | std::ios::ate);
-        if (f) {
-            // tellg may return -1 on stream failure; treat as cache miss
-            // rather than truncating into SIZE_MAX -> bad_alloc.
-            auto rawSize = f.tellg();
-            bool cacheServed = false;
+
+    const bool cloudFirst = IsAccountScopeMetadataBlob(appId, filename) && g_provider;
+
+    // Refresh cache from Drive every read for account-scope blobs.
+    if (cloudFirst) {
+        std::string cloudPath = CloudBlobPath(accountId, appId, filename);
+        auto status = g_provider->CheckExists(cloudPath);
+        if (status == ICloudProvider::ExistsStatus::Exists) {
             std::vector<uint8_t> data;
-            if (rawSize >= 0) {
-                auto size = static_cast<std::streamoff>(rawSize);
-                f.seekg(0, std::ios::beg);
-                data.resize(static_cast<size_t>(size));
-                if (size == 0) {
-                    cacheServed = true;
-                } else {
-                    f.read(reinterpret_cast<char*>(data.data()), size);
-                    // Check fail() too; an I/O error can set badbit while gcount matches.
-                    if (!f.fail() && f.gcount() == size) {
-                        cacheServed = true;
-                    } else {
-                        LOG("[CloudStorage] RetrieveBlob: cache read failed for %s (gcount=%lld of %lld, fail=%d); falling back",
-                            filename.c_str(),
-                            static_cast<long long>(f.gcount()),
-                            static_cast<long long>(size),
-                            f.fail() ? 1 : 0);
-                    }
-                }
-            } else {
-                LOG("[CloudStorage] RetrieveBlob: cache tellg failed for %s; falling back to cloud",
-                    filename.c_str());
-            }
-            if (cacheServed) {
-                LOG("[CloudStorage] RetrieveBlob: cache hit: %s (%zu bytes)",
+            if (g_provider->Download(cloudPath, data)) {
+                LOG("[CloudStorage] RetrieveBlob: cloud-first refresh: %s (%zu bytes)",
                     filename.c_str(), data.size());
+                const uint8_t* writeData = data.empty() ? nullptr : data.data();
+                LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                                   writeData, data.size());
                 return data;
             }
+            // Transient download failure -- prefer cache over losing data.
+            LOG("[CloudStorage] RetrieveBlob: cloud-first download failed for %s; falling back to cache",
+                filename.c_str());
+        } else if (status == ICloudProvider::ExistsStatus::Missing) {
+            LOG("[CloudStorage] RetrieveBlob: cloud-first reports missing: %s; falling back to cache",
+                filename.c_str());
+        } else {
+            // Error -- transient; prefer cache over an empty result.
+            LOG("[CloudStorage] RetrieveBlob: cloud-first existence check errored for %s; falling back to cache",
+                filename.c_str());
+        }
+        std::vector<uint8_t> cached;
+        if (TryReadCachedBlob(localPath, filename, cached)) {
+            LOG("[CloudStorage] RetrieveBlob: cache fallback: %s (%zu bytes)",
+                filename.c_str(), cached.size());
+            return cached;
+        }
+        LOG("[CloudStorage] RetrieveBlob: not found anywhere: %s", filename.c_str());
+        return {};
+    }
+
+    // 1. Check local cache
+    {
+        std::vector<uint8_t> cached;
+        if (TryReadCachedBlob(localPath, filename, cached)) {
+            LOG("[CloudStorage] RetrieveBlob: cache hit: %s (%zu bytes)",
+                filename.c_str(), cached.size());
+            return cached;
         }
     }
 
