@@ -12,6 +12,7 @@
 #include <sstream>
 #include <chrono>
 #include <ctime>
+#include <cstring>
 #include <list>
 #include <algorithm>
 #include <limits>
@@ -365,6 +366,74 @@ static std::string CloudBlobPath(uint32_t accountId, uint32_t appId,
            "/blobs/" + filename;
 }
 
+static bool ParseU32(const std::string& s, uint32_t& out) {
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+    }
+    try {
+        unsigned long long v = std::stoull(s);
+        if (v > (std::numeric_limits<uint32_t>::max)()) return false;
+        out = static_cast<uint32_t>(v);
+        return true;
+    } catch (...) { return false; }
+}
+
+static bool TryExtractAccountMetadataAppId(const std::string& path,
+                                           uint32_t accountId,
+                                           uint32_t& appId) {
+    std::string prefix = std::to_string(accountId) + "/" +
+        std::to_string(CloudIntercept::kAccountScopeAppId) + "/blobs/";
+    if (path.rfind(prefix, 0) != 0) return false;
+
+    std::string name = path.substr(prefix.size());
+    const char* dirs[] = { "UserGameStats/", "Playtime/" };
+    for (const char* dir : dirs) {
+        size_t dirLen = strlen(dir);
+        if (name.rfind(dir, 0) != 0) continue;
+        std::string leaf = name.substr(dirLen);
+        const std::string ext = ".bin";
+        if (leaf.size() <= ext.size() || leaf.substr(leaf.size() - ext.size()) != ext) return false;
+        if (!ParseU32(leaf.substr(0, leaf.size() - ext.size()), appId)) return false;
+        return appId != CloudIntercept::kAccountScopeAppId;
+    }
+    return false;
+}
+
+static void EnumerateLocalAccountMetadataAppIds(const std::filesystem::path& accountRootPath,
+                                                std::unordered_set<uint32_t>& appIds) {
+    auto accountScopePath = accountRootPath / std::to_string(CloudIntercept::kAccountScopeAppId);
+    const char* dirs[] = { "UserGameStats", "Playtime" };
+    for (const char* dir : dirs) {
+        std::error_code ec;
+        auto metadataDir = accountScopePath / dir;
+        if (!std::filesystem::exists(metadataDir, ec) || !std::filesystem::is_directory(metadataDir, ec)) {
+            continue;
+        }
+
+        std::filesystem::directory_iterator it(metadataDir, ec);
+        if (ec) continue;
+        const std::filesystem::directory_iterator end;
+        while (it != end) {
+            const auto& entry = *it;
+            std::error_code fileEc;
+            if (entry.is_regular_file(fileEc)) {
+                std::string leaf = entry.path().filename().string();
+                const std::string ext = ".bin";
+                uint32_t parsed = 0;
+                if (leaf.size() > ext.size() && leaf.substr(leaf.size() - ext.size()) == ext &&
+                    ParseU32(leaf.substr(0, leaf.size() - ext.size()), parsed) &&
+                    parsed != CloudIntercept::kAccountScopeAppId) {
+                    appIds.insert(parsed);
+                }
+            }
+            std::error_code stepEc;
+            it.increment(stepEc);
+            if (stepEc) break;
+        }
+    }
+}
+
 // Inverse of CloudBlobPath. Rejects metadata paths and any non-canonical decimal.
 static bool ParseCloudBlobPath(const std::string& cloudPath,
                                uint32_t& accountId, uint32_t& appId,
@@ -378,21 +447,8 @@ static bool ParseCloudBlobPath(const std::string& cloudPath,
     size_t fileStart = p2 + kBlobs.size();
     if (fileStart >= cloudPath.size()) return false;
 
-    auto parseU32 = [](const std::string& s, uint32_t& out) -> bool {
-        if (s.empty()) return false;
-        for (char c : s) {
-            if (c < '0' || c > '9') return false; // no sign, whitespace, or letters
-        }
-        try {
-            unsigned long long v = std::stoull(s);
-            if (v > (std::numeric_limits<uint32_t>::max)()) return false;
-            out = static_cast<uint32_t>(v);
-            return true;
-        } catch (...) { return false; }
-    };
-
-    if (!parseU32(cloudPath.substr(0, p1), accountId)) return false;
-    if (!parseU32(cloudPath.substr(p1 + 1, p2 - p1 - 1), appId)) return false;
+    if (!ParseU32(cloudPath.substr(0, p1), accountId)) return false;
+    if (!ParseU32(cloudPath.substr(p1 + 1, p2 - p1 - 1), appId)) return false;
     filename = cloudPath.substr(fileStart);
     return !filename.empty();
 }
@@ -421,19 +477,16 @@ static std::unordered_set<uint32_t> EnumerateLocalAppIds(uint32_t accountId) {
     // call std::terminate from the detached startup thread.
     std::filesystem::directory_iterator it(accountRootPath, ec);
     if (ec) return appIds;
+    EnumerateLocalAccountMetadataAppIds(accountRootPath, appIds);
     const std::filesystem::directory_iterator end;
     while (it != end) {
         const auto& entry = *it;
         std::error_code dirEc;
         if (entry.is_directory(dirEc)) {
             const std::string name = entry.path().filename().string();
-            try {
-                uint32_t parsed = static_cast<uint32_t>(std::stoul(name));
-                // Skip the account-scope sentinel; not a real Steam app.
-                if (parsed != CloudIntercept::kAccountScopeAppId) {
-                    appIds.insert(parsed);
-                }
-            } catch (...) {
+            uint32_t parsed = 0;
+            if (ParseU32(name, parsed) && parsed != CloudIntercept::kAccountScopeAppId) {
+                appIds.insert(parsed);
             }
         }
         std::error_code stepEc;
@@ -1465,12 +1518,25 @@ static bool SyncFromCloudInner(uint32_t accountId, uint32_t appId, bool isSweep)
     }
 
     // Cloud-side legacy-blob cleanup. Requires a complete listing so the
-    // classifier can confirm the canonical sibling exists.
+    // classifier can confirm the canonical sibling exists. Filters legacy
+    // paths out of cloudBlobs before the download loop so the concurrent
+    // delete worker can't race a 404 into the failed counter.
     if (cloudListSucceeded && cloudListComplete) {
         std::vector<std::string> rawPaths;
         rawPaths.reserve(cloudBlobs.size());
         for (auto& fi : cloudBlobs) rawPaths.push_back(fi.path);
         auto legacyToDelete = LegacyMetadataCleanup::ClassifyLegacyCloudBlobsToDelete(rawPaths);
+
+        std::unordered_set<std::string> legacyPathSet(legacyToDelete.begin(), legacyToDelete.end());
+        if (!legacyPathSet.empty()) {
+            cloudBlobs.erase(
+                std::remove_if(cloudBlobs.begin(), cloudBlobs.end(),
+                    [&](const ICloudProvider::FileInfo& fi) {
+                        return legacyPathSet.count(fi.path) > 0;
+                    }),
+                cloudBlobs.end());
+        }
+
         for (auto& legacyPath : legacyToDelete) {
             LOG("[CloudStorage] SyncFromCloud app %u: enqueueing delete of legacy cloud blob %s",
                 appId, legacyPath.c_str());
@@ -1840,12 +1906,13 @@ std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId) {
 
     LOG("[CloudStorage] SyncAllFromCloud: scanning for apps belonging to account %u...", accountId);
 
+    std::unordered_set<uint32_t> appIds;
+
     // List all items under the account prefix to discover apps
     std::string prefix = std::to_string(accountId) + "/";
     auto items = g_provider->List(prefix);
 
     // Extract unique app IDs from paths like "54303850/1229490/cn.dat"
-    std::unordered_set<uint32_t> appIds;
     for (auto& fi : items) {
         // path: "{accountId}/{appId}/..."
         auto firstSlash = fi.path.find('/');
@@ -1853,11 +1920,17 @@ std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId) {
         auto secondSlash = fi.path.find('/', firstSlash + 1);
         if (secondSlash == std::string::npos) continue;
         std::string appStr = fi.path.substr(firstSlash + 1, secondSlash - firstSlash - 1);
-        try {
-            uint32_t parsed = static_cast<uint32_t>(std::stoul(appStr));
-            if (parsed == CloudIntercept::kAccountScopeAppId) continue;
+        uint32_t parsed = 0;
+        if (ParseU32(appStr, parsed)) {
+            if (parsed == CloudIntercept::kAccountScopeAppId) {
+                uint32_t metadataAppId = 0;
+                if (TryExtractAccountMetadataAppId(fi.path, accountId, metadataAppId)) {
+                    appIds.insert(metadataAppId);
+                }
+                continue;
+            }
             appIds.insert(parsed);
-        } catch (...) {}
+        }
     }
 
     if (appIds.empty()) {

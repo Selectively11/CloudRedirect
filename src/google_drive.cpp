@@ -616,6 +616,41 @@ bool GoogleDriveProvider::ListChecked(const std::string& prefix, std::vector<Fil
         return false;
     }
 
+    // Account-wide enumeration: walk the account folder and emit
+    // {accountId}/<appId>/<rest> for every file under every app subfolder.
+    if (appId == kNoAppId) {
+        std::string rootId;
+        auto rootStatus = FindDriveFolderStatus("CloudRedirect", "", &rootId);
+        if (rootStatus == LookupStatus::Error) return false;
+        if (rootStatus == LookupStatus::Missing) return returnComplete();
+
+        std::string accountFolder;
+        auto accountStatus = FindDriveFolderStatus(std::to_string(accountId), rootId, &accountFolder);
+        if (accountStatus == LookupStatus::Error) return false;
+        if (accountStatus == LookupStatus::Missing) return returnComplete();
+
+        std::vector<RemoteFile> remoteFiles;
+        bool recursiveComplete = true;
+        if (!ListRecursive(accountFolder, "", remoteFiles, &recursiveComplete)) {
+            return false;
+        }
+
+        std::string basePrefix = std::to_string(accountId) + "/";
+        result.reserve(remoteFiles.size());
+        for (auto& rf : remoteFiles) {
+            FileInfo fi;
+            fi.path = basePrefix + rf.relativePath;
+            fi.size = (uint64_t)rf.size;
+            fi.modifiedTime = (uint64_t)rf.modifiedTime;
+            result.push_back(std::move(fi));
+        }
+
+        LOG("[GDriveProvider] List '%s': %zu files (complete=%d)",
+            prefix.c_str(), result.size(), (int)recursiveComplete);
+        if (outComplete) *outComplete = recursiveComplete;
+        return true;
+    }
+
     std::string appFolder;
     {
         std::lock_guard<std::recursive_mutex> lock(m_folderMtx);

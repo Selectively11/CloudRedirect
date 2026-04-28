@@ -19,3 +19,7 @@ scripts/
 
 # Debug artifacts
 cleanup_scan.log
+
+# Dev-only scripts (not shipped)
+check_state.py
+decode_bkv.py

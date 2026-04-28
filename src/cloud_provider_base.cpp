@@ -13,20 +13,27 @@ using HttpUtil::HttpResp;
 bool CloudProviderBase::ParsePath(const std::string& path,
                                    uint32_t& accountId, uint32_t& appId,
                                    std::string& relFilename) {
-    // find first slash: accountId
+    // accountId may be terminated by '/' or by end-of-string.
     size_t s1 = path.find('/');
-    if (s1 == std::string::npos) return false;
-
-    auto r1 = std::from_chars(path.data(), path.data() + s1, accountId);
+    size_t accountEnd = (s1 != std::string::npos) ? s1 : path.size();
+    auto r1 = std::from_chars(path.data(), path.data() + accountEnd, accountId);
     if (r1.ec != std::errc{}) return false;
+    if (r1.ptr != path.data() + accountEnd) return false;
 
-    // find second slash: appId
+    // No slash, or trailing slash with nothing after: account-only prefix.
+    if (s1 == std::string::npos || s1 + 1 >= path.size()) {
+        appId = kNoAppId;
+        relFilename.clear();
+        return true;
+    }
+
     size_t s2 = path.find('/', s1 + 1);
     size_t appEnd = (s2 != std::string::npos) ? s2 : path.size();
     auto r2 = std::from_chars(path.data() + s1 + 1, path.data() + appEnd, appId);
     if (r2.ec != std::errc{}) return false;
+    if (r2.ptr != path.data() + appEnd) return false;
+    if (appId == kNoAppId) return false;  // reserved sentinel must not collide
 
-    // everything after "accountId/appId/" is the relative filename
     relFilename = (s2 != std::string::npos && s2 + 1 < path.size())
                   ? path.substr(s2 + 1) : std::string();
     return true;

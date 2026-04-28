@@ -528,6 +528,8 @@ bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2w
     __try {
         oldTotal = record[1];
         oldTwoWks = record[2];
+        if (oldTotal > total32) total32 = oldTotal;
+        if (oldTwoWks > twoWks32) twoWks32 = oldTwoWks;
         record[1] = total32;
         record[2] = twoWks32;
         record[3] = 0;
@@ -2657,6 +2659,82 @@ static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId) {
     return false;
 }
 
+// Stage cached UserGameStats into appcache/stats/ before Steam's one-shot startup load.
+static void PreStageStatsFromLocalCache(const std::string& steamPath) {
+    std::string storageRoot = steamPath + "cloud_redirect\\storage\\";
+    std::string statsRoot = steamPath + "appcache\\stats\\";
+
+    auto storageRootWide = FileUtil::Utf8ToPath(storageRoot).wstring();
+    DWORD attrs = GetFileAttributesW(storageRootWide.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    auto statsRootWide = FileUtil::Utf8ToPath(statsRoot).wstring();
+    if (GetFileAttributesW(statsRootWide.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::error_code ec;
+        std::filesystem::create_directories(FileUtil::Utf8ToPath(statsRoot), ec);
+    }
+
+    int staged = 0;
+    int skipped = 0;
+    WIN32_FIND_DATAW acctFd;
+    HANDLE hAcct = FindFirstFileW((storageRootWide + L"*").c_str(), &acctFd);
+    if (hAcct == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(acctFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        std::wstring acctName = acctFd.cFileName;
+        if (acctName == L"." || acctName == L"..") continue;
+        bool allDigits = !acctName.empty();
+        for (wchar_t c : acctName) { if (c < L'0' || c > L'9') { allDigits = false; break; } }
+        if (!allDigits) continue;
+
+        std::wstring statsDir = storageRootWide + acctName + L"\\0\\UserGameStats\\";
+        if (GetFileAttributesW(statsDir.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+
+        WIN32_FIND_DATAW appFd;
+        HANDLE hApp = FindFirstFileW((statsDir + L"*.bin").c_str(), &appFd);
+        if (hApp == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (appFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::wstring appBin = appFd.cFileName;
+            if (appBin.size() < 5) continue;
+            std::wstring appStem = appBin.substr(0, appBin.size() - 4);
+            bool appDigits = !appStem.empty();
+            for (wchar_t c : appStem) { if (c < L'0' || c > L'9') { appDigits = false; break; } }
+            if (!appDigits) continue;
+
+            std::wstring srcPath = statsDir + appBin;
+            std::wstring dstPath = statsRootWide + L"UserGameStats_" + acctName + L"_" + appStem + L".bin";
+
+            // Steam writes a 38 B empty stub for unloaded apps; skip anything bigger.
+            WIN32_FILE_ATTRIBUTE_DATA dstAttr{};
+            bool dstExists = GetFileAttributesExW(dstPath.c_str(),
+                GetFileExInfoStandard, &dstAttr) != 0;
+            if (dstExists) {
+                ULARGE_INTEGER dstSize;
+                dstSize.LowPart = dstAttr.nFileSizeLow;
+                dstSize.HighPart = dstAttr.nFileSizeHigh;
+                if (dstSize.QuadPart > 64) {
+                    skipped++;
+                    continue;
+                }
+            }
+
+            if (CopyFileW(srcPath.c_str(), dstPath.c_str(), FALSE)) {
+                staged++;
+            } else {
+                LOG("[PreStage] CopyFile failed: %ls -> %ls (err=%lu)",
+                    srcPath.c_str(), dstPath.c_str(), GetLastError());
+            }
+        } while (FindNextFileW(hApp, &appFd));
+        FindClose(hApp);
+    } while (FindNextFileW(hAcct, &acctFd));
+    FindClose(hAcct);
+
+    if (staged > 0 || skipped > 0)
+        LOG("[PreStage] Staged %d UserGameStats files from local cache (skipped %d non-empty)", staged, skipped);
+}
+
 void Init(const std::string& steamPath) {
     g_steamPath = steamPath;
     if (!g_steamPath.empty() && g_steamPath.back() != '\\')
@@ -2703,6 +2781,8 @@ void Init(const std::string& steamPath) {
     } else {
         LOG("Steam version: %llu (OK)", detectedVersion);
     }
+
+    PreStageStatsFromLocalCache(g_steamPath);
 
     // Auto-detect namespace apps from {steamPath}\config\stplug-in\*.lua, restricted to self-unlocking luas (base-game addappid for own id).
     std::string pluginDir = g_steamPath + "config\\stplug-in\\*";

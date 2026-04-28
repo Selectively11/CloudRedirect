@@ -39,6 +39,7 @@ private:
     static std::string BuildItemPath(uint32_t accountId, uint32_t appId,
                                      const std::string& filename);
     static std::string BuildFolderPath(uint32_t accountId, uint32_t appId);
+    static std::string BuildAccountFolderPath(uint32_t accountId);
 
     // File operations
     struct RemoteFile {

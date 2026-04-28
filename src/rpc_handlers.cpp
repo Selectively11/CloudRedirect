@@ -1127,8 +1127,6 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
         if (hFile == INVALID_HANDLE_VALUE) {
             LOG("[Playtime] Cannot open localconfig.vdf for reading (app %u, err=%lu)",
                 appId, GetLastError());
-            // Seed in-memory from cloud since VDF read failed.
-            RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
             return;
         }
         DWORD fileSize = GetFileSize(hFile, nullptr);
@@ -1139,7 +1137,6 @@ static void RestorePlaytimeMetadata(uint32_t accountId, uint32_t appId, const st
                 LOG("[Playtime] ReadFile failed for localconfig.vdf (app %u, err=%lu)",
                     appId, GetLastError());
                 CloseHandle(hFile);
-                RestoreInMemoryPlaytimeMetadata(appId, cloudLastPlayed, cloudPlaytime, cloudPlaytime2wks);
                 return;
             }
             vdfContent.resize(bytesRead);
@@ -1729,6 +1726,19 @@ static std::vector<BkvNode> MergeStats(
     return std::move(local);
 }
 
+static bool HasNonZeroStatsData(const std::vector<BkvNode>& nodes) {
+    for (const auto& n : nodes) {
+        if (n.name == "data") {
+            if (n.type == BKV_INT && n.intVal != 0) return true;
+            if (n.type == BKV_FLOAT && n.floatVal != 0.0f) return true;
+            if (n.type == BKV_UINT64 && n.uint64Val != 0) return true;
+            if (n.type == BKV_INT64 && n.int64Val != 0) return true;
+        }
+        if (!n.children.empty() && HasNonZeroStatsData(n.children)) return true;
+    }
+    return false;
+}
+
 // Merge cloud stats into the local stats file on disk.
 static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
                            const std::vector<uint8_t>& cloudData)
@@ -1747,9 +1757,14 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
 
     std::ifstream localFile(FileUtil::Utf8ToPath(statsPath), std::ios::binary | std::ios::ate);
     if (!localFile.is_open()) {
+        if (!HasNonZeroStatsData(cloudNodes)) {
+            LOG("[Stats] No local stats and cloud has no positive stats for app %u, skipping restore", appId);
+            return false;
+        }
         // No local file: rewrite parsed cloud to strip junk.
         std::vector<uint8_t> outBuf;
         BkvWrite(cloudNodes, outBuf);
+        outBuf.push_back(BKV_END);
         if (!FileUtil::AtomicWriteBinary(statsPath, outBuf.data(), outBuf.size())) {
             LOG("[Stats] Failed to create stats file for app %u", appId);
             return false;
@@ -1761,8 +1776,13 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     auto localSize = localFile.tellg();
     if (localSize <= 0) {
         localFile.close();
+        if (!HasNonZeroStatsData(cloudNodes)) {
+            LOG("[Stats] Local stats empty and cloud has no positive stats for app %u, skipping restore", appId);
+            return false;
+        }
         std::vector<uint8_t> outBuf;
         BkvWrite(cloudNodes, outBuf);
+        outBuf.push_back(BKV_END);
         if (!FileUtil::AtomicWriteBinary(statsPath, outBuf.data(), outBuf.size()))
             return false;
         LOG("[Stats] Local stats empty, wrote cloud stats for app %u (%zu bytes)", appId, outBuf.size());
@@ -1777,15 +1797,10 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
                        static_cast<std::streamsize>(localGcount) == localSize;
     localFile.close();
 
-    // Treat a short read as parse failure to avoid persisting tail garbage.
     if (!localReadOk) {
-        LOG("[Stats] short read on local stats for app %u (expected %lld, got %lld), overwriting with cloud",
+        LOG("[Stats] short read on local stats for app %u (expected %lld, got %lld), skipping restore",
             appId, (long long)localSize, (long long)localGcount);
-        if (!FileUtil::AtomicWriteBinary(statsPath, cloudData.data(), cloudData.size())) {
-            LOG("[Stats] Failed to overwrite local stats with cloud for app %u", appId);
-            return false;
-        }
-        return true;
+        return false;
     }
 
     // Parse local data
@@ -1793,12 +1808,8 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     size_t localNodeCount = 0;
     std::vector<BkvNode> localNodes;
     if (!BkvRead(localData.data(), localData.size(), localPos, localNodes, 0, localNodeCount)) {
-        LOG("[Stats] Failed to parse local stats for app %u, overwriting with cloud", appId);
-        if (!FileUtil::AtomicWriteBinary(statsPath, cloudData.data(), cloudData.size())) {
-            LOG("[Stats] Failed to overwrite local stats with cloud for app %u", appId);
-            return false;
-        }
-        return true;
+        LOG("[Stats] Failed to parse local stats for app %u, skipping restore", appId);
+        return false;
     }
 
     // Merge
@@ -1807,6 +1818,7 @@ static bool MergeStatsFile(uint32_t appId, uint32_t accountId,
     // Serialize
     std::vector<uint8_t> outBuf;
     BkvWrite(merged, outBuf);
+    outBuf.push_back(BKV_END);
 
     if (!FileUtil::AtomicWriteBinary(statsPath, outBuf.data(), outBuf.size())) {
         LOG("[Stats] Failed to write merged stats for app %u", appId);

@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -37,8 +38,19 @@ public:
 
     // Utility
 
+    // Sentinel returned in appId for account-only prefix paths like "{accountId}/".
+    // Callers of ParsePath that operate on a single file/folder must reject
+    // appId == kNoAppId; List() consumes it as "list across all apps".
+    static constexpr uint32_t kNoAppId = (std::numeric_limits<uint32_t>::max)();
+
     // Parse "{accountId}/{appId}/rest/of/path" into components.
-    // Minimum valid: "accountId/appId" (relFilename may be empty for prefix queries).
+    // Forms accepted:
+    //   "{accountId}"            -> accountId set, appId=kNoAppId, rel="".
+    //   "{accountId}/"           -> same (account-only prefix).
+    //   "{accountId}/{appId}"    -> appId set, rel="".
+    //   "{accountId}/{appId}/x"  -> rel="x".
+    // appId == kNoAppId means the caller is operating on the whole account
+    // namespace (currently only valid for List).
     static bool ParsePath(const std::string& path,
                           uint32_t& accountId, uint32_t& appId,
                           std::string& relFilename);

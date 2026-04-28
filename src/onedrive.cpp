@@ -70,6 +70,12 @@ std::string OneDriveProvider::BuildFolderPath(uint32_t accountId, uint32_t appId
     return "/v1.0/me/drive/root:/" + EncodePath(raw) + ":";
 }
 
+// /me/drive/root:/CloudRedirect/{acct}:
+std::string OneDriveProvider::BuildAccountFolderPath(uint32_t accountId) {
+    std::string raw = "CloudRedirect/" + std::to_string(accountId);
+    return "/v1.0/me/drive/root:/" + EncodePath(raw) + ":";
+}
+
 // Recursive children listing by item ID.
 bool OneDriveProvider::ListChildrenById(const std::string& itemId, const std::string& prefix,
                                           std::vector<RemoteFile>& out,
@@ -558,6 +564,53 @@ bool OneDriveProvider::ListChecked(const std::string& prefix, std::vector<FileIn
     std::string relPrefix;
     if (!ParsePath(prefix, accountId, appId, relPrefix)) {
         return false;
+    }
+
+    // Account-wide enumeration: walk the account folder so callers can
+    // discover every app under {accountId}/. Emitted paths are
+    // {accountId}/<appId>/<rest> where <appId>/<rest> comes from the
+    // recursive listing of the account folder.
+    if (appId == kNoAppId) {
+        auto folderPath = BuildAccountFolderPath(accountId);
+        LOG("[OneDrive] ListChecked (account-wide): looking up folder: %s", folderPath.c_str());
+        auto r = ApiGet(folderPath + "?$select=id");
+        if (r.status == 404) {
+            LOG("[OneDrive] ListChecked: account folder not found (404)");
+            if (outComplete) *outComplete = true;
+            return true;
+        }
+        if (r.status != 200) {
+            LOG("[OneDrive] ListChecked: account folder lookup failed: HTTP %d: %s",
+                r.status, r.body.c_str());
+            return false;
+        }
+        auto fj = Json::Parse(r.body);
+        std::string folderId = fj["id"].str();
+        if (folderId.empty()) {
+            LOG("[OneDrive] ListChecked: account folder ID empty from response");
+            return false;
+        }
+
+        std::vector<RemoteFile> remoteFiles;
+        bool childrenComplete = true;
+        if (!ListChildrenById(folderId, "", remoteFiles, &childrenComplete)) {
+            return false;
+        }
+
+        std::string basePrefix = std::to_string(accountId) + "/";
+        result.reserve(remoteFiles.size());
+        for (auto& rf : remoteFiles) {
+            FileInfo fi;
+            fi.path = basePrefix + rf.relativePath;
+            fi.size = (uint64_t)rf.size;
+            fi.modifiedTime = (uint64_t)rf.modifiedTime;
+            result.push_back(std::move(fi));
+        }
+
+        LOG("[OneDriveProvider] List '%s': %zu files (complete=%d)",
+            prefix.c_str(), result.size(), (int)childrenComplete);
+        if (outComplete) *outComplete = childrenComplete;
+        return true;
     }
 
     // Local completeness flag so only the success tail flips outComplete.
