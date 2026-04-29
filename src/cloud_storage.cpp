@@ -45,6 +45,25 @@ static std::atomic<int>  g_inflightSyncCount{0};
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<int>  g_inflightCommitDrainCount{0};
 
+// RAII for synchronous g_provider derefs outside Sync* paths.
+struct InflightSyncScope {
+    bool entered = false;
+    InflightSyncScope() {
+        g_inflightSyncCount.fetch_add(1, std::memory_order_seq_cst);
+        if (g_shuttingDown.load(std::memory_order_seq_cst)) {
+            g_inflightSyncCount.fetch_sub(1, std::memory_order_seq_cst);
+            return;
+        }
+        entered = true;
+    }
+    ~InflightSyncScope() {
+        if (entered) g_inflightSyncCount.fetch_sub(1, std::memory_order_seq_cst);
+    }
+    explicit operator bool() const { return entered; }
+    InflightSyncScope(const InflightSyncScope&) = delete;
+    InflightSyncScope& operator=(const InflightSyncScope&) = delete;
+};
+
 // Foreground-sync gate. Background sweeps park here while a launch-intent
 // sync is in flight to avoid HTTP contention against the provider.
 static std::atomic<int>     g_foregroundSyncCount{0};
@@ -793,6 +812,8 @@ void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn) {
 }
 
 bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn) {
+    InflightSyncScope guard;
+    if (!guard) return false;
     if (!g_provider) return true;
     std::string cnStr = std::to_string(cn);
     std::string cloudPath = CloudMetadataPath(accountId, appId, "cn.dat");
@@ -1079,7 +1100,8 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
     std::string localPath = LocalBlobPath(accountId, appId, filename);
     if (localPath.empty()) return {}; // path traversal blocked
 
-    const bool cloudFirst = IsAccountScopeMetadataBlob(appId, filename) && g_provider;
+    InflightSyncScope guard;
+    const bool cloudFirst = guard && IsAccountScopeMetadataBlob(appId, filename) && g_provider;
 
     // Refresh cache from Drive every read for account-scope blobs.
     if (cloudFirst) {
@@ -1127,7 +1149,7 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
     }
 
     // 2. Cache miss -- pull from cloud provider (blocking)
-    if (g_provider) {
+    if (guard && g_provider) {
         std::string cloudPath = CloudBlobPath(accountId, appId, filename);
         std::vector<uint8_t> data;
         if (g_provider->Download(cloudPath, data)) {
@@ -1198,7 +1220,8 @@ ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
         return ICloudProvider::ExistsStatus::Exists;
 
     // Check cloud
-    if (g_provider) {
+    InflightSyncScope guard;
+    if (guard && g_provider) {
         std::string cloudPath = CloudBlobPath(accountId, appId, filename);
         return g_provider->CheckExists(cloudPath);
     }
