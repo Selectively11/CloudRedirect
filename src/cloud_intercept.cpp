@@ -788,7 +788,7 @@ struct QueuedInjection {
 static std::queue<QueuedInjection*> g_injectQueue;
 static std::mutex g_injectMutex;
 // Reentrancy guard: BRouteMsgToJob resumes a coroutine that may send another packet,
-// re-entering OnSendPkt; without this we'd recurse into the drain loop.
+// re-entering OnSendPkt; the flag prevents recursion into the drain loop.
 static thread_local bool t_drainingInjectQueue = false;
 
 static void ProcessQueuedInjection(QueuedInjection* ctx); // defined below
@@ -898,8 +898,8 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         jobMgr, (unsigned long long)ctx->jobIdTarget, route.emsg, route.flags);
 
     // Pre-check: verify job still exists. BRouteMsgToJob silently no-ops on a
-    // missing slot but returns 1, so we'd otherwise log a false success and the
-    // game's pending download would silently fail.
+    // missing slot but returns 1, which would log a false success while the
+    // game's pending download silently fails.
     using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
     FindJobFn findJob = (FindJobFn)(g_steamClientBase + SC_RVA_FIND_JOB);
     int jobSlot = -1;
@@ -1662,7 +1662,7 @@ static void UploadPlaytimeOnExit(uint32_t appId) {
         }
     }
     // Steam decays Playtime2wks; never default it to lifetime total.
-    // Clamp obviously-corrupt blobs (2wks > total) by zeroing 2wks.
+    // Clamp corrupt blobs (2wks > total) by zeroing 2wks.
     // 2wks==total at non-trivial lifetimes is the signature of the prior
     // "default 2wks to lifetime" bug; recover by zeroing.
     constexpr uint64_t kTwoWeeksMinutes = 14ULL * 24 * 60;
@@ -1981,7 +1981,7 @@ static void InstallServiceMethodHook() {
 static void InstallServiceMethodHookLocked() {
     if (g_vtableHookInstalled.load(std::memory_order_acquire) || !g_steamClientBase) return;
 
-    // Validate Parse/Serialize RVAs before we rely on them; a Steam update can repoint these into garbage.
+    // Validate Parse/Serialize RVAs before relying on them; a Steam update can repoint these into garbage.
     auto candidateParse     = (ParseFromArrayFn)(g_steamClientBase + SC_RVA_PARSE_FROM_ARRAY);
     auto candidateSerialize = (SerializeToArrayFn)(g_steamClientBase + SC_RVA_SERIALIZE_TO_ARRAY);
     if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateParse))) {
@@ -3961,9 +3961,9 @@ static void ShutdownImpl() {
             g_serializeToArray = nullptr;
             g_steamClientBase = (uintptr_t)currentSC;
         } else {
-            // Restore against the same vtable EA we patched. If RTTI never resolved
-            // (shouldn't be possible if g_vtableHookInstalled is true), fall back to
-            // the hardcoded RVA so we still attempt restore.
+            // Restore against the same vtable EA the install patched. If RTTI never resolved
+            // (shouldn't be possible while g_vtableHookInstalled is true), fall back to
+            // the hardcoded RVA to still attempt restore.
             const uintptr_t vtableEa = g_serviceTransportVtableEa
                                        ? g_serviceTransportVtableEa
                                        : (g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT);
