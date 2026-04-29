@@ -40,17 +40,17 @@ static std::filesystem::file_time_type UnixSecondsToFileTime(uint64_t unixSecond
     return fileNow + (sysTime - sysNow);
 }
 
-// Returns full path, or empty if the filename escapes the app directory.
-static std::string ValidateFilename(const std::string& appRoot, const std::string& filename) {
-    std::string fullPath = appRoot + filename;
-    for (auto& c : fullPath) { if (c == '/') c = '\\'; }
+static bool IsSafeRelativePath(const std::string& path);
 
-    if (!FileUtil::IsPathWithin(appRoot, fullPath)) {
+// Lexical-only check so first writes work before the per-app blob directory exists on disk.
+static std::string ValidateFilename(const std::string& appRoot, const std::string& filename) {
+    if (!IsSafeRelativePath(filename)) {
         LOG("BLOCKED path traversal: filename='%s' root='%s'",
             filename.c_str(), appRoot.c_str());
         return {};
     }
-
+    std::string fullPath = appRoot + filename;
+    for (auto& c : fullPath) { if (c == '/') c = '\\'; }
     return fullPath;
 }
 
