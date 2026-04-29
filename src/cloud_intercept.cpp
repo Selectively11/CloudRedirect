@@ -1901,11 +1901,18 @@ static void RefuseVtableHook(const char* reasonFmt, ...) {
         "https://github.com/anomalyco/CloudRedirect/issues\n\n"
         "Reason: ";
     msg += reason;
-    std::thread([msg]() {
+    std::thread t([msg]() {
+        if (g_shuttingDown.load(std::memory_order_acquire)) return;
         MessageBoxA(nullptr, msg.c_str(),
             "CloudRedirect -- Hook Install Failed",
             MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
-    }).detach();
+    });
+    std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+    if (g_shuttingDown.load(std::memory_order_acquire)) {
+        t.detach();
+    } else {
+        g_bgThreads.push_back(std::move(t));
+    }
 }
 
 // Install the vtable hook on CClientUnifiedServiceTransport
