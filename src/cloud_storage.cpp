@@ -1356,9 +1356,10 @@ static bool SyncFromCloudInner(uint32_t accountId, uint32_t appId, bool isSweep)
         }
 
         if (cloudCN > localCN) {
-            LOG("[CloudStorage] SyncFromCloud app %u: cloud CN=%llu > local CN=%llu, using cloud",
+            LOG("[CloudStorage] SyncFromCloud app %u: cloud CN=%llu > local CN=%llu, using cloud (deferred until blobs promote)",
                 appId, cloudCN, localCN);
-            LocalStorage::SetChangeNumber(accountId, appId, cloudCN);
+            // CN persistence deferred to after blob promotion so a crash mid-sync
+            // doesn't leave localCN==cloudCN with stale blobs (next sync would skip reconcile).
             hadNewer = true;
             cloudHadNewerCN = true;
         } else if (localCN > cloudCN) {
@@ -1375,13 +1376,16 @@ static bool SyncFromCloudInner(uint32_t accountId, uint32_t appId, bool isSweep)
     originalFileTokens = LocalStorage::LoadFileTokens(accountId, appId);
     haveOriginalTokenMetadata = true;
 
+    bool cnPersisted = false; // set true after deferred SetChangeNumber succeeds
     auto rollbackNewerCloudState = [&](const char* reason) {
-        uint64_t currentCN = LocalStorage::GetChangeNumber(accountId, appId);
-        if (currentCN == cloudCN) {
-            LocalStorage::SetChangeNumber(accountId, appId, localCN);
-        } else {
-            LOG("[CloudStorage] SyncFromCloud app %u: preserving local CN=%llu during rollback; expected cloud CN=%llu",
-                appId, currentCN, cloudCN);
+        if (cnPersisted) {
+            uint64_t currentCN = LocalStorage::GetChangeNumber(accountId, appId);
+            if (currentCN == cloudCN) {
+                LocalStorage::SetChangeNumber(accountId, appId, localCN);
+            } else {
+                LOG("[CloudStorage] SyncFromCloud app %u: preserving local CN=%llu during rollback; expected cloud CN=%llu",
+                    appId, currentCN, cloudCN);
+            }
         }
         // Vacuously true when nothing was merged; otherwise must be set
         // explicitly by a successful Save below.
@@ -1796,6 +1800,11 @@ static bool SyncFromCloudInner(uint32_t accountId, uint32_t appId, bool isSweep)
                                                         it->backupPath,
                                                         it->hadOriginal);
                 }
+            } else if (!timedOut) {
+                // Blobs are on disk; persist CN now so a crash mid-sync can't leave
+                // localCN==cloudCN with stale blobs (next sync would skip reconcile).
+                LocalStorage::SetChangeNumber(accountId, appId, cloudCN);
+                cnPersisted = true;
             }
         }
 
