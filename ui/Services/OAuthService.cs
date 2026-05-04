@@ -72,19 +72,21 @@ public sealed class OAuthService : IDisposable
     private const string GDriveAuthUrl = "https://accounts.google.com/o/oauth2/v2/auth";
     private const string GDriveTokenUrl = "https://oauth2.googleapis.com/token";
 
-    // OneDrive (Azure AD public client — same client ID as in the DLL)
-    private const string OneDriveClientId = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
+    // OneDrive (using rclone's public client ID - our Azure AD app has redirect URI issues)
+    private const string OneDriveClientId = "b15665d9-eda6-4092-8539-0eec376afd59";
     private const string OneDriveScope = "Files.ReadWrite offline_access";
     private const string OneDriveAuthUrl =
-        "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize";
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
     private const string OneDriveTokenUrl =
-        "https://login.microsoftonline.com/consumers/oauth2/v2.0/token";
+        "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+    private const int OneDrivePort = 53682; // rclone's Azure AD app only has this port registered
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
-    private string? _oauthState;      // CSRF protection
-    private string? _codeVerifier;    // PKCE code verifier
+    private string? _oauthState;      // CSRF protection (Google Drive only)
+    private string? _codeVerifier;    // PKCE code verifier (Google Drive only)
+    private string? _currentProvider; // Track current provider for state validation
 
     /// <summary>
     /// Run the full OAuth flow for the given provider.
@@ -101,44 +103,78 @@ public sealed class OAuthService : IDisposable
         Action<string> log,
         CancellationToken cancel = default)
     {
-        // Find an available port and start the listener (retry if port is taken)
+        // Track current provider for state validation
+        _currentProvider = provider;
+        
+        // Find an available port and start the listener
+        // OneDrive uses fixed port 53682 (rclone's Azure AD app requirement)
+        // Google Drive uses dynamic port
         int port = 0;
+        string redirectUri;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         _listener = new HttpListener();
 
-        for (int attempt = 0; attempt < 5; attempt++)
+        if (provider == "onedrive")
         {
-            port = FindAvailablePort();
-            string redirectUri = $"http://localhost:{port}/callback";
-
+            port = OneDrivePort;
+            redirectUri = $"http://localhost:{port}/";
+            
             log($"Starting OAuth flow for {provider}...");
             log($"Listening on {redirectUri}");
 
             _listener.Prefixes.Clear();
-            _listener.Prefixes.Add($"http://localhost:{port}/callback/");
+            _listener.Prefixes.Add(redirectUri);
 
             try
             {
                 _listener.Start();
-                break; // success
-            }
-            catch (HttpListenerException) when (attempt < 4)
-            {
-                log($"Port {port} in use, retrying...");
-                _listener.Close();
-                _listener = new HttpListener();
-                continue;
             }
             catch (HttpListenerException ex)
             {
-                log($"ERROR: Failed to start HTTP listener after 5 attempts: {ex.Message}");
+                log($"ERROR: Failed to start HTTP listener on port {port}: {ex.Message}");
+                log("(Port 53682 may be in use by another application)");
                 return false;
             }
         }
+        else
+        {
+            // Google Drive - use dynamic port with /callback path
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                port = FindAvailablePort();
+                redirectUri = $"http://localhost:{port}/callback";
 
-        string redirectUriFinal = $"http://localhost:{port}/callback";
+                log($"Starting OAuth flow for {provider}...");
+                log($"Listening on {redirectUri}");
 
-        // Generate CSRF state and PKCE code verifier
+                _listener.Prefixes.Clear();
+                _listener.Prefixes.Add($"http://localhost:{port}/callback/");
+
+                try
+                {
+                    _listener.Start();
+                    break; // success
+                }
+                catch (HttpListenerException) when (attempt < 4)
+                {
+                    log($"Port {port} in use, retrying...");
+                    _listener.Close();
+                    _listener = new HttpListener();
+                    continue;
+                }
+                catch (HttpListenerException ex)
+                {
+                    log($"ERROR: Failed to start HTTP listener after 5 attempts: {ex.Message}");
+                    return false;
+                }
+            }
+        }
+
+        string redirectUriFinal = provider == "onedrive" 
+            ? $"http://localhost:{port}/" 
+            : $"http://localhost:{port}/callback";
+
+        // Generate CSRF state and PKCE code verifier (only used for Google Drive)
         _oauthState = GenerateRandomString(32);
         _codeVerifier = GenerateRandomString(64);
         string codeChallenge = ComputeCodeChallenge(_codeVerifier);
@@ -147,7 +183,7 @@ public sealed class OAuthService : IDisposable
         string authUrl = provider switch
         {
             "gdrive" => BuildGDriveAuthUrl(redirectUriFinal, _oauthState, codeChallenge),
-            "onedrive" => BuildOneDriveAuthUrl(redirectUriFinal, _oauthState, codeChallenge),
+            "onedrive" => BuildOneDriveAuthUrl(redirectUriFinal),
             _ => throw new ArgumentException($"Unknown provider: {provider}")
         };
 
@@ -200,7 +236,7 @@ public sealed class OAuthService : IDisposable
             tokens = provider switch
             {
                 "gdrive" => await ExchangeGDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, cancel),
-                "onedrive" => await ExchangeOneDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, cancel),
+                "onedrive" => await ExchangeOneDriveCodeAsync(code, redirectUriFinal, cancel),
                 _ => null
             };
         }
@@ -294,17 +330,15 @@ public sealed class OAuthService : IDisposable
                $"&code_challenge_method=S256";
     }
 
-    private static string BuildOneDriveAuthUrl(string redirectUri, string state, string codeChallenge)
+    private static string BuildOneDriveAuthUrl(string redirectUri)
     {
+        // OneDrive with rclone's client ID: no PKCE, no state
         return $"{OneDriveAuthUrl}" +
                $"?client_id={Uri.EscapeDataString(OneDriveClientId)}" +
                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
                $"&response_type=code" +
                $"&scope={Uri.EscapeDataString(OneDriveScope)}" +
-               $"&prompt=consent" +
-               $"&state={Uri.EscapeDataString(state)}" +
-               $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
-               $"&code_challenge_method=S256";
+               $"&prompt=consent";
     }
 
     private async Task<string?> WaitForCallbackAsync(CancellationToken cancel)
@@ -331,8 +365,8 @@ public sealed class OAuthService : IDisposable
                 continue;
             }
 
-            // Validate CSRF state parameter
-            if (_oauthState != null && state != _oauthState)
+            // Validate CSRF state parameter (Google Drive only - OneDrive doesn't use state)
+            if (_currentProvider != "onedrive" && _oauthState != null && state != _oauthState)
             {
                 error = "state_mismatch";
                 code = null;
@@ -393,16 +427,16 @@ public sealed class OAuthService : IDisposable
     }
 
     private async Task<TokenResult?> ExchangeOneDriveCodeAsync(
-        string code, string redirectUri, string codeVerifier, CancellationToken cancel)
+        string code, string redirectUri, CancellationToken cancel)
     {
+        // OneDrive with rclone's client ID: no PKCE code_verifier
         var body = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["code"] = code,
             ["client_id"] = OneDriveClientId,
             ["redirect_uri"] = redirectUri,
             ["grant_type"] = "authorization_code",
-            ["scope"] = OneDriveScope,
-            ["code_verifier"] = codeVerifier
+            ["scope"] = OneDriveScope
         });
 
         var resp = await _http.PostAsync(OneDriveTokenUrl, body, cancel);

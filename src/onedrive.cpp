@@ -15,8 +15,8 @@ using HttpUtil::Iso8601ToUnix;
 using HttpUtil::UnixToIso8601;
 using HttpUtil::HttpResp;
 
-// Azure AD Application (client) ID.
-static constexpr const char* CLIENT_ID = "c582f799-5dc5-48a7-a4cd-cd0d8af354a2";
+// rclone's public Azure AD client ID (our own app has redirect URI issues)
+static constexpr const char* CLIENT_ID = "b15665d9-eda6-4092-8539-0eec376afd59";
 
 std::string OneDriveProvider::BuildRefreshBody(const std::string& refreshToken) const {
     return "client_id=" + UrlEncode(CLIENT_ID) +
