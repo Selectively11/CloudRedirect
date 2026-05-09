@@ -88,7 +88,6 @@ static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EB760;
 static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x126C130;
 // sub_138BE73E0 = protobuf ParseFromArray (fills body from raw bytes)
 static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBE7630;
-// sub_138BE79B0 = protobuf SerializeToArray (writes body to raw bytes)
 static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBE7A40;
 // CUser playtime state helpers
 static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9D7A90;
@@ -153,11 +152,7 @@ using NotificationSlot8Fn = bool(__fastcall*)(void* thisptr, const char* methodN
 //   rdx = raw data pointer
 //   r8  = raw data size (as int)
 using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int size);
-// sub_138BD07E0: SerializeToArray -- writes protobuf message to a buffer
-//   rcx = protobuf message object (body at CProtoBufMsg+48)
-//   rdx = output buffer pointer
-//   returns pointer past last written byte
-using SerializeToArrayFn = void*(__fastcall*)(void* msgBody, void* outBuf);
+using SerializeToArrayFn = uintptr_t(__fastcall*)(void* msgBody, void* outBuf, int size);
 using GetAppMinutesPlayedDataFn = unsigned int*(__fastcall*)(int64_t userPtr, unsigned int appId, char create);
 using FlushAppMinutesPlayedFn = int64_t(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int* record);
 using SetAppLastPlayedTimeFn = void(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int lastPlayed);
@@ -282,6 +277,7 @@ static void ScheduleStartupMetadataSync() {
 static std::atomic<bool> g_syncAchievements{false};
 static std::atomic<bool> g_syncPlaytime{false};
 static std::atomic<bool> g_syncLuas{false};
+static std::atomic<uint64_t> g_detectedSteamVersion{0};
 
 // Cloud-redirect master toggle (default ON). When OFF the DLL still applies manifest pinning + patches but skips HTTP/storage/interception.
 static std::atomic<bool> g_cloudRedirectEnabled{true};
@@ -315,7 +311,7 @@ static ServiceMethodSlot5Fn g_originalSlot5 = nullptr;      // saved original sl
 static NotificationSlot7Fn g_originalSlot7 = nullptr;       // saved original slot 7 function
 static NotificationSlot8Fn g_originalSlot8 = nullptr;       // saved original slot 8 function
 static ParseFromArrayFn g_parseFromArray = nullptr;          // sub_138BD0210
-static SerializeToArrayFn g_serializeToArray = nullptr;      // sub_138BD07E0
+static SerializeToArrayFn g_serializeToArray = nullptr;
 static std::atomic<bool> g_vtableHookInstalled{false};
 static uintptr_t g_serviceTransportVtableEa = 0;             // resolved via RTTI at install; 0 = unresolved, fall back to RVA
 
@@ -1096,9 +1092,38 @@ static uint64_t SEH_ByteSize(void* bodyObj) {
 }
 
 static ptrdiff_t SEH_SerializeToArray(void* bodyObj, uint8_t* buf, uint64_t expectedSize) {
+    if (expectedSize > (uint64_t)INT_MAX) {
+        LOG("[VtHook] SerializeToArray size %llu exceeds INT_MAX, rejecting", expectedSize);
+        return -1;
+    }
+
     __try {
-        void* end = g_serializeToArray(bodyObj, buf);
-        return (uint8_t*)end - buf;
+        uintptr_t bufAddr = reinterpret_cast<uintptr_t>(buf);
+        uintptr_t result = g_serializeToArray(bodyObj, buf, (int)expectedSize);
+        if (!result) return -1;
+
+        if (g_detectedSteamVersion.load(std::memory_order_relaxed) >= 1778281814ULL) {
+            if ((result & 0xFF) != 0) return (ptrdiff_t)expectedSize;
+            return -1;
+        }
+
+        if (result >= bufAddr && result <= bufAddr + expectedSize) {
+            return static_cast<ptrdiff_t>(result - bufAddr);
+        }
+
+        if ((result & 0xFF) != 0) {
+            return (ptrdiff_t)expectedSize;
+        }
+
+        if (result < bufAddr) {
+            LOG("[VtHook] SerializeToArray returned invalid end pointer %p (buf=%p)",
+                (void*)result, (void*)bufAddr);
+            return -1;
+        }
+
+        LOG("[VtHook] SerializeToArray returned invalid end pointer %p (buf=%p)",
+            (void*)result, (void*)bufAddr);
+        return -1;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[VtHook] EXCEPTION in SerializeToArray: code=0x%08X", GetExceptionCode());
         return -1;
@@ -3045,6 +3070,7 @@ void Init(const std::string& steamPath) {
 
     // ── Steam version gate ──────────────────────────────────────────────
     uint64_t detectedVersion = ReadSteamVersion(g_steamPath);
+    g_detectedSteamVersion = detectedVersion;
     if (detectedVersion == 0) {
         LOG("FATAL: Could not read Steam version from manifest");
 

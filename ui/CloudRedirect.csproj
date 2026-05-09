@@ -8,7 +8,7 @@
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>steam_logo3.ico</ApplicationIcon>
-    <Version>1.0.13</Version>
+    <Version>1.0.14</Version>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -42,5 +42,9 @@
   <ItemGroup>
     <EmbeddedResource Include="Resources\cloud_redirect.dll" LogicalName="cloud_redirect.dll" Condition="Exists('Resources\cloud_redirect.dll')" />
   </ItemGroup>
+
+  <Target Name="RemoveNativeDllSidecar" AfterTargets="Publish">
+    <Delete Files="$(PublishDir)cloud_redirect.dll" Condition="Exists('$(PublishDir)cloud_redirect.dll')" />
+  </Target>
 
 </Project>
