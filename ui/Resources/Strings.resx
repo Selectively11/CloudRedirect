@@ -719,6 +719,21 @@ Force-kill it?</value>
   <data name="CloudProvider_FolderNotFound" xml:space="preserve">
     <value>Folder not found: {0}</value>
   </data>
+  <data name="CloudProvider_WebDAV" xml:space="preserve">
+    <value>WebDAV</value>
+  </data>
+  <data name="CloudProvider_WebDAV_Url" xml:space="preserve">
+    <value>WebDAV Server URL</value>
+  </data>
+  <data name="CloudProvider_WebDAV_User" xml:space="preserve">
+    <value>Username</value>
+  </data>
+  <data name="CloudProvider_WebDAV_Pass" xml:space="preserve">
+    <value>Password</value>
+  </data>
+  <data name="CloudProvider_WebDAV_UrlPlaceholder" xml:space="preserve">
+    <value>https://yourcloud.com/remote.php/dav/files/user/</value>
+  </data>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
     <value>No token file path specified</value>
   </data>

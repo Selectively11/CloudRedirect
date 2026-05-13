@@ -132,6 +132,27 @@ public partial class CloudProviderPage : Page
                 TokenPathBox.Text = snap.DefaultLocalPath;
         }
 
+        if (snap.Config?.IsWebDav == true)
+        {
+            WebDavUrlBox.Text = snap.Config.WebDavUrl;
+            WebDavUserBox.Text = snap.Config.WebDavUser;
+            // Password is not stored in CloudConfig (only in the encrypted token file)
+            if (!string.IsNullOrEmpty(snap.Config.TokenPath) && File.Exists(snap.Config.TokenPath))
+            {
+                try
+                {
+                    var json = Services.TokenFile.ReadJson(snap.Config.TokenPath);
+                    if (json != null)
+                    {
+                        using var doc = JsonDocument.Parse(json);
+                        if (doc.RootElement.TryGetProperty("webdav_pass", out var pass))
+                            WebDavPassBox.Password = pass.GetString();
+                    }
+                }
+                catch { }
+            }
+        }
+
         UpdateProviderUI();
         // Use the pre-resolved token status so the dispatcher path never
         // re-enters CheckTokenStatus synchronously on Loaded. Only reach
@@ -172,6 +193,12 @@ public partial class CloudProviderPage : Page
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "CloudRedirect", "onedrive_tokens.json");
             }
+            else if (tag == "webdav")
+            {
+                TokenPathBox.Text = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "CloudRedirect", "webdav_config.json");
+            }
             else if (tag is "local" or "folder")
             {
                 SetDefaultLocalPath();
@@ -190,13 +217,15 @@ public partial class CloudProviderPage : Page
 
         var tag = item.Tag as string;
         bool needsTokens = tag is "gdrive" or "onedrive";
+        bool isWebDav = tag == "webdav";
         bool isFolder = tag == "folder";
         bool isLocal = tag == "local";
-        bool needsPath = needsTokens || isFolder;
+        bool needsPath = needsTokens || isFolder || isWebDav;
 
         TokenPathBox.IsEnabled = needsPath;
         BrowseButton.IsEnabled = needsPath;
         SignInButton.Visibility = needsTokens ? Visibility.Visible : Visibility.Collapsed;
+        WebDavSettings.Visibility = isWebDav ? Visibility.Visible : Visibility.Collapsed;
 
         // Update labels based on provider type
         if (isFolder)
@@ -367,8 +396,20 @@ public partial class CloudProviderPage : Page
 
         try
         {
+            if (provider == "webdav")
+            {
+                var webdavConfig = new
+                {
+                    webdav_url = WebDavUrlBox.Text?.Trim() ?? "",
+                    webdav_user = WebDavUserBox.Text?.Trim() ?? "",
+                    webdav_pass = WebDavPassBox.Password ?? ""
+                };
+                var json = JsonSerializer.Serialize(webdavConfig, new JsonSerializerOptions { WriteIndented = true });
+                await Task.Run(() => Services.TokenFile.WriteJson(tokenPath, json));
+            }
+
             Services.ConfigHelper.SaveConfig(configPath,
-                new[] { "provider", "sync_path", "token_path" },
+                new[] { "provider", "sync_path", "token_path", "webdav_url", "webdav_user" },
                 writer =>
                 {
                     writer.WriteString("provider", configProvider);
@@ -376,6 +417,12 @@ public partial class CloudProviderPage : Page
                         writer.WriteString("sync_path", tokenPath);
                     else if (configProvider is not "local")
                         writer.WriteString("token_path", tokenPath);
+
+                    if (provider == "webdav")
+                    {
+                        writer.WriteString("webdav_url", WebDavUrlBox.Text?.Trim() ?? "");
+                        writer.WriteString("webdav_user", WebDavUserBox.Text?.Trim() ?? "");
+                    }
                 });
             return true;
         }

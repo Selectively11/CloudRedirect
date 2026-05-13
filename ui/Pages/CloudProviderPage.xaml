@@ -29,9 +29,34 @@
                       SelectionChanged="ProviderCombo_SelectionChanged">
                 <ComboBoxItem Content="{res:Loc CloudProvider_GoogleDrive}" Tag="gdrive" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_OneDrive}" Tag="onedrive" />
+                <ComboBoxItem Content="{res:Loc CloudProvider_WebDAV}" Tag="webdav" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_FolderMappedDrive}" Tag="folder" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_LocalOnly}" Tag="local" />
             </ComboBox>
+
+            <StackPanel x:Name="WebDavSettings" Visibility="Collapsed">
+                <TextBlock Text="{res:Loc CloudProvider_WebDAV_Url}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <ui:TextBox x:Name="WebDavUrlBox"
+                            PlaceholderText="{res:Loc CloudProvider_WebDAV_UrlPlaceholder}"
+                            Margin="0,0,0,16" />
+
+                <TextBlock Text="{res:Loc CloudProvider_WebDAV_User}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <ui:TextBox x:Name="WebDavUserBox"
+                            Margin="0,0,0,16" />
+
+                <TextBlock Text="{res:Loc CloudProvider_WebDAV_Pass}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,8" />
+                <ui:PasswordBox x:Name="WebDavPassBox"
+                                Margin="0,0,0,16" />
+            </StackPanel>
 
             <TextBlock x:Name="PathLabel"
                        Text="{res:Loc CloudProvider_TokenFilePath}"

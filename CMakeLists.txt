@@ -21,6 +21,7 @@ add_library(cloud_redirect SHARED
     src/cloud_provider_base.cpp
     src/google_drive.cpp
     src/onedrive.cpp
+    src/webdav_provider.cpp
     src/json.cpp
     src/vdf.cpp
     src/remotecache_repair.cpp
