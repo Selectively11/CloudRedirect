@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.cloudredirect.CloudRedirect</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>CloudRedirect</name>
+  <summary>Steam Cloud redirection magic for Linux!</summary>
+  
+  <description>
+    <p>
+      CloudRedirect for Linux! Redirect Steam Cloud for games unlocked by SLSSteam
+      to the provider of your choice!
+    </p>
+  </description>
+  
+  <icon type="stock">org.cloudredirect.CloudRedirect</icon>
+  
+  <launchable type="desktop-id">org.cloudredirect.CloudRedirect.desktop</launchable>
+  
+  <url type="homepage">https://github.com/Selectively11/CloudRedirect-Unified</url>
+  <url type="bugtracker">https://github.com/Selectively11/CloudRedirect-Unified/issues</url>
+  
+  <developer_name>Selectively11</developer_name>
+  
+  <provides>
+    <binary>cloud-redirect-ui</binary>
+  </provides>
+  
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </recommends>
+  
+  <content_rating type="oars-1.1" />
+  
+  <releases>
+    <release version="2.0.3" date="2026-05-13" />
+    <release version="2.0.0" date="2026-05-04">
+      <description>
+        <p>Initial Flatpak release</p>
+      </description>
+    </release>
+  </releases>
+  
+  <screenshots>
+    <!-- Add screenshots when available -->
+  </screenshots>
+  
+  <keywords>
+    <keyword>steam</keyword>
+    <keyword>cloud</keyword>
+    <keyword>save</keyword>
+    <keyword>backup</keyword>
+    <keyword>sync</keyword>
+    <keyword>game</keyword>
+  </keywords>
+</component>

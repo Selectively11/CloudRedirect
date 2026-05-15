@@ -58,7 +58,8 @@ public partial class SettingsPage : Page
         string? Mode,
         bool? SyncAchievements,
         bool? SyncPlaytime,
-        bool? SyncLuas);
+        bool? SyncLuas,
+        bool? AutoUpdateDll);
 
     // M15: Move language/mode/sync-toggle config reads off the UI thread.
     // Loaded used to call ReadLanguageSetting + ReadModeSetting +
@@ -72,11 +73,11 @@ public partial class SettingsPage : Page
             var lang = ReadLanguageSetting();
             var mode = Services.SteamDetector.ReadModeSetting();
 
-            bool? a = null, p = null, l = null;
+            bool? a = null, p = null, l = null, u = null;
             if (mode == "cloud_redirect")
-                ReadSyncTogglesInto(ref a, ref p, ref l);
+                ReadSyncTogglesInto(ref a, ref p, ref l, ref u);
 
-            return new SettingsSnapshot(lang, mode, a, p, l);
+            return new SettingsSnapshot(lang, mode, a, p, l, u);
         });
 
         ApplySettingsSnapshot(snapshot);
@@ -89,7 +90,7 @@ public partial class SettingsPage : Page
         if (snap.Mode == "cloud_redirect")
         {
             SyncSection.Visibility = Visibility.Visible;
-            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas);
+            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas, snap.AutoUpdateDll);
         }
         else
         {
@@ -122,7 +123,7 @@ public partial class SettingsPage : Page
         }
     }
 
-    private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas)
+    private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas, bool? autoUpdateDll)
     {
         _syncLoading = true;
         try
@@ -130,6 +131,7 @@ public partial class SettingsPage : Page
             if (achievements == true) SyncAchievementsToggle.IsChecked = true;
             if (playtime == true) SyncPlaytimeToggle.IsChecked = true;
             if (luas == true) SyncLuasToggle.IsChecked = true;
+            if (autoUpdateDll == true) AutoUpdateDllToggle.IsChecked = true;
         }
         finally
         {
@@ -142,7 +144,7 @@ public partial class SettingsPage : Page
     /// thread. Used by LoadSettingsAsync inside Task.Run so the dispatcher
     /// path never opens config.json synchronously.
     /// </summary>
-    private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas)
+    private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas, ref bool? autoUpdateDll)
     {
         try
         {
@@ -159,6 +161,8 @@ public partial class SettingsPage : Page
                 playtime = true;
             if (root.TryGetProperty("sync_luas", out var l) && l.ValueKind == JsonValueKind.True)
                 luas = true;
+            if (root.TryGetProperty("auto_update_dll", out var u) && u.ValueKind == JsonValueKind.True)
+                autoUpdateDll = true;
         }
         catch { }
     }
@@ -323,12 +327,13 @@ public partial class SettingsPage : Page
     {
         var path = GetConfigPath();
         Services.ConfigHelper.SaveConfig(path,
-            new[] { "sync_achievements", "sync_playtime", "sync_luas" },
+            new[] { "sync_achievements", "sync_playtime", "sync_luas", "auto_update_dll" },
             writer =>
             {
                 writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
                 writer.WriteBoolean("sync_playtime", SyncPlaytimeToggle.IsChecked == true);
                 writer.WriteBoolean("sync_luas", SyncLuasToggle.IsChecked == true);
+                writer.WriteBoolean("auto_update_dll", AutoUpdateDllToggle.IsChecked == true);
             });
     }
 

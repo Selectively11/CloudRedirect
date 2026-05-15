@@ -47,7 +47,7 @@
     <value>CloudRedirect</value>
   </data>
   <data name="MainWindow_TitleBar" xml:space="preserve">
-    <value>CloudRedirect - Public Test Build #24</value>
+    <value>CloudRedirect 2.0.3</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
     <value>Dashboard</value>
@@ -1315,7 +1315,7 @@ Files can be restored from the Restore tab. Continue?</value>
 
   <!-- SettingsPage code-behind -->
   <data name="Settings_VersionFormat" xml:space="preserve">
-    <value>{0}.{1}.{2} (Public Test Build #24)</value>
+    <value>{0}.{1}.{2}</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
     <value>Checking...</value>
@@ -1371,7 +1371,7 @@ Are you sure?</value>
     <value>WARNING</value>
   </data>
   <data name="Disclaimer_BuildBanner" xml:space="preserve">
-    <value>CloudRedirect - Public Test Build #24</value>
+    <value>CloudRedirect v2.0.3</value>
   </data>
   <data name="Disclaimer_ExperimentalBanner" xml:space="preserve">
     <value>!  EXPERIMENTAL  -  DATA  LOSS  RISK  !</value>
@@ -1612,6 +1612,12 @@ Are you sure?</value>
   </data>
   <data name="Settings_SyncLuasHint" xml:space="preserve">
     <value>Sync lua files themselves between PCs so you don't have to install them again.</value>
+  </data>
+  <data name="Settings_AutoUpdateDll" xml:space="preserve">
+    <value>Auto-update DLL</value>
+  </data>
+  <data name="Settings_AutoUpdateDllHint" xml:space="preserve">
+    <value>Automatically check for and install newer versions of the CloudRedirect DLL when Steam launches. The update takes effect on the next Steam restart.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->

@@ -27,18 +27,18 @@ public partial class CleanupPage : Page
 {
     private readonly SteamStoreClient _storeClient = SteamStoreClient.Shared;
     private Dictionary<uint, StoreAppInfo> _storeCache = new();
-    private string _steamPath;
-    private List<AppScanResult> _scanResults;
+    private string? _steamPath;
+    private List<AppScanResult>? _scanResults;
 
     // Filtered list used for display (retained for search to rebuild from)
-    private List<AppScanResult> _displayedApps;
+    private List<AppScanResult>? _displayedApps;
 
     // Track whether backups have been loaded for the restore tab
     private bool _backupsLoaded;
-    private List<BackupInfo> _backups;
+    private List<BackupInfo>? _backups;
 
     // Reuse the CloudCleanup instance from the last scan (has populated _namespaceApps, _appConfigs, etc.)
-    private CloudCleanup _cleanup;
+    private CloudCleanup? _cleanup;
 
     // Track whether a scan has been performed (for back button label)
     private bool _hasScanned;

@@ -1,4 +1,3 @@
-using System.Net.Http;
 using CloudRedirect.Services.Providers;
 
 namespace CloudRedirect.Services;
@@ -11,13 +10,13 @@ namespace CloudRedirect.Services;
 /// </summary>
 internal static class UiCloudProviderFactory
 {
-    public static IUiCloudProvider? TryResolve(CloudConfig? config, HttpClient http, Action<string>? log)
+    public static IUiCloudProvider? TryResolve(CloudConfig? config, Action<string>? log)
     {
         if (config == null || config.IsLocal) return null;
         return config.Provider switch
         {
-            "gdrive"   => new GoogleDriveUiCloudProvider(http, log, config.TokenPath!),
-            "onedrive" => new OneDriveUiCloudProvider(http, log, config.TokenPath!),
+            "gdrive"   => new CliUiCloudProvider("gdrive", log),
+            "onedrive" => new CliUiCloudProvider("onedrive", log),
             "folder"   => new FolderUiCloudProvider(log, config.SyncPath!),
             _          => null,
         };

@@ -51,14 +51,6 @@ public static class SteamDetector
     }
 
     /// <summary>
-    /// Forces a re-detection on next call (useful after user changes settings).
-    /// </summary>
-    public static void ClearCache()
-    {
-        lock (_cacheLock) { _cachedPath = null; }
-    }
-
-    /// <summary>
     /// Manually override the Steam path (e.g. from a Browse dialog).
     /// Validates that the directory exists before accepting.
     /// </summary>
@@ -211,7 +203,10 @@ public static class SteamDetector
     {
         try
         {
-            return Process.GetProcessesByName("steam").Length > 0;
+            var procs = Process.GetProcessesByName("steam");
+            bool running = procs.Length > 0;
+            foreach (var p in procs) p.Dispose();
+            return running;
         }
         catch
         {
@@ -303,7 +298,6 @@ public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
         _ => Provider
     };
 
-    public bool IsOAuth => Provider is "gdrive" or "onedrive";
     public bool IsFolder => Provider == "folder";
     public bool IsLocal => Provider == "local";
 }

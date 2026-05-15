@@ -173,7 +173,7 @@ namespace CloudRedirect.Services
         // 7 = Steam Client (general config)
         private static readonly HashSet<uint> ExcludedAppIds = new() { 760, 7 };
 
-        public CloudCleanup(string steamPath, Action<string> log = null)
+        public CloudCleanup(string steamPath, Action<string>? log = null)
         {
             _steamPath = steamPath;
             _userdataPath = Path.Combine(steamPath, "userdata");

@@ -1,5 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <Import Project="..\Version.props" />
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -8,10 +10,13 @@
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>steam_logo3.ico</ApplicationIcon>
-    <Version>1.0.14</Version>
+    <Version>$(ReleaseVersion)</Version>
+    <InformationalVersion>$(ReleaseVersion)+win.$(WindowsRevision)+core.$(CoreGeneration)</InformationalVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Suppress nullable reference warnings (CS8600-CS8625) - cosmetic, not bugs -->
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8625</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -25,26 +30,39 @@
     <EmbeddedResource Remove="CloudRedirect.Tests\**" />
   </ItemGroup>
 
-  <!-- Copy the C++ DLL into Resources/ before build so it can be embedded -->
+  <!-- Copy the C++ DLL into Resources/ and add it as an embedded resource after the
+       copy, because SDK-style item evaluation happens before BeforeBuild on a clean
+       checkout. -->
   <Target Name="CopyNativeDll" BeforeTargets="BeforeBuild">
     <PropertyGroup>
       <NativeDllSource>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\build\Release\cloud_redirect.dll'))</NativeDllSource>
       <NativeDllDest>$(MSBuildProjectDirectory)\Resources\cloud_redirect.dll</NativeDllDest>
+      <NativeCliSource>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\build\Release\cloud_redirect_cli.exe'))</NativeCliSource>
+      <NativeCliDest>$(MSBuildProjectDirectory)\Resources\cloud_redirect_cli.exe</NativeCliDest>
     </PropertyGroup>
     <MakeDir Directories="$(MSBuildProjectDirectory)\Resources" Condition="!Exists('$(MSBuildProjectDirectory)\Resources')" />
     <Copy SourceFiles="$(NativeDllSource)" DestinationFiles="$(NativeDllDest)"
           Condition="Exists('$(NativeDllSource)')"
           SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(NativeCliSource)" DestinationFiles="$(NativeCliDest)"
+          Condition="Exists('$(NativeCliSource)')"
+          SkipUnchangedFiles="true" />
+    <ItemGroup Condition="Exists('$(NativeDllDest)')">
+      <EmbeddedResource Include="$(NativeDllDest)" LogicalName="cloud_redirect.dll" />
+    </ItemGroup>
+    <ItemGroup Condition="Exists('$(NativeCliDest)')">
+      <EmbeddedResource Include="$(NativeCliDest)" LogicalName="cloud_redirect_cli.exe" />
+    </ItemGroup>
     <Warning Text="cloud_redirect.dll not found at $(NativeDllSource) — embedded resource will be stale or missing"
              Condition="!Exists('$(NativeDllSource)')" />
+    <Warning Text="cloud_redirect_cli.exe not found at $(NativeCliSource) — embedded CLI will be stale or missing"
+             Condition="!Exists('$(NativeCliSource)')" />
   </Target>
 
   <ItemGroup>
-    <EmbeddedResource Include="Resources\cloud_redirect.dll" LogicalName="cloud_redirect.dll" Condition="Exists('Resources\cloud_redirect.dll')" />
+    <EmbeddedResource Include="Resources\payloads\**\*">
+      <LogicalName>$([System.String]::Copy('payloads/%(RecursiveDir)%(Filename)%(Extension)').Replace('\\','/'))</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
-
-  <Target Name="RemoveNativeDllSidecar" AfterTargets="Publish">
-    <Delete Files="$(PublishDir)cloud_redirect.dll" Condition="Exists('$(PublishDir)cloud_redirect.dll')" />
-  </Target>
 
 </Project>

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+    "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node name="/org/cloudredirect/Service">
+    <interface name="org.cloudredirect.Service">
+        <!-- Status -->
+        <method name="GetStatus">
+            <arg name="status" type="a{sv}" direction="out"/>
+        </method>
+
+        <!-- Managed apps -->
+        <method name="GetManagedApps">
+            <arg name="apps" type="a(us)" direction="out"/>
+        </method>
+
+        <!-- Configuration -->
+        <method name="GetConfig">
+            <arg name="config" type="a{sv}" direction="out"/>
+        </method>
+
+        <method name="SetConfig">
+            <arg name="key" type="s" direction="in"/>
+            <arg name="value" type="v" direction="in"/>
+        </method>
+
+        <!-- Deployment -->
+        <method name="Deploy">
+            <arg name="success" type="b" direction="out"/>
+            <arg name="message" type="s" direction="out"/>
+        </method>
+
+        <method name="Undeploy">
+            <arg name="success" type="b" direction="out"/>
+        </method>
+
+        <!-- Signals -->
+        <signal name="StatusChanged">
+            <arg name="status" type="a{sv}"/>
+        </signal>
+
+        <signal name="SyncEvent">
+            <arg name="appId" type="u"/>
+            <arg name="operation" type="s"/>
+            <arg name="filename" type="s"/>
+        </signal>
+    </interface>
+</node>

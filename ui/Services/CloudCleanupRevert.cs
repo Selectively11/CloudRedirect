@@ -39,7 +39,7 @@ namespace CloudRedirect.Services
         private readonly RevertConflictMode _conflictMode;
         private readonly Action<string> _log;
 
-        public CloudCleanupRevert(string steamPath, RevertConflictMode conflictMode = RevertConflictMode.Skip, Action<string> log = null)
+        public CloudCleanupRevert(string steamPath, RevertConflictMode conflictMode = RevertConflictMode.Skip, Action<string>? log = null)
         {
             _steamPath = steamPath;
             _conflictMode = conflictMode;

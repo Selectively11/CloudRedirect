@@ -8,7 +8,7 @@ namespace CloudRedirect.Services.Patching
 {
     internal static class Fingerprint
     {
-        public static string FindCachePath(string steamPath, bool verbose = true, Action<string> log = null)
+        public static string? FindCachePath(string steamPath, bool verbose = true, Action<string>? log = null)
         {
             var cacheDir = Path.Combine(steamPath, "appcache", "httpcache", "3b");
             if (!Directory.Exists(cacheDir))
@@ -20,10 +20,21 @@ namespace CloudRedirect.Services.Patching
                 var path = Path.Combine(cacheDir, fp);
                 if (File.Exists(path))
                 {
-                    if (verbose) log?.Invoke($"Cache: {path}");
-                    return path;
+                    // Cloudflare can serve a 403 HTML page that Steam caches at the
+                    // expected fingerprint slot; reject anything that doesn't decrypt
+                    // and zlib-inflate to an MZ-prefixed payload, otherwise the
+                    // patcher hits "input data is not a complete block" downstream.
+                    if (ValidatePayloadCache(path))
+                    {
+                        if (verbose) log?.Invoke($"Cache: {path}");
+                        return path;
+                    }
+                    if (verbose) log?.Invoke($"Cache at {path} failed validation, scanning..");
                 }
-                if (verbose) log?.Invoke($"Fingerprint {fp} computed but no cache file there");
+                else if (verbose)
+                {
+                    log?.Invoke($"Fingerprint {fp} computed but no cache file there");
+                }
             }
             catch (Exception ex)
             {
@@ -56,6 +67,10 @@ namespace CloudRedirect.Services.Patching
             var fp = Compute();
             return Path.Combine(cacheDir, fp);
         }
+
+        public static string ComputeFingerprint() => Compute();
+
+        public static bool ValidatePayloadFile(string path) => ValidatePayloadCache(path);
 
         /// <summary>
         /// Validates a candidate cache file by attempting AES-CBC decrypt,

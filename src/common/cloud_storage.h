@@ -1,0 +1,111 @@
+#pragma once
+#include "cloud_provider.h"
+#include "cloud_work_queue.h"
+#include "local_storage.h"
+#include "local_metadata_store.h"
+#include "manifest_store.h"
+#include "token_store.h"
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+#include <atomic>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace CloudStorage {
+
+void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider);
+void Shutdown();
+bool IsCloudActive();
+
+bool StoreBlob(uint32_t accountId, uint32_t appId,
+               const std::string& filename,
+               const uint8_t* data, size_t len);
+
+bool StoreBlobStaged(uint32_t accountId, uint32_t appId, uint64_t batchId,
+                     const std::string& filename,
+                     const uint8_t* data, size_t len);
+
+// Cloud-first when active; returns empty if not found.
+// Sets *found=true if the blob exists (even if 0 bytes).
+std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
+                                  const std::string& filename,
+                                  bool* found = nullptr);
+
+bool DeleteBlob(uint32_t accountId, uint32_t appId,
+                const std::string& filename,
+                bool keepTombstoneOnSuccess = false);
+bool DeleteBlobStaged(uint32_t accountId, uint32_t appId,
+                      const std::string& filename);
+
+// CN must not advance unless this succeeds.
+bool PromoteStagedBatchForCommit(uint32_t accountId, uint32_t appId,
+                                 uint64_t batchId,
+                                 const std::vector<std::string>& uploads,
+                                 const std::vector<std::string>& deletes);
+
+std::vector<uint64_t> ListStagedBatchIds(uint32_t accountId, uint32_t appId);
+bool RemoveStagedBatch(uint32_t accountId, uint32_t appId, uint64_t batchId);
+
+ICloudProvider::ExistsStatus CheckBlobExists(uint32_t accountId, uint32_t appId,
+                                             const std::string& filename);
+
+// Local-only mode returns true with an empty set.
+bool ListRemoteBlobNames(uint32_t accountId, uint32_t appId,
+                         std::unordered_set<std::string>& outNames);
+
+bool HasLocalBlob(uint32_t accountId, uint32_t appId,
+                  const std::string& filename);
+
+// ============================================================================
+
+// Returns 0 if in sync or error; >0 = cloud CN when cloud is newer.
+uint64_t FetchCloudCN(uint32_t accountId, uint32_t appId);
+
+bool SyncFromCloud(uint32_t accountId, uint32_t appId);
+std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
+
+void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
+bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// Drain + sync push CN; on failure enqueues async retry + drains again.
+bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// Fire-and-forget CommitCNWithRetry on a detached thread.
+void CommitCNAsync(uint32_t accountId, uint32_t appId, uint64_t cn);
+
+// Pauses background uploads so foreground SyncFromCloud doesn't queue behind sweeps.
+struct ForegroundSyncScope {
+    ForegroundSyncScope();
+    ~ForegroundSyncScope();
+    ForegroundSyncScope(const ForegroundSyncScope&)            = delete;
+    ForegroundSyncScope& operator=(const ForegroundSyncScope&) = delete;
+};
+
+void NotifyAuthFailure(const std::string& providerName);
+
+// --- internal: shared with manifest_store.cpp and token_store.cpp ---
+struct InflightSyncScope {
+    bool entered = false;
+    InflightSyncScope();
+    ~InflightSyncScope();
+    explicit operator bool() const { return entered; }
+    InflightSyncScope(const InflightSyncScope&) = delete;
+    InflightSyncScope& operator=(const InflightSyncScope&) = delete;
+};
+std::string CloudMetadataPath(uint32_t accountId, uint32_t appId, const std::string& name);
+bool DownloadCloudMetadataWithLegacyFallback(uint32_t accountId, uint32_t appId,
+    const char* canonicalName, const char* legacyName,
+    std::vector<uint8_t>& outData, bool* outUsedLegacy = nullptr);
+bool UploadCloudMetadataText(uint32_t accountId, uint32_t appId,
+    const char* name, const std::string& content);
+void RemoveCloudMetadataIfPresent(uint32_t accountId, uint32_t appId, const char* name);
+void RemoveLegacyCloudMetadataIfCanonicalExists(uint32_t accountId, uint32_t appId,
+    const char* canonicalName, const char* legacyName);
+std::string CanonicalizeInternalMetadataName(std::string_view filename);
+bool ParseCloudBlobPath(const std::string& cloudPath,
+    uint32_t& accountId, uint32_t& appId, std::string& filename);
+std::shared_ptr<std::mutex> AcquireAppSyncMutex(uint32_t accountId, uint32_t appId);
+
+} // namespace CloudStorage

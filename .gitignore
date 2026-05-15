@@ -1,25 +1,7 @@
-# C++ build output
 build/
-
-# Python
-__pycache__/
-*.pyc
-
-# .NET build output
+build-*/
 ui/bin/
 ui/obj/
-ui/CloudRedirect.Tests/bin/
-ui/CloudRedirect.Tests/obj/
-
-# Legacy / dev-only (not part of public build)
-stfixer/
-tools/
-tests/
-scripts/
-
-# Debug artifacts
-cleanup_scan.log
-
-# Dev-only scripts (not shipped)
-check_state.py
-decode_bkv.py
+ui-linux/build/
+flatpak/.flatpak-builder/
+flatpak/build-dir/

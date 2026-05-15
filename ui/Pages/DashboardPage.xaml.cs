@@ -188,7 +188,7 @@ public partial class DashboardPage : Page
 
         try
         {
-            // Ask Steam to shut down gracefully
+            // Ask Steam to shut down correctly
             Process.Start(new ProcessStartInfo
             {
                 FileName = steamExe,

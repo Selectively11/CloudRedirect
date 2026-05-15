@@ -74,7 +74,6 @@ public sealed class OAuthService : IDisposable
 
     // OneDrive (using rclone's public client ID - our Azure AD app has redirect URI issues)
     private const string OneDriveClientId = "b15665d9-eda6-4092-8539-0eec376afd59";
-    private const string OneDriveClientSecret = "qtyfaBBYA403=unZUP40~_#";
     private const string OneDriveScope = "Files.ReadWrite offline_access";
     private const string OneDriveAuthUrl =
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
@@ -85,8 +84,8 @@ public sealed class OAuthService : IDisposable
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
-    private string? _oauthState;      // CSRF protection (Google Drive only)
-    private string? _codeVerifier;    // PKCE code verifier (Google Drive only)
+    private string? _oauthState;      // CSRF protection
+    private string? _codeVerifier;    // PKCE code verifier
     private string? _currentProvider; // Track current provider for state validation
 
     /// <summary>
@@ -134,6 +133,10 @@ public sealed class OAuthService : IDisposable
             {
                 log($"ERROR: Failed to start HTTP listener on port {port}: {ex.Message}");
                 log("(Port 53682 may be in use by another application)");
+                _listener.Close();
+                _listener = null;
+                _cts.Dispose();
+                _cts = null;
                 return false;
             }
         }
@@ -166,6 +169,10 @@ public sealed class OAuthService : IDisposable
                 catch (HttpListenerException ex)
                 {
                     log($"ERROR: Failed to start HTTP listener after 5 attempts: {ex.Message}");
+                    _listener.Close();
+                    _listener = null;
+                    _cts.Dispose();
+                    _cts = null;
                     return false;
                 }
             }
@@ -175,7 +182,7 @@ public sealed class OAuthService : IDisposable
             ? $"http://localhost:{port}/" 
             : $"http://localhost:{port}/callback";
 
-        // Generate CSRF state and PKCE code verifier (only used for Google Drive)
+        // Generate CSRF state and PKCE code verifier
         _oauthState = GenerateRandomString(32);
         _codeVerifier = GenerateRandomString(64);
         string codeChallenge = ComputeCodeChallenge(_codeVerifier);
@@ -184,7 +191,7 @@ public sealed class OAuthService : IDisposable
         string authUrl = provider switch
         {
             "gdrive" => BuildGDriveAuthUrl(redirectUriFinal, _oauthState, codeChallenge),
-            "onedrive" => BuildOneDriveAuthUrl(redirectUriFinal),
+            "onedrive" => BuildOneDriveAuthUrl(redirectUriFinal, _oauthState, codeChallenge),
             _ => throw new ArgumentException($"Unknown provider: {provider}")
         };
 
@@ -237,7 +244,7 @@ public sealed class OAuthService : IDisposable
             tokens = provider switch
             {
                 "gdrive" => await ExchangeGDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, cancel),
-                "onedrive" => await ExchangeOneDriveCodeAsync(code, redirectUriFinal, cancel),
+                "onedrive" => await ExchangeOneDriveCodeAsync(code, redirectUriFinal, _codeVerifier!, cancel),
                 _ => null
             };
         }
@@ -331,15 +338,17 @@ public sealed class OAuthService : IDisposable
                $"&code_challenge_method=S256";
     }
 
-    private static string BuildOneDriveAuthUrl(string redirectUri)
+    private static string BuildOneDriveAuthUrl(string redirectUri, string state, string codeChallenge)
     {
-        // OneDrive with rclone's client ID: no PKCE, no state
         return $"{OneDriveAuthUrl}" +
                $"?client_id={Uri.EscapeDataString(OneDriveClientId)}" +
                $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
                $"&response_type=code" +
                $"&scope={Uri.EscapeDataString(OneDriveScope)}" +
-               $"&prompt=consent";
+               $"&prompt=consent" +
+               $"&state={Uri.EscapeDataString(state)}" +
+               $"&code_challenge={Uri.EscapeDataString(codeChallenge)}" +
+               $"&code_challenge_method=S256";
     }
 
     private async Task<string?> WaitForCallbackAsync(CancellationToken cancel)
@@ -366,8 +375,8 @@ public sealed class OAuthService : IDisposable
                 continue;
             }
 
-            // Validate CSRF state parameter (Google Drive only - OneDrive doesn't use state)
-            if (_currentProvider != "onedrive" && _oauthState != null && state != _oauthState)
+            // Validate CSRF state parameter
+            if (_oauthState != null && state != _oauthState)
             {
                 error = "state_mismatch";
                 code = null;
@@ -428,17 +437,16 @@ public sealed class OAuthService : IDisposable
     }
 
     private async Task<TokenResult?> ExchangeOneDriveCodeAsync(
-        string code, string redirectUri, CancellationToken cancel)
+        string code, string redirectUri, string codeVerifier, CancellationToken cancel)
     {
-        // OneDrive with rclone's client ID: requires client_secret, no PKCE
         var body = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["code"] = code,
             ["client_id"] = OneDriveClientId,
-            ["client_secret"] = OneDriveClientSecret,
             ["redirect_uri"] = redirectUri,
             ["grant_type"] = "authorization_code",
-            ["scope"] = OneDriveScope
+            ["scope"] = OneDriveScope,
+            ["code_verifier"] = codeVerifier
         });
 
         var resp = await _http.PostAsync(OneDriveTokenUrl, body, cancel);

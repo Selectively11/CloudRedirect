@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Cloud shape -->
+  <path d="M52 28c0-8.8-7.2-16-16-16-6.6 0-12.3 4-14.7 9.7C15.8 22.5 10 28.5 10 36c0 7.7 6.3 14 14 14h28c6.6 0 12-5.4 12-12 0-6.2-4.7-11.3-10.7-11.9C53.7 30.4 52 29 52 28z" fill="#4a90d9"/>
+  <!-- Redirect arrow -->
+  <path d="M24 32h16M36 26l6 6-6 6" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>

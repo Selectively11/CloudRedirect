@@ -1,6 +1,6 @@
 # CloudRedirect
 
-""Steam Cloud"" for 'lua' games + STFixer Patches + other cool stuff.
+""Steam Cloud"" for 'lua' games.
 
 > ****This software is experimental and under active development.**** The underlying techniques are fairly insane. What this software tries to do is nuts to attempt. This software could damage your save files and probably will! It could overwrite your saves, cause weird conflicts, make your saves disappear, make you cry. Back up any saves you care about before using this software.
 

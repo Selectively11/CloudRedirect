@@ -1,0 +1,48 @@
+#pragma once
+#include "cloud_rpc_utils.h"
+#include "protobuf.h"
+#include <vector>
+
+namespace CloudIntercept {
+
+// Cloud RPC method names
+inline constexpr const char* RPC_GET_CHANGELIST     = "Cloud.GetAppFileChangelist#1";
+inline constexpr const char* RPC_BEGIN_UPLOAD        = "Cloud.ClientBeginFileUpload#1";
+inline constexpr const char* RPC_COMMIT_UPLOAD       = "Cloud.ClientCommitFileUpload#1";
+inline constexpr const char* RPC_FILE_DOWNLOAD       = "Cloud.ClientFileDownload#1";
+inline constexpr const char* RPC_DELETE_FILE         = "Cloud.ClientDeleteFile#1";
+inline constexpr const char* RPC_BEGIN_BATCH         = "Cloud.BeginAppUploadBatch#1";
+inline constexpr const char* RPC_COMPLETE_BATCH      = "Cloud.CompleteAppUploadBatchBlocking#1";
+inline constexpr const char* RPC_QUOTA_USAGE         = "Cloud.ClientGetAppQuotaUsage#1";
+inline constexpr const char* RPC_LAUNCH_INTENT       = "Cloud.SignalAppLaunchIntent#1";
+inline constexpr const char* RPC_SUSPEND_SESSION     = "Cloud.SuspendAppSession#1";
+inline constexpr const char* RPC_RESUME_SESSION      = "Cloud.ResumeAppSession#1";
+inline constexpr const char* RPC_EXIT_SYNC           = "Cloud.SignalAppExitSyncDone#1";
+inline constexpr const char* RPC_CONFLICT            = "Cloud.ClientConflictResolution#1";
+inline constexpr const char* RPC_SYNC_STATS          = "ClientMetrics.ClientCloudAppSyncStats#1";
+inline constexpr const char* RPC_TRANSFER_REPORT     = "Cloud.ExternalStorageTransferReport#1";
+
+// ExtractAppId, BuildBeginBatchResponseBody, ParseCompleteBatchRequest,
+// and CompleteBatchRequestInfo have moved to cloud_rpc_utils.h (namespace CloudRpcUtils).
+// Use CloudRpcUtils::ExtractAppId(...) etc.
+
+PB::Writer HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleSuspendSession(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleResumeSession(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleQuotaUsage(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleBeginFileUpload(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqBody);
+PB::Writer HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBody);
+
+void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
+void ShutdownRpcHandlers();
+
+// True if the UserGameStats blob has any non-zero stat/achievement data.
+// Empty stubs and unparseable input return false.
+bool StatsBlobHasUnlocks(const uint8_t* data, size_t len);
+
+} // namespace CloudIntercept

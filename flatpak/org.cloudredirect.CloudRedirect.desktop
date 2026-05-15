@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CloudRedirect
+GenericName=Cloud Save Manager
+Comment=Steam Cloud redirection magic for Linux!
+Exec=cloud-redirect-ui-wrapper
+Icon=org.cloudredirect.CloudRedirect
+Terminal=false
+Categories=Game;Utility;
+Keywords=steam;cloud;save;backup;sync;
+StartupNotify=true

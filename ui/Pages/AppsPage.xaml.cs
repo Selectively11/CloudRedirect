@@ -19,13 +19,13 @@ public partial class AppsPage : Page
     private bool _hasDeletedThisSession;
     private bool _hasPrunedThisSession;
     private bool _backupsLoaded;
-    private List<BackupInfo> _backups;
-    private string _steamPath;
+    private List<BackupInfo>? _backups;
+    private string? _steamPath;
     private readonly SteamStoreClient _storeClient = SteamStoreClient.Shared;
     private Dictionary<uint, StoreAppInfo> _backupAppNames = new();
 
     // Full lists for search filtering
-    private List<AppInfo> _allApps;
+    private List<AppInfo>? _allApps;
 
     public AppsPage()
     {
@@ -78,7 +78,9 @@ public partial class AppsPage : Page
                         if (appId == "0") continue;
                         var info = new AppInfo { AppId = appId, AccountId = accountId };
 
-                        var cnPath = Path.Combine(appDir, "cn.dat");
+                        var cnPath = Path.Combine(appDir, "cn.cloudredirect");
+                        if (!File.Exists(cnPath))
+                            cnPath = Path.Combine(appDir, "cn.dat"); // legacy fallback
                         try
                         {
                             if (File.Exists(cnPath))
@@ -104,7 +106,8 @@ public partial class AppsPage : Page
                         {
                             var name = Path.GetFileName(f);
                             // Skip metadata files -- only count save data
-                            if (name is "cn.dat" or "root_token.dat" or "file_tokens.dat") continue;
+                            if (name is "cn.dat" or "cn.cloudredirect" or "root_token.dat" or "file_tokens.dat"
+                                or "manifest.cloudredirect") continue;
                             fileCount++;
                             totalBytes += new FileInfo(f).Length;
                         }
@@ -133,7 +136,7 @@ public partial class AppsPage : Page
         if (apps == null || apps.Count == 0)
         {
             _allApps = apps;
-            AppList.ItemsSource = apps;
+            AppList.ItemsSource = apps ?? new List<AppInfo>();
             return;
         }
 
@@ -375,7 +378,7 @@ public partial class AppsPage : Page
             // 2. Delete cloud storage (no local backup possible for this)
             if (providerName != null)
             {
-                using var client = new CloudProviderClient();
+                var client = new CloudProviderClient();
                 var result = await client.DeleteAppDataAsync(app.AccountId, app.AppId);
                 if (!result.Success)
                     errors.Add($"Cloud ({providerName}): {result.Error}");
@@ -522,7 +525,7 @@ public partial class AppsPage : Page
 
             // Reuse a single CloudProviderClient across all per-app
             // listings -- one warm HttpClient, one auth refresh.
-            using var client = new CloudProviderClient();
+            var client = new CloudProviderClient();
             var svc = new OrphanBlobService(client, steamPath);
 
             int scannedOk = 0;
@@ -647,7 +650,7 @@ public partial class AppsPage : Page
                 countdown);
             if (!confirmed) return;
 
-            using var client = new CloudProviderClient();
+            var client = new CloudProviderClient();
             var svc = new OrphanBlobService(client, steamPath);
 
             OrphanBlobService.PruneResult result;
@@ -966,14 +969,14 @@ public partial class AppsPage : Page
 
         try
         {
-            RevertResult result = null!;
+            RevertResult? result = null;
             await Task.Run(() =>
             {
                 var revert = new CloudCleanupRevert(_steamPath!, RevertConflictMode.Skip, _ => { });
                 result = revert.RestoreFromLog(backup.UndoLogPath, dryRun: false);
             });
 
-            string msg = S.Format("Apps_RestoredFormat", result.FilesRestored);
+            string msg = S.Format("Apps_RestoredFormat", result!.FilesRestored);
             if (result.RemotecachesRestored > 0)
                 msg += S.Format("Apps_RestoredRemotecacheFormat", result.RemotecachesRestored);
             if (result.FilesSkipped > 0)

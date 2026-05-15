@@ -1,5 +1,3 @@
-using System.Net.Http;
-
 namespace CloudRedirect.Services;
 
 /// <summary>
@@ -7,9 +5,8 @@ namespace CloudRedirect.Services;
 /// provider via UiCloudProviderFactory, forwards calls. Per-provider logic
 /// lives in CloudRedirect.Services.Providers.
 /// </summary>
-internal sealed class CloudProviderClient : IDisposable
+internal sealed class CloudProviderClient
 {
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(30) };
     private readonly Action<string>? _log;
 
     public CloudProviderClient(Action<string>? log = null)
@@ -26,7 +23,7 @@ internal sealed class CloudProviderClient : IDisposable
     public async Task<DeleteResult> DeleteAppDataAsync(string accountId, string appId, CancellationToken cancel = default)
     {
         var config = SteamDetector.ReadConfig();
-        var provider = UiCloudProviderFactory.TryResolve(config, _http, _log);
+        var provider = UiCloudProviderFactory.TryResolve(config, _log);
         if (provider == null)
             return new DeleteResult(true, 0, null); // no config / local-only / unrecognized -> nothing to do
 
@@ -68,7 +65,7 @@ internal sealed class CloudProviderClient : IDisposable
     public async Task<ListBlobsResult> ListAppBlobsAsync(string accountId, string appId, CancellationToken cancel = default)
     {
         var config = SteamDetector.ReadConfig();
-        var provider = UiCloudProviderFactory.TryResolve(config, _http, _log);
+        var provider = UiCloudProviderFactory.TryResolve(config, _log);
         if (provider == null)
             return new ListBlobsResult(Array.Empty<string>(), true, null);
 
@@ -106,7 +103,7 @@ internal sealed class CloudProviderClient : IDisposable
         }
 
         var config = SteamDetector.ReadConfig();
-        var provider = UiCloudProviderFactory.TryResolve(config, _http, _log);
+        var provider = UiCloudProviderFactory.TryResolve(config, _log);
         if (provider == null)
         {
             // No cloud configured; rejected names still surface as failed.
@@ -169,9 +166,4 @@ internal sealed class CloudProviderClient : IDisposable
         "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     };
-
-    public void Dispose()
-    {
-        _http.Dispose();
-    }
 }

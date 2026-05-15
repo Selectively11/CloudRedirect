@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -99,15 +100,13 @@ internal static class AppUpdater
 
             if (!foundCandidate || remoteVersion == null) return null;
 
-            if (remoteVersion <= localVersion)
-                return new CheckResult { UpdateAvailable = false };
-
-            // Find the .exe asset
+            // Find the .exe asset and hash file
             if (!root.TryGetProperty("assets", out var assets))
                 return null;
 
             string? downloadUrl = null;
             string? assetName = null;
+            string? sha256Url = null;
             foreach (var asset in assets.EnumerateArray())
             {
                 var name = asset.GetProperty("name").GetString() ?? "";
@@ -115,11 +114,38 @@ internal static class AppUpdater
                 {
                     downloadUrl = asset.GetProperty("browser_download_url").GetString();
                     assetName = name;
-                    break;
+                }
+                else if (name == "CloudRedirect.exe.sha256")
+                {
+                    sha256Url = asset.GetProperty("browser_download_url").GetString();
                 }
             }
 
             if (downloadUrl == null) return null;
+
+            // Compare local exe hash against published hash; skip if unchanged.
+            if (sha256Url != null)
+            {
+                try
+                {
+                    var remoteHash = (await Http.GetStringAsync(sha256Url)).Trim();
+                    if (remoteHash.Length == 64)
+                    {
+                        var localExePath = Environment.ProcessPath;
+                        if (!string.IsNullOrEmpty(localExePath) && File.Exists(localExePath))
+                        {
+                            var localHash = ComputeFileSHA256(localExePath);
+                            if (string.Equals(localHash, remoteHash, StringComparison.OrdinalIgnoreCase))
+                                return new CheckResult { UpdateAvailable = false };
+                        }
+                    }
+                }
+                catch { /* hash check failed, fall through to version comparison */ }
+            }
+
+            // No hash file available, fall back to version comparison
+            if (remoteVersion <= localVersion)
+                return new CheckResult { UpdateAvailable = false };
 
             var body = root.TryGetProperty("body", out var bodyProp)
                 ? bodyProp.GetString() ?? ""
@@ -138,6 +164,14 @@ internal static class AppUpdater
         {
             return null;
         }
+    }
+
+    private static string ComputeFileSHA256(string path)
+    {
+        using var sha = SHA256.Create();
+        using var stream = File.OpenRead(path);
+        var hash = sha.ComputeHash(stream);
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     // Hard caps on a downloaded update payload. Framework-dependent single-file is ~8 MB;

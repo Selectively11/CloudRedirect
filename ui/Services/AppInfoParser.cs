@@ -30,7 +30,7 @@ namespace CloudRedirect.Services
         /// Returns null for "gameinstall" if gameInstallDir is not provided,
         /// and null for empty/default roots (those use userdata/remote/).
         /// </summary>
-        public static string RootToFilesystemPath(string root, string gameInstallDir = null)
+        public static string? RootToFilesystemPath(string root, string? gameInstallDir = null)
         {
             if (string.IsNullOrEmpty(root)) return null; // default root = userdata/remote/
 
@@ -52,7 +52,7 @@ namespace CloudRedirect.Services
         /// Searches all Steam library folders for the app's manifest.
         /// Returns null if not found.
         /// </summary>
-        public static string FindGameInstallDir(string steamPath, uint appId)
+        public static string? FindGameInstallDir(string steamPath, uint appId)
         {
             // Check all library folders from libraryfolders.vdf
             var libraryPaths = GetLibraryFolderPaths(steamPath);
@@ -104,7 +104,7 @@ namespace CloudRedirect.Services
         /// <summary>
         /// Reads the "installdir" value from a Steam appmanifest ACF file.
         /// </summary>
-        private static string ParseInstallDirFromManifest(string manifestPath)
+        private static string? ParseInstallDirFromManifest(string manifestPath)
         {
             try
             {
@@ -203,7 +203,7 @@ namespace CloudRedirect.Services
         /// <summary>
         /// Parse appinfo.vdf for a single specific app ID.
         /// </summary>
-        public static AppCloudConfig ParseSingle(string appInfoPath, uint targetAppId)
+        public static AppCloudConfig? ParseSingle(string appInfoPath, uint targetAppId)
         {
             using var fs = File.OpenRead(appInfoPath);
             using var reader = new BinaryReader(fs, Encoding.UTF8, leaveOpen: true);
@@ -294,7 +294,7 @@ namespace CloudRedirect.Services
             return Encoding.UTF8.GetString(stackBuf[..len]);
         }
 
-        private static AppCloudConfig ParseAppKV(uint appId, ReadOnlySpan<byte> kvData, List<string> stringTable)
+        private static AppCloudConfig? ParseAppKV(uint appId, ReadOnlySpan<byte> kvData, List<string> stringTable)
         {
             int offset = 0;
             var tree = ParseBinaryKV(kvData, ref offset, stringTable);
@@ -346,7 +346,7 @@ namespace CloudRedirect.Services
             public List<KVNode>? Children { get; set; }
         }
 
-        private static KVNode FindChild(List<KVNode> nodes, string key)
+        private static KVNode? FindChild(List<KVNode>? nodes, string key)
         {
             if (nodes == null) return null;
             foreach (var node in nodes)

@@ -90,7 +90,7 @@ namespace CloudRedirect.Services.Patching
         long _cachedPayloadSize;
         DateTime _cachedPayloadTime;
 
-        public Patcher(string steamPath, Action<string> log = null)
+        public Patcher(string steamPath, Action<string>? log = null)
         {
             _steamPath = steamPath;
             _log = log;
@@ -453,7 +453,7 @@ namespace CloudRedirect.Services.Patching
                     return result.Fail(plErr);
 
                 var resolvedSetup = ResolveSetupPatchOffsets(payload);
-                if (resolvedSetup == null)
+                if (resolvedSetup == null || resolvedSetup.Length == 0)
                     return result.Fail("Could not identify activation patch locations in payload - unsupported version?");
 
                 var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolvedSetup);
@@ -768,24 +768,17 @@ namespace CloudRedirect.Services.Patching
         {
             try
             {
-                var cachePath = Fingerprint.GetExpectedCachePath(_steamPath);
-                var dir = Path.GetDirectoryName(cachePath);
-                if (!Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                using var stream = typeof(Patcher).Assembly
-                    .GetManifestResourceStream("payload.cache");
-                if (stream == null)
+                var version = SteamDetector.GetSteamVersion(_steamPath);
+                if (version == null)
                 {
-                    Log("  Embedded payload not found in assembly");
+                    Log("  Embedded payload deploy failed: could not determine Steam version");
                     return null;
                 }
 
-                using var fs = new FileStream(cachePath, FileMode.Create, FileAccess.Write);
-                stream.CopyTo(fs);
+                if (!EmbeddedBundledPayload.TryInstall(_steamPath, version.Value, Log))
+                    return null;
 
-                Log($"  Deployed to {cachePath}");
-                return cachePath;
+                return Fingerprint.GetExpectedCachePath(_steamPath);
             }
             catch (Exception ex)
             {

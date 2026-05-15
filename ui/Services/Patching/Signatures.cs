@@ -47,7 +47,7 @@ namespace CloudRedirect.Services.Patching
         /// Resolve a PatternPatch to a file offset. Returns the patch site offset, or -1.
         /// </summary>
         public static int ResolvePatternPatch(byte[] data, PatternPatch patch,
-            int sectionStart, int sectionEnd, int[] resolvedOffsets = null)
+            int sectionStart, int sectionEnd, int[]? resolvedOffsets = null)
         {
             int scanStart = sectionStart;
             int scanEnd = sectionEnd;
@@ -93,8 +93,8 @@ namespace CloudRedirect.Services.Patching
         /// earlier resolved offsets via RelativeToPatchIndex. Returns resolved
         /// PatchEntry[] or null if any required patch fails.
         /// </summary>
-        public static PatchEntry[] ResolvePatternGroup(byte[] data, PatternPatch[] patches,
-            int textStart, int textEnd, int obfStart, int obfEnd, Action<string> log = null)
+        public static PatchEntry[]? ResolvePatternGroup(byte[] data, PatternPatch[] patches,
+            int textStart, int textEnd, int obfStart, int obfEnd, Action<string>? log = null)
         {
             var result = new PatchEntry[patches.Length];
             var offsets = new int[patches.Length];
@@ -317,40 +317,58 @@ namespace CloudRedirect.Services.Patching
             {
                 Name = "P4 (activation flag)",
                 Pattern = new byte[] {
-                    0x4D, 0x85, 0xC0,                                     // test r8, r8
-                    0xE9, 0x00, 0x00, 0x00, 0x00,                         // jmp bridge
-                    0x0F, 0x84, 0x00, 0x00, 0x00, 0x00,                   // jz near
-                    0xE8, 0x00, 0x00, 0x00, 0x00,                         // call strcmp_wrapper
-                    0x85, 0xC0,                                           // test eax, eax
-                    0xE9, 0x00, 0x00, 0x00, 0x00,                         // jmp bridge
-                    0x0F, 0x85, 0x00, 0x00, 0x00, 0x00,                   // jnz near
-                    0xC6, 0x05, 0x00, 0x00, 0x00, 0x00, 0x01,             // mov [flag], 1
-                    0xE9, 0x00, 0x00, 0x00, 0x00,                         // jmp bridge
-                    0xE9, 0x00, 0x00, 0x00, 0x00,                         // jmp merge
-                    0xC6, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00              // PATCH: mov [flag], 0
+                    0x4D, 0x85, 0xC0 // test r8, r8
                 },
                 Mask = new byte[] {
-                    0xFF, 0xFF, 0xFF,                                     // test r8, r8
-                    0xFF, 0x00, 0x00, 0x00, 0x00,                         // jmp bridge
-                    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,                   // jz near
-                    0xFF, 0x00, 0x00, 0x00, 0x00,                         // call
-                    0xFF, 0xFF,                                           // test eax, eax
-                    0xFF, 0x00, 0x00, 0x00, 0x00,                         // jmp bridge
-                    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,                   // jnz near
-                    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF,             // mov [flag], 1
-                    0xFF, 0x00, 0x00, 0x00, 0x00,                         // jmp bridge
-                    0xFF, 0x00, 0x00, 0x00, 0x00,                         // jmp merge
-                    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00              // PATCH SITE
+                    0xFF, 0xFF, 0xFF
                 },
-                PatchOffset = 49,
+                PatchOffset = 0,
                 Original    = new byte[] { 0xC6, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00 },
                 Replacement = new byte[] { 0xC6, 0x05, 0x00, 0x00, 0x00, 0x00, 0x01 },
                 Region = ScanRegion.Obfuscated,
                 WildcardStart = 2, WildcardLen = 4,
-                Validator = (data, hit) =>
+                PatchSiteResolver = (data, hit) =>
                 {
-                    byte val = data[hit + 55];
-                    return val == 0x00 || val == 0x01;
+                    static bool HasBytes(byte[] bytes, int pos, params byte[] expected)
+                    {
+                        if (pos < 0 || pos + expected.Length > bytes.Length) return false;
+                        for (int i = 0; i < expected.Length; i++)
+                            if (bytes[pos + i] != expected[i]) return false;
+                        return true;
+                    }
+
+                    static int SkipOptionalBridge(byte[] bytes, int pos)
+                    {
+                        return HasBytes(bytes, pos, 0xE9) ? pos + 5 : pos;
+                    }
+
+                    int pos = hit + 3;
+                    pos = SkipOptionalBridge(data, pos);
+                    if (!HasBytes(data, pos, 0x0F, 0x84)) return -1;
+                    pos += 6;
+
+                    if (!HasBytes(data, pos, 0xE8)) return -1;
+                    pos += 5;
+
+                    if (!HasBytes(data, pos, 0x85, 0xC0)) return -1;
+                    pos += 2;
+
+                    pos = SkipOptionalBridge(data, pos);
+                    if (!HasBytes(data, pos, 0x0F, 0x85)) return -1;
+                    pos += 6;
+
+                    if (!HasBytes(data, pos, 0xC6, 0x05)) return -1;
+                    if (pos + 6 >= data.Length || data[pos + 6] != 0x01) return -1;
+                    pos += 7;
+
+                    pos = SkipOptionalBridge(data, pos);
+                    if (!HasBytes(data, pos, 0xE9)) return -1;
+                    pos += 5;
+
+                    if (!HasBytes(data, pos, 0xC6, 0x05)) return -1;
+                    if (pos + 6 >= data.Length) return -1;
+                    byte val = data[pos + 6];
+                    return (val == 0x00 || val == 0x01) ? pos : -1;
                 },
             },
             // P5: skip GetCookie retry. Anchor: paired movq reg,xmm (66 48 0F 7E C7/CE);

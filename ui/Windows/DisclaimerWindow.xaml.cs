@@ -49,7 +49,7 @@ public partial class DisclaimerWindow : FluentWindow
 
         if (_remaining <= 0)
         {
-            _timer.Stop();
+            _timer?.Stop();
             AcceptButton.IsEnabled = true;
             CountdownText.Text = S.Get("Disclaimer_Warned");
         }

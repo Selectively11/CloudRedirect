@@ -13,7 +13,7 @@ namespace CloudRedirect.Pages;
 
 public partial class SetupPage : Page
 {
-    private string _steamPath;
+    private string? _steamPath;
     private readonly StringBuilder _logBuffer = new();
     private readonly object _logLock = new();
     private bool _isRunning;
@@ -45,7 +45,7 @@ public partial class SetupPage : Page
         };
     }
 
-    private Wpf.Ui.Controls.NavigationView FindNavigationView()
+    private Wpf.Ui.Controls.NavigationView? FindNavigationView()
     {
         var window = Window.GetWindow(this);
         if (window is MainWindow mw)
@@ -146,7 +146,7 @@ public partial class SetupPage : Page
 
         await Task.Run(() =>
         {
-            var steamExe = Path.Combine(_steamPath, "steam.exe");
+            var steamExe = Path.Combine(_steamPath ?? "", "steam.exe");
             if (File.Exists(steamExe))
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
@@ -179,7 +179,7 @@ public partial class SetupPage : Page
     /// <summary>Starts Steam, waits up to 90s for the payload cache, then closes it.</summary>
     private async Task<bool> BootstrapSteamForPayload()
     {
-        var steamExe = Path.Combine(_steamPath, "steam.exe");
+        var steamExe = Path.Combine(_steamPath ?? "", "steam.exe");
         if (!File.Exists(steamExe))
         {
             Log("steam.exe not found");
@@ -355,9 +355,9 @@ public partial class SetupPage : Page
 
         if (snap.ProbeFailed)
         {
-            OfflineStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError);
-            StExeStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError);
-            PatchStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError);
+            OfflineStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError ?? "Unknown error");
+            StExeStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError ?? "Unknown error");
+            PatchStatusText.Text = S.Format("Setup_CouldNotCheck", snap.ProbeError ?? "Unknown error");
         }
         else
         {
@@ -547,7 +547,7 @@ public partial class SetupPage : Page
         {
             Directory.CreateDirectory(configDir);
 
-            var localCloudPath = Path.Combine(_steamPath, "localcloud");
+            var localCloudPath = Path.Combine(_steamPath ?? "", "localcloud");
             Directory.CreateDirectory(localCloudPath);
 
             var configPath = Path.Combine(configDir, "config.json");
@@ -636,10 +636,10 @@ public partial class SetupPage : Page
         Log("═══ Step 1/4: SteamTools Offline Setup ═══");
         try
         {
-            PatchResult result = null;
+            PatchResult? result = null;
             await Task.Run(() =>
             {
-                var patcher = new Patcher(_steamPath, Log);
+                var patcher = new Patcher(_steamPath!, Log);
                 result = patcher.ApplyOfflineSetup();
             });
 
@@ -695,10 +695,10 @@ public partial class SetupPage : Page
         Log("═══ Step 3/4: Cloud Redirect Patch ═══");
         try
         {
-            PatchResult patchResult = null;
+            PatchResult? patchResult = null;
             await Task.Run(() =>
             {
-                var patcher = new Patcher(_steamPath, Log);
+                var patcher = new Patcher(_steamPath!, Log);
                 patchResult = patcher.ApplyCloudRedirectNamespace();
             });
 
@@ -819,10 +819,10 @@ public partial class SetupPage : Page
 
         try
         {
-            PatchResult result = null;
+            PatchResult? result = null;
             await Task.Run(() =>
             {
-                var patcher = new Patcher(_steamPath, Log);
+                var patcher = new Patcher(_steamPath!, Log);
                 result = patcher.ApplyOfflineSetup();
             });
 
@@ -868,10 +868,10 @@ public partial class SetupPage : Page
 
         try
         {
-            PatchResult result = null;
+            PatchResult? result = null;
             await Task.Run(() =>
             {
-                var patcher = new Patcher(_steamPath, Log);
+                var patcher = new Patcher(_steamPath!, Log);
                 result = patcher.RevertOfflineSetup();
             });
 
