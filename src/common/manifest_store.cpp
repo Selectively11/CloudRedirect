@@ -331,19 +331,25 @@ bool PublishManifestDeltaForCommit(uint32_t accountId, uint32_t appId,
     }
 
     for (const auto& filename : deletes)  manifest.erase(filename);
+    size_t skippedUploads = 0;
     for (const auto& filename : uploads) {
         if (CloudIntercept::IsReservedBlobFilename(filename)) continue;
         auto entry = LocalStorage::GetFileEntry(accountId, appId, filename);
         if (!entry.has_value()) {
-            LOG("[ManifestStore] PublishManifestDeltaForCommit app %u: missing local entry for %s",
+            LOG("[ManifestStore] PublishManifestDeltaForCommit app %u: skipping missing local entry for %s",
                 appId, filename.c_str());
-            return false;
+            ++skippedUploads;
+            continue;
         }
         ManifestEntry me;
         me.sha = entry->sha;
         me.timestamp = entry->timestamp;
         me.size = entry->rawSize;
         manifest[filename] = std::move(me);
+    }
+    if (skippedUploads > 0) {
+        LOG("[ManifestStore] PublishManifestDeltaForCommit app %u: skipped %zu uploads with missing local entries",
+            appId, skippedUploads);
     }
 
     if (!SaveManifestImpl(accountId, appId, manifest, ManifestUploadMode::Sync)) {

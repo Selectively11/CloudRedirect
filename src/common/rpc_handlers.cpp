@@ -333,6 +333,7 @@ static bool TryCaptureRootToken(uint32_t accountId, uint32_t appId, const std::s
 // Record which root token a file was uploaded under.
 static bool RecordFileToken(uint32_t accountId, uint32_t appId, const std::string& cleanName, const std::string& token) {
     if (cleanName.empty()) return false;
+    if (IsReservedBlobFilename(cleanName)) return false;
     std::lock_guard<std::mutex> lock(g_fileTokensMutex);
     auto& fileTokens = g_fileTokens[MakeAppAccountKey(accountId, appId)];
     auto it = fileTokens.find(cleanName);
@@ -371,6 +372,7 @@ static void PersistFileTokens(uint32_t accountId, uint32_t appId) {
     auto diskTokens = CloudStorage::LoadFileTokens(accountId, appId);
     size_t mergedFromDisk = 0;
     for (auto& kv : diskTokens) {
+        if (IsReservedBlobFilename(kv.first)) continue;
         if (snapshot.find(kv.first) == snapshot.end()) {
             snapshot.emplace(kv.first, kv.second);
             ++mergedFromDisk;
