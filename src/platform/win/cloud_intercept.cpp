@@ -105,6 +105,10 @@ static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: globa
 static constexpr uint32_t ENGINE_OFF_USER_MAP        = 3296;  // CUtlSortedVector: user map
 // CCMInterface layout offsets
 static constexpr uint32_t CCM_OFF_CONN_CONTEXT       = 1688;  // connection context pointer
+static constexpr uint32_t CCM_OFF_STEAMID            = 500;   // m_SteamID (CSteamID, 8 bytes);
+                                                              // per IDA decompile of sub_1385B0060
+                                                              // (CCMInterface::SetSteamID):
+                                                              // `*(_QWORD *)(this + 500) = newSid`
 // CUtlSortedVector layout (at engine + ENGINE_OFF_USER_MAP)
 //   +0: QWORD array_base_ptr  (points to array of 16-byte entries)
 //  +16: DWORD count
@@ -248,7 +252,19 @@ static LONG WINAPI CrashExcFilter(PEXCEPTION_POINTERS pExc) {
 
 
 static uintptr_t g_payloadBase = 0;
-static uintptr_t g_steamClientBase = 0;           // steamclient64.dll base address
+// Base address used for all RVA-derived lookups. Under OpenSteamTool this is
+// diversion.dll's base, not steamclient64.dll's -- OST copies steamclient64.dll
+// to bin/diversion.dll, loads that copy, and Steam's live user/CM state lives
+// in diversion's separate mapping. See ResolveSteamClientOrDiversion below.
+static uintptr_t g_steamClientBase = 0;
+
+// Prefer diversion.dll's base when OpenSteamTool is loaded; fall back to
+// steamclient64.dll for the SteamTools / no-unlocker case.
+static uintptr_t ResolveSteamClientOrDiversion() {
+    if (HMODULE hDiv = GetModuleHandleA("diversion.dll")) return (uintptr_t)hDiv;
+    if (HMODULE hSC  = GetModuleHandleA("steamclient64.dll")) return (uintptr_t)hSC;
+    return 0;
+}
 static std::string g_steamPath;
 static RecvPktFn g_originalRecvPkt = nullptr;
 static void** g_recvPktSlot = nullptr;            // address of the patched RecvPkt vtable slot, for shutdown restore
@@ -363,12 +379,11 @@ static uintptr_t FindCurrentUser();
 
 static uintptr_t ResolveCurrentUserForRestore(const char* featureTag, uint32_t appId) {
     if (!g_steamClientBase) {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) {
-            LOG("[%s] In-memory restore skipped for app %u: steamclient64.dll not loaded", featureTag, appId);
+        g_steamClientBase = ResolveSteamClientOrDiversion();
+        if (!g_steamClientBase) {
+            LOG("[%s] In-memory restore skipped for app %u: neither diversion.dll nor steamclient64.dll loaded", featureTag, appId);
             return 0;
         }
-        g_steamClientBase = (uintptr_t)hSC;
     }
 
     uintptr_t userPtr = 0;
@@ -384,9 +399,8 @@ static uintptr_t ResolveCurrentUserForRestore(const char* featureTag, uint32_t a
 
 static uintptr_t FindCurrentUser() {
     if (!g_steamClientBase) {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) return 0;
-        g_steamClientBase = (uintptr_t)hSC;
+        g_steamClientBase = ResolveSteamClientOrDiversion();
+        if (!g_steamClientBase) return 0;
     }
 
     uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
@@ -756,6 +770,31 @@ static void TryFindCCMInterface() {
             CCM_OFF_CONN_CONTEXT, *(void**)((uintptr_t)ccm + CCM_OFF_CONN_CONTEXT));
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[CCM] WARNING: exception during extended diagnostics (code=0x%lX)", GetExceptionCode());
+    }
+
+    // Seed g_steamId from CCMInterface+m_SteamID. Required under OpenSteamTool:
+    // the per-packet capture path in OnSendPkt rarely fires (no ST code cave),
+    // and the vtable hook's request-header parse fails silently on OST's wire
+    // layout, so without this CR times out waiting for SteamID and falls back
+    // to safe-no-op for every Cloud RPC.
+    if (g_steamId.load() == 0) {
+        __try {
+            uint64_t sid = *(uint64_t*)((uintptr_t)ccm + CCM_OFF_STEAMID);
+            if (sid != 0) {
+                g_steamId.store(sid);
+                uint32_t aid = GetAccountId();
+                LOG("[CCM]   Captured SteamID from CCMInterface+%u: %llu (accountId=%u)",
+                    CCM_OFF_STEAMID, (unsigned long long)sid, aid);
+                HttpServer::SetAccountId(aid);
+                ScheduleStartupMetadataSync();
+            } else {
+                LOG("[CCM]   CCMInterface+%u m_SteamID is 0 (user not yet authenticated?)",
+                    CCM_OFF_STEAMID);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            LOG("[CCM]   SEH reading m_SteamID at CCMInterface+%u (code=0x%lX)",
+                CCM_OFF_STEAMID, GetExceptionCode());
+        }
     }
 
     // Install service-method vtable hook (Approach E) now that we have steamclient base
@@ -1315,6 +1354,12 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     if (strncmp(methodName, "Cloud.", 6) != 0) {
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
+
+    // Retry CCMInterface discovery on each Cloud RPC. Under OST the eager
+    // install at Init() runs before Steam has populated engine.userMap, so
+    // the one-shot TryFindCCMInterface in OnSendPkt misses. Idempotent fast
+    // path (atomic-load + return) once found.
+    TryFindCCMInterface();
 
     // Check if it's a Cloud RPC we handle (zero-alloc check via strcmp)
     // Request/response RPCs only - notifications go through slots 7/8
@@ -3621,6 +3666,29 @@ void Init(const std::string& steamPath) {
 
     if (HasNamespaceApps()) {
         LOG("[NS] Namespace mode ENABLED: %d self-unlocking of %d total lua(s)", selfUnlocking, totalLuas);
+
+        // Install the vtable hook eagerly. Under OpenSteamTool the CSteamEngine
+        // userMap that TryFindCCMInterface walks stays empty in steamclient64
+        // (Steam's live state is in diversion.dll instead), so the lazy install
+        // path in OnSendPkt never fires. InstallServiceMethodHook only needs
+        // g_steamClientBase + HasNamespaceApps and is idempotent, so calling
+        // it here is safe in both ST and OST modes.
+        if (!g_steamClientBase) {
+            g_steamClientBase = ResolveSteamClientOrDiversion();
+            if (g_steamClientBase) {
+                bool isDiv = (GetModuleHandleA("diversion.dll") == (HMODULE)g_steamClientBase);
+                LOG("[VtHook] Resolved %s @ %p as steamclient base%s",
+                    isDiv ? "diversion.dll" : "steamclient64.dll",
+                    (void*)g_steamClientBase,
+                    isDiv ? " (OST integration mode)" : "");
+            }
+        }
+        if (g_steamClientBase) {
+            LOG("[VtHook] Eager install from Init (no CCMInterface dependency)");
+            InstallServiceMethodHook();
+        } else {
+            LOG("[VtHook] Eager install skipped: neither diversion.dll nor steamclient64.dll loaded yet");
+        }
     } else {
         LOG("[NS] No self-unlocking Lua files found (%d total luas) -- DLL will only log Cloud RPCs", totalLuas);
     }
@@ -4451,11 +4519,13 @@ static void ShutdownImpl() {
     // Also skip if hook drain timed out — restoring slots with hooks in-flight
     // risks control-flow corruption.
     if (!hookDrainTimedOut && g_vtableHookInstalled.load(std::memory_order_acquire) && g_steamClientBase) {
-        HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
-        if (!currentSC) {
-            LOG("Shutdown: steamclient64.dll already unloaded, skipping vtable restore");
+        // Re-resolve via the same helper used at install time so we compare against the
+        // module CR actually patched (diversion.dll under OST, steamclient64.dll otherwise).
+        uintptr_t currentBase = ResolveSteamClientOrDiversion();
+        if (!currentBase) {
+            LOG("Shutdown: neither diversion.dll nor steamclient64.dll loaded, skipping vtable restore");
             g_vtableHookInstalled.store(false, std::memory_order_release);
-            // steamclient gone: cached EAs point into unmapped memory; clear so a
+            // Module gone: cached EAs point into unmapped memory; clear so a
             // subsequent re-init re-resolves against the new module image.
             g_serviceTransportVtableEa = 0;
             g_originalSlot4 = nullptr;
@@ -4465,9 +4535,9 @@ static void ShutdownImpl() {
             g_parseFromArray = nullptr;
             g_serializeToArray = nullptr;
             g_steamClientBase = 0;
-        } else if ((uintptr_t)currentSC != g_steamClientBase) {
-            LOG("Shutdown: steamclient64.dll base changed (%p -> %p), skipping vtable restore",
-                (void*)g_steamClientBase, (void*)currentSC);
+        } else if (currentBase != g_steamClientBase) {
+            LOG("Shutdown: steamclient base changed (%p -> %p), skipping vtable restore",
+                (void*)g_steamClientBase, (void*)currentBase);
             g_vtableHookInstalled.store(false, std::memory_order_release);
             // Module rebased: every cached absolute pointer is wrong for the new base.
             g_serviceTransportVtableEa = 0;
@@ -4477,7 +4547,7 @@ static void ShutdownImpl() {
             g_originalSlot8 = nullptr;
             g_parseFromArray = nullptr;
             g_serializeToArray = nullptr;
-            g_steamClientBase = (uintptr_t)currentSC;
+            g_steamClientBase = currentBase;
         } else {
             // Restore against the same vtable EA the install patched. If RTTI never resolved
             // (shouldn't be possible while g_vtableHookInstalled is true), fall back to

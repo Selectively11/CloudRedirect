@@ -74,6 +74,82 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
     return CloudIntercept::OnSendPkt(thisptr, data, size) ? 1 : 0;
 }
 
+// Local declarations for LdrRegisterDllNotification (NTDLL); not in winternl.h.
+namespace {
+struct CR_UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWCH   Buffer;
+};
+struct CR_LDR_DLL_LOADED_NOTIFICATION_DATA {
+    ULONG Flags;
+    const CR_UNICODE_STRING* FullDllName;
+    const CR_UNICODE_STRING* BaseDllName;
+    PVOID DllBase;
+    ULONG SizeOfImage;
+};
+union CR_LDR_DLL_NOTIFICATION_DATA {
+    CR_LDR_DLL_LOADED_NOTIFICATION_DATA Loaded;
+    CR_LDR_DLL_LOADED_NOTIFICATION_DATA Unloaded;
+};
+constexpr ULONG CR_LDR_DLL_NOTIFICATION_REASON_LOADED = 1;
+using CR_PLDR_DLL_NOTIFICATION_FUNCTION = VOID (CALLBACK*)(
+    ULONG, const CR_LDR_DLL_NOTIFICATION_DATA*, PVOID);
+using CR_PfnLdrRegisterDllNotification = LONG (NTAPI*)(
+    ULONG, CR_PLDR_DLL_NOTIFICATION_FUNCTION, PVOID, PVOID*);
+}
+
+static HANDLE g_diversionLoadedEvent = nullptr;
+static PVOID  g_dllNotifyCookie = nullptr;
+
+// Runs under the loader lock; must not allocate, take locks, or block.
+static VOID CALLBACK OnDllLoaded(
+    ULONG reason,
+    const CR_LDR_DLL_NOTIFICATION_DATA* data,
+    PVOID /*context*/)
+{
+    if (reason != CR_LDR_DLL_NOTIFICATION_REASON_LOADED) return;
+    if (!data || !data->Loaded.BaseDllName || !data->Loaded.BaseDllName->Buffer) return;
+    if (_wcsicmp(data->Loaded.BaseDllName->Buffer, L"diversion.dll") == 0) {
+        SetEvent(g_diversionLoadedEvent);
+    }
+}
+
+// Waits for diversion.dll to be mapped, then drives CR init by invoking
+// CloudOnSendPkt with null args. CR's vtable hooks resolve their module
+// base from diversion.dll under OpenSteamTool.
+static DWORD WINAPI SelfInitThread(LPVOID /*param*/) {
+    if (GetModuleHandleA("diversion.dll") != nullptr) {
+        CloudOnSendPkt(nullptr, nullptr, 0, nullptr);
+        return 0;
+    }
+
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (!ntdll) return 0;
+    auto pReg = reinterpret_cast<CR_PfnLdrRegisterDllNotification>(
+        GetProcAddress(ntdll, "LdrRegisterDllNotification"));
+    if (!pReg) return 0;
+
+    g_diversionLoadedEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!g_diversionLoadedEvent) return 0;
+
+    if (pReg(0, OnDllLoaded, nullptr, &g_dllNotifyCookie) != 0) {
+        CloseHandle(g_diversionLoadedEvent);
+        g_diversionLoadedEvent = nullptr;
+        return 0;
+    }
+
+    // Closes the window where diversion.dll loaded between the initial check
+    // and the subscription taking effect.
+    if (GetModuleHandleA("diversion.dll") != nullptr) {
+        SetEvent(g_diversionLoadedEvent);
+    }
+
+    WaitForSingleObject(g_diversionLoadedEvent, INFINITE);
+    CloudOnSendPkt(nullptr, nullptr, 0, nullptr);
+    return 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
@@ -87,6 +163,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                 reinterpret_cast<LPCSTR>(&DllMain),
                 &pinned);
+        }
+
+        {
+            HANDLE h = CreateThread(nullptr, 0, SelfInitThread, nullptr, 0, nullptr);
+            if (h) CloseHandle(h);
         }
         break;
 
