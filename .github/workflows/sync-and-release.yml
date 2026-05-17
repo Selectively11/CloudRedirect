@@ -1,0 +1,204 @@
+name: Sync upstream and release
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Build and release even if ost already includes the latest upstream tag'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout ost
+        uses: actions/checkout@v4
+        with:
+          ref: ost
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git
+        shell: bash
+        run: |
+          git config user.email "[email protected]"
+          git config user.name "CloudRedirect Fork Bot"
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+
+      - name: Restore rerere cache
+        uses: actions/cache@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-${{ github.run_id }}
+          restore-keys: |
+            rerere-
+
+      - name: Add upstream remote and fetch
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/Selectively11/CloudRedirect.git
+          git fetch upstream --tags
+
+      - name: Pick upstream tag and compute release tag
+        id: tag
+        shell: bash
+        run: |
+          set -eo pipefail
+          upstream_tag=$(git -c versionsort.suffix=- tag -l --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)
+          if [ -z "$upstream_tag" ]; then
+            echo "no upstream stable tag found"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+
+          tag_commit=$(git rev-parse "${upstream_tag}^{commit}")
+          merge_base=$(git merge-base ost "$tag_commit" 2>/dev/null || true)
+          force='${{ github.event.inputs.force_release }}'
+          if [ "$merge_base" = "$tag_commit" ] && [ "$force" != "true" ]; then
+            echo "ost already includes $upstream_tag — nothing to do"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          base=${upstream_tag#v}
+          rev=0
+          for existing in $(git tag -l "v${base}.*"); do
+            n=${existing##*.}
+            if [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge "$rev" ]; then
+              rev=$((n+1))
+            fi
+          done
+          [ "$rev" -eq 0 ] && rev=1
+          echo "release_tag=v${base}.${rev}" >> "$GITHUB_OUTPUT"
+          echo "release_version=${base}.${rev}" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Rebase ost onto upstream tag
+        id: rebase
+        if: steps.tag.outputs.should_release == 'true'
+        shell: bash
+        run: |
+          if ! git rebase "${{ steps.tag.outputs.upstream_tag }}"; then
+            git rebase --abort || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Open or update conflict issue
+        if: failure() && steps.rebase.outputs.conflict == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const upstreamTag = '${{ steps.tag.outputs.upstream_tag }}';
+            const title = `Rebase conflict on upstream ${upstreamTag}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `Automatic rebase of \`ost\` onto upstream tag \`${upstreamTag}\` failed.`,
+              ``,
+              `Failed run: ${runUrl}`,
+              ``,
+              `To resolve locally:`,
+              '```',
+              `git fetch upstream`,
+              `git checkout ost`,
+              `git rebase ${upstreamTag}`,
+              `# resolve conflicts, then`,
+              `git rebase --continue`,
+              `git push origin ost --force-with-lease`,
+              '```',
+            ].join('\n');
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'rebase-conflict',
+            });
+            const existing = issues.data.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Rebase still failing in run ${context.runId} (${runUrl}).`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['rebase-conflict'],
+              });
+            }
+
+      - name: Patch Version.props (not committed)
+        if: steps.tag.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          $version = '${{ steps.tag.outputs.release_version }}'
+          $content = Get-Content Version.props -Raw
+          $content = $content -replace '<ReleaseVersion>[^<]+</ReleaseVersion>', "<ReleaseVersion>$version</ReleaseVersion>"
+          Set-Content Version.props -Value $content -NoNewline
+
+      - name: Setup .NET
+        if: steps.tag.outputs.should_release == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Configure CMake (Visual Studio 17 2022, x64)
+        if: steps.tag.outputs.should_release == 'true'
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build native targets
+        if: steps.tag.outputs.should_release == 'true'
+        run: cmake --build build --config Release --target cloud_redirect cr_loader cloud_redirect_cli
+
+      - name: Publish launcher
+        if: steps.tag.outputs.should_release == 'true'
+        run: dotnet publish ui/CloudRedirect.csproj -c Release -r win-x64 --self-contained false -o ui/bin/publish
+
+      - name: Compute CloudRedirect.exe SHA256
+        if: steps.tag.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 ui/bin/publish/CloudRedirect.exe).Hash.ToLower()
+          Set-Content -Path ui/bin/publish/CloudRedirect.exe.sha256 -Value $hash -NoNewline
+
+      - name: Push rebased ost
+        if: steps.tag.outputs.should_release == 'true'
+        shell: bash
+        run: git push origin ost --force-with-lease
+
+      - name: Mirror upstream master to fork master
+        if: steps.tag.outputs.should_release == 'true'
+        shell: bash
+        run: git push origin "refs/remotes/upstream/master:refs/heads/master"
+
+      - name: Create GitHub release
+        if: steps.tag.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: ${{ steps.tag.outputs.release_tag }}
+          target_commitish: ost
+          body: |
+            Built from upstream `${{ steps.tag.outputs.upstream_tag }}` with OpenSteamTool support layered on top.
+
+            See [upstream release notes](https://github.com/Selectively11/CloudRedirect/releases/tag/${{ steps.tag.outputs.upstream_tag }}).
+          files: |
+            ui/bin/publish/CloudRedirect.exe
+            ui/bin/publish/CloudRedirect.exe.sha256
+            build/Release/cloud_redirect.dll
+            build/Release/cr_loader.dll
