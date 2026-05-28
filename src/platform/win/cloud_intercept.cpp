@@ -72,33 +72,33 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 //   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
-static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4C4890;
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC890;
 
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
 // qword_1397A70E8 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17A70E8;
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17BEA48;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x128E7A0;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x126A0F0;
 // sub_138D199E0 = CNetPacket→CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD199E0;
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCF62A0;
 // sub_138D263B0 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD263B0;
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD022B0;
 // sub_1380EB760 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EB760;
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EBEF0;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x126C130;
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1247A30;
 // sub_138BE7630 = protobuf ParseFromArray (fills body from raw bytes)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBE7630;
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC4280;
 // sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBE7A40;
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC4690;
 // CUser playtime state helpers
-static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9D7A90;
-static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9E8000;
-static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9EAEE0;
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BB3D0;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CB880;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9CE6B0;
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -186,11 +186,11 @@ static_assert(offsetof(JobRouteInfo, flags) == 20, "");
 // This function takes rcx = pointer-to-pointer, reads *rcx to get a pointer,
 // then does InterlockedIncrement64 on that second pointer.
 // RecvPkt calls this with &unk_139797BD8 before calling BRouteMsgToJob.
-static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDE27C0;
+static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDBA910;
 // Global that holds the pointer-to-counter for the refcount helper
-static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x1797BD8;
+static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17AE838;
 // sub_138D28CD0 = CUtlSortedVector::Find (looks up a CJob by jobId)
-static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD28CD0;
+static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD04D50;
 
 // SEH exception filter for crash diagnostics
 static thread_local uintptr_t s_crashFaultAddr = 0;
@@ -1881,11 +1881,11 @@ static bool LooksLikeFunctionPrologue(const uint8_t* p) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    if (b[0] == 0x48 && b[1] == 0x89 && (b[2] == 0x5C || b[2] == 0x4C || b[2] == 0x54) && b[3] == 0x24) return true;
+    if ((b[0] == 0x48 || b[0] == 0x4C) && b[1] == 0x89 && (b[2] == 0x5C || b[2] == 0x4C || b[2] == 0x54 || b[2] == 0x44) && b[3] == 0x24) return true;
     if (b[0] == 0x48 && b[1] == 0x83 && b[2] == 0xEC) return true;
     if (b[0] == 0x48 && b[1] == 0x81 && b[2] == 0xEC) return true;
     if (b[0] == 0x4C && b[1] == 0x8B && b[2] == 0xDC) return true;
-    if (b[0] == 0x48 && b[1] == 0x8B && b[2] == 0xC4) return true;
+    if (b[0] == 0x48 && b[1] == 0x8B && (b[2] == 0xC4 || b[2] == 0xC2)) return true;
     if (b[0] == 0x40 && (b[1] == 0x53 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
     if (b[0] == 0x41 && (b[1] == 0x54 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
     if (b[0] == 0x53 || b[0] == 0x55 || b[0] == 0x56 || b[0] == 0x57) return true;
@@ -2996,7 +2996,7 @@ static void UploadLuaOnShutdown() {
 }
 
 // Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1779486452ULL, 1778281814ULL, 1778003620ULL };
+static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1779918128ULL, 1779486452ULL, 1778281814ULL };
 
 static bool IsSupportedSteamVersion(uint64_t v) {
     for (uint64_t s : SUPPORTED_STEAM_VERSIONS)

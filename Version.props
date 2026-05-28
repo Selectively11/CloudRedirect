@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Shared user-facing version (X.Y.Z) -->
-    <ReleaseVersion>2.0.6</ReleaseVersion>
+    <ReleaseVersion>2.0.7</ReleaseVersion>
     
     <!-- Sync engine generation - increment on breaking protocol changes -->
     <CoreGeneration>1.0</CoreGeneration>
