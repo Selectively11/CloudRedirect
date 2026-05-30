@@ -56,6 +56,9 @@ RpcResult HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBody
 void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
 void ShutdownRpcHandlers();
 
+void RecordConflictResolution(uint32_t appId, bool choseLocal);
+bool ConsumeConflictLocalChoice(uint32_t appId);
+
 // Flush pending sync icon states to registry.vdf (Linux, called from OnUnload).
 void FlushPendingSyncStates();
 

@@ -197,11 +197,11 @@ public partial class SetupPage : Page
             })?.Dispose();
         });
 
-        Log("Waiting for payload to appear (up to 90 seconds)...");
+        Log("Waiting for payload to appear (up to 30 seconds)...");
 
         bool found = await Task.Run(() =>
         {
-            for (int i = 0; i < 180; i++) // 90s at 500ms intervals
+            for (int i = 0; i < 60; i++) // 30s at 500ms intervals
             {
                 System.Threading.Thread.Sleep(500);
                 if (Fingerprint.FindCachePath(_steamPath, verbose: false) != null)
@@ -623,13 +623,12 @@ public partial class SetupPage : Page
             bool payloadFound = await BootstrapSteamForPayload();
             if (!payloadFound)
             {
-                Log("FAILED: Payload cache did not appear.");
-                Log("Try running Steam manually, wait for it to fully load, then close it and try again.");
-                Log("");
-                SetBusy(false);
-                return;
+                Log("Steam download timed out, will try embedded payload.");
             }
-            Log("OK");
+            else
+            {
+                Log("OK");
+            }
             Log("");
         }
 

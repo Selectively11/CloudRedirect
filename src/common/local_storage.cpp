@@ -1183,6 +1183,9 @@ bool WriteFileNoIncrement(uint32_t accountId, uint32_t appId, const std::string&
         return false;
     }
 
+#ifdef _WIN32
+    SetLastError(0);
+#endif
     if (!FileUtil::AtomicWriteBinary(fullPath, data, len)) {
 #ifdef _WIN32
         DWORD lastErr = GetLastError();

@@ -53,12 +53,56 @@ bool LocalDiskProvider::Upload(const std::string& path,
                                const uint8_t* data, size_t len) {
     std::string full = ToFullPath(path);
     if (full.empty()) return false;
-    auto parent = FileUtil::Utf8ToPath(full).parent_path();
+    auto fullPath = FileUtil::Utf8ToPath(full);
+    auto parent = fullPath.parent_path();
+    // CAS migration: if a legacy flat blob file blocks a directory needed for
+    // the new filename/sha layout, remove it before creating directories.
+    // Walk each component of parent; if any is a regular file, remove it.
+    {
+        std::error_code rootEc;
+        auto root = std::filesystem::canonical(FileUtil::Utf8ToPath(m_root), rootEc);
+        if (!rootEc) {
+            auto cur = parent;
+            for (int depth = 0; depth < 12 && cur.has_parent_path(); ++depth) {
+                std::error_code probe;
+                auto canon = std::filesystem::weakly_canonical(cur, probe);
+                if (!probe && canon == root) break;
+                if (std::filesystem::is_regular_file(cur, probe)) {
+                    LOG("[LocalDiskProvider] Removing legacy flat blob blocking CAS dir: %s",
+                        cur.string().c_str());
+                    std::filesystem::remove(cur, probe);
+                    if (probe) {
+                        LOG("[LocalDiskProvider] Failed to remove blocking file: %s (%s)",
+                            cur.string().c_str(), probe.message().c_str());
+                    }
+                    break;
+                }
+                cur = cur.parent_path();
+            }
+        }
+    }
     std::error_code ec;
     std::filesystem::create_directories(parent, ec);
     if (ec) {
-        LOG("[LocalDiskProvider] Failed to create dirs for %s: %s", full.c_str(), ec.message().c_str());
-        return false;
+        // Retry once: the pre-check above may race with concurrent uploads.
+        // Walk the exact failing path and remove any file blocking a directory.
+        auto cur = parent;
+        for (int depth = 0; depth < 12 && cur.has_parent_path(); ++depth) {
+            std::error_code probe;
+            if (std::filesystem::is_regular_file(cur, probe) && !probe) {
+                LOG("[LocalDiskProvider] Removing file blocking dir (retry): %s",
+                    cur.string().c_str());
+                std::filesystem::remove(cur, probe);
+                break;
+            }
+            cur = cur.parent_path();
+        }
+        ec.clear();
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            LOG("[LocalDiskProvider] Failed to create dirs for %s: %s", full.c_str(), ec.message().c_str());
+            return false;
+        }
     }
     if (!FileUtil::AtomicWriteBinary(full, data, len)) {
         LOG("[LocalDiskProvider] Upload: atomic write failed %s (%zu bytes)", full.c_str(), len);

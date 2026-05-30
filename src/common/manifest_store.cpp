@@ -61,7 +61,7 @@ static Manifest PruneManifestToRemoteBlobListing(
 static ICloudProvider*                     g_manifestProvider = nullptr;
 static std::string                        g_manifestLocalRoot;
 
-// In-memory manifest cache.
+// --- in-memory manifest cache (avoids repeated disk reads during download bursts) ---
 struct CachedManifest {
     Manifest manifest;
     bool valid = false;
@@ -390,6 +390,7 @@ Manifest LoadLocalManifest(uint32_t accountId, uint32_t appId) {
 }
 
 bool TryLoadLocalManifest(uint32_t accountId, uint32_t appId, Manifest& outManifest) {
+    // Check in-memory cache first.
     if (TryGetCachedManifest(accountId, appId, outManifest)) return true;
 
     outManifest.clear();
@@ -417,16 +418,30 @@ bool TryLoadLocalManifest(uint32_t accountId, uint32_t appId, Manifest& outManif
     return true;
 }
 
+// Strip CAS SHA leaf: "subdir/file.sav/a1b2c3..." -> "subdir/file.sav"
+static std::string StripCasShaLeaf(const std::string& name) {
+    size_t lastSlash = name.rfind('/');
+    if (lastSlash == std::string::npos || lastSlash == 0) return name;
+    std::string leaf = name.substr(lastSlash + 1);
+    if (leaf.size() == 40 && leaf.find_first_not_of("0123456789abcdef") == std::string::npos)
+        return name.substr(0, lastSlash);
+    return name;
+}
+
 Manifest BuildManifestFromLocalBlobs(uint32_t accountId, uint32_t appId) {
     Manifest manifest;
     auto files = LocalStorage::GetFileList(accountId, appId);
     for (const auto& fe : files) {
         if (CloudIntercept::IsReservedBlobFilename(fe.filename)) continue;
+        std::string key = StripCasShaLeaf(fe.filename);
         ManifestEntry entry;
         entry.sha = fe.sha;
         entry.timestamp = fe.timestamp;
         entry.size = fe.rawSize;
-        manifest[fe.filename] = std::move(entry);
+        // CAS dedup: if multiple SHAs exist for same file, keep largest (latest upload).
+        auto it = manifest.find(key);
+        if (it != manifest.end() && it->second.size >= entry.size) continue;
+        manifest[key] = std::move(entry);
     }
     LOG("[ManifestStore] BuildManifestFromLocalBlobs app %u: built with %zu files",
         appId, manifest.size());

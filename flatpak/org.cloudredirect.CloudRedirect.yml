@@ -3,6 +3,8 @@ runtime: org.kde.Platform
 runtime-version: '6.10'
 sdk: org.kde.Sdk
 command: cloud-redirect-ui-wrapper
+separate-locales: false
+no-debuginfo: true
 
 finish-args:
   # Filesystem access for:
@@ -40,11 +42,14 @@ modules:
 
   - name: cloud-redirect-ui
     buildsystem: cmake-ninja
+    no-debuginfo: true
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
     sources:
       - type: dir
         path: ../ui-linux
+      - type: file
+        path: ../Version.props
     post-install:
       - |
         cat > /app/bin/cloud-redirect-ui-wrapper <<'EOF'

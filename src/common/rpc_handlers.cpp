@@ -52,6 +52,25 @@ static void RestoreInMemoryPlaytimeMetadata(uint32_t appId, uint64_t lastPlayed,
 
 // per-app upload batch tracking -- state lives in batch_tracker.cpp
 
+static std::mutex g_conflictMutex;
+static std::unordered_set<uint32_t> g_conflictKeepLocal;
+
+void RecordConflictResolution(uint32_t appId, bool choseLocal) {
+    std::lock_guard<std::mutex> lock(g_conflictMutex);
+    if (choseLocal) {
+        g_conflictKeepLocal.insert(appId);
+        LOG("[NS] ConflictResolution app=%u: user chose keep-local, will skip pre-restore", appId);
+    } else {
+        g_conflictKeepLocal.erase(appId);
+        LOG("[NS] ConflictResolution app=%u: user chose keep-cloud", appId);
+    }
+}
+
+bool ConsumeConflictLocalChoice(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_conflictMutex);
+    return g_conflictKeepLocal.erase(appId) > 0;
+}
+
 // Per-(account,app) cleanNames with confirmed-present remotecache.vdf rows.
 // Pre-seeded persiststate=0 closes Steam's reconcile false-delete window.
 static std::mutex g_remotecacheRepairMutex;
@@ -1262,14 +1281,16 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     if (!haveCloudManifest) {
         SetRpcCrashContext("GetChangelist:local-fallback", "Cloud.GetAppFileChangelist#1", appId);
         uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
-        cloudCN = localCN;
 
         auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
         if (!localManifest.empty()) {
+            cloudCN = localCN;
             for (const auto& [name, me] : localManifest) {
                 cloudManifest[name] = me;
             }
             haveCloudManifest = true;
+        } else {
+            cloudCN = 0;
         }
 
         LOG("[NS-CL] GetAppFileChangelist app=%u: local fallback CN=%llu (%zu files)",
@@ -2040,7 +2061,9 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
     }
 
     // Pre-restore files before sync direction selection (AC_Launch never set for CR apps).
-    {
+    if (ConsumeConflictLocalChoice(appId)) {
+        LOG("[NS] LaunchIntent app=%u: skipping pre-restore (user chose keep-local)", appId);
+    } else {
         std::string steamPath = CloudIntercept::GetSteamPath();
         if (!steamPath.empty()) {
             const auto* cloudFiles = (stateResult.status == CloudStorage::StateFetchStatus::Ok)

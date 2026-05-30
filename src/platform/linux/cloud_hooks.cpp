@@ -476,6 +476,16 @@ extern "C" int hook_NotificationDirect(void* pThis, const char* methodName, void
         return origFn(pThis, methodName, body, flags);
     }
 
+    // ConflictResolution: parse chose_local_files so HandleLaunchIntent
+    // knows whether to skip pre-restore (user chose "keep local files").
+    if (strcmp(methodName, CloudIntercept::RPC_CONFLICT) == 0) {
+        auto bodyBytes = SerializeMessage(body);
+        auto fields = PB::Parse(bodyBytes.data(), bodyBytes.size());
+        bool choseLocal = false;
+        if (auto* f = PB::FindField(fields, 2)) choseLocal = f->varintVal != 0;
+        CloudIntercept::RecordConflictResolution(appId, choseLocal);
+    }
+
     // Suppress other Cloud notifications for namespace apps
     LOG("[Hook-Notif] SUPPRESSED %s app=%u (notification not sent to server)", methodName, appId);
     return 1;

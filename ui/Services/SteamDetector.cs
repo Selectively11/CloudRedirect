@@ -17,7 +17,7 @@ public static class SteamDetector
     /// <summary>
     /// Supported Steam client versions our patches and RVAs target. Index 0 is the newest.
     /// </summary>
-    public static readonly long[] SupportedSteamVersions = { 1779486452, 1778281814, 1778003620, 1777411435 };
+    public static readonly long[] SupportedSteamVersions = { 1779918128, 1779486452, 1778281814, 1778003620 };
 
     public static long ExpectedSteamVersion => SupportedSteamVersions[0];
 

@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="..\Version.props" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <AssemblyName>CloudRedirectCLI</AssemblyName>
+    <RootNamespace>CloudRedirect</RootNamespace>
+    <Version>$(ReleaseVersion)</Version>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Link shared service files from the UI project -->
+  <ItemGroup>
+    <Compile Include="..\ui\Services\Patching\Patcher.cs" Link="Services\Patching\Patcher.cs" />
+    <Compile Include="..\ui\Services\Patching\PatchTypes.cs" Link="Services\Patching\PatchTypes.cs" />
+    <Compile Include="..\ui\Services\Patching\Signatures.cs" Link="Services\Patching\Signatures.cs" />
+    <Compile Include="..\ui\Services\Patching\PayloadCrypto.cs" Link="Services\Patching\PayloadCrypto.cs" />
+    <Compile Include="..\ui\Services\Patching\Fingerprint.cs" Link="Services\Patching\Fingerprint.cs" />
+    <Compile Include="..\ui\Services\Patching\PeImportParser.cs" Link="Services\Patching\PeImportParser.cs" />
+    <Compile Include="..\ui\Services\Patching\BundledPayload.cs" Link="Services\Patching\BundledPayload.cs" />
+    <Compile Include="..\ui\Services\Patching\EmbeddedBundledPayload.cs" Link="Services\Patching\EmbeddedBundledPayload.cs" />
+    <Compile Include="..\ui\Services\FileUtils.cs" Link="Services\FileUtils.cs" />
+  </ItemGroup>
+
+  <!-- Embed the native DLL -->
+  <PropertyGroup>
+    <NativeDllSource>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\build\Release\cloud_redirect.dll'))</NativeDllSource>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('$(NativeDllSource)')">
+    <EmbeddedResource Include="$(NativeDllSource)" LogicalName="cloud_redirect.dll" />
+  </ItemGroup>
+
+  <!-- Embed payload files -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\ui\Resources\payloads\**\*">
+      <LogicalName>payloads/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+</Project>

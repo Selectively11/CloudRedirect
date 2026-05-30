@@ -1596,25 +1596,25 @@ Are you sure?</value>
     <value>These settings control what data is synced between your PCs via the cloud provider. Changes take effect after restarting Steam.</value>
   </data>
   <data name="Settings_SyncAchievements" xml:space="preserve">
-    <value>Sync achievements</value>
+    <value>Sync Achievements</value>
   </data>
   <data name="Settings_SyncAchievementsHint" xml:space="preserve">
     <value>Upload and merge achievement progress for lua apps across PCs.</value>
   </data>
   <data name="Settings_SyncPlaytime" xml:space="preserve">
-    <value>Sync playtime</value>
+    <value>Sync Playtime</value>
   </data>
   <data name="Settings_SyncPlaytimeHint" xml:space="preserve">
     <value>Upload and merge playtime data for lua apps across PCs.</value>
   </data>
   <data name="Settings_SyncLuas" xml:space="preserve">
-    <value>Sync lua files</value>
+    <value>Sync Lua Files</value>
   </data>
   <data name="Settings_SyncLuasHint" xml:space="preserve">
     <value>Sync lua files themselves between PCs so you don't have to install them again.</value>
   </data>
   <data name="Settings_AutoUpdateDll" xml:space="preserve">
-    <value>Auto-update DLL</value>
+    <value>Auto-Update DLL</value>
   </data>
   <data name="Settings_AutoUpdateDllHint" xml:space="preserve">
     <value>Automatically check for and install newer versions of the CloudRedirect DLL when Steam launches. The update takes effect on the next Steam restart.</value>
@@ -1624,7 +1624,7 @@ Are you sure?</value>
   <!-- Cloud Redirect Toggle                                               -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_CloudRedirectEnabled" xml:space="preserve">
-    <value>Enable cloud save redirection</value>
+    <value>Enable Cloud Save Redirection</value>
   </data>
   <data name="Settings_CloudRedirectEnabledHint" xml:space="preserve">
     <value>When enabled, cloud saves for lua apps are intercepted and stored locally (and optionally synced to your cloud provider). When disabled, only manifest pinning and patches are active. Changes take effect after restarting Steam.</value>
@@ -1634,19 +1634,19 @@ Are you sure?</value>
   <!-- Manifest Pinning                                                    -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_ManifestPinning" xml:space="preserve">
-    <value>Manifest pinning</value>
+    <value>Manifest Pinning</value>
   </data>
   <data name="Settings_ManifestPinningHint" xml:space="preserve">
     <value>Control whether lua apps can be pinned to specific versions. Per-app pins can be configured in the config file at the Steam folder. Changes take effect after restarting Steam.</value>
   </data>
   <data name="Settings_ManifestPinningEnabled" xml:space="preserve">
-    <value>Enable manifest pinning</value>
+    <value>Enable Manifest Pinning</value>
   </data>
   <data name="Settings_ManifestPinningEnabledHint" xml:space="preserve">
     <value>When enabled, lua apps can be locked to specific versions.</value>
   </data>
   <data name="Settings_AutoComment" xml:space="preserve">
-    <value>Auto comment setManifestid</value>
+    <value>Auto Comment SetManifestID</value>
   </data>
   <data name="Settings_AutoCommentHint" xml:space="preserve">
     <value>When enabled, the SetManifestID specified in the lua will be treated as if it were commented out. If disabled, the SetManifestID will be respected, meaning your game will be locked to the version specified in the lua. This setting never modifies lua files on disk.</value>
@@ -1693,6 +1693,25 @@ Are you sure?</value>
     <value>Search by name or app ID...</value>
   </data>
 
+  <!-- ═══════════════════════ Parental Controls ═════════════════════════ -->
+  <data name="Settings_Parental" xml:space="preserve">
+    <value>Tung Tung</value>
+  </data>
+  <data name="Settings_ParentalHint" xml:space="preserve">
+    <value>Six...six seven?</value>
+  </data>
+  <data name="Settings_ParentalIgnorePlaytime" xml:space="preserve">
+    <value>Ignore Playtime Restrictions</value>
+  </data>
+  <data name="Settings_ParentalIgnorePlaytimeHint" xml:space="preserve">
+    <value>Disables playtime restrictions. Reports time up until the set limit but not beyond it.</value>
+  </data>
+  <data name="Settings_ParentalBypassPlaytime" xml:space="preserve">
+    <value>Disable Family Restrictions</value>
+  </data>
+  <data name="Settings_ParentalBypassPlaytimeHint" xml:space="preserve">
+    <value>No client-side family restrictions are enforced.</value>
+  </data>
   <!-- ═══════════════════════ App Update Banner ═════════════════════════ -->
   <data name="AppUpdate_Skip" xml:space="preserve">
     <value>Skip</value>

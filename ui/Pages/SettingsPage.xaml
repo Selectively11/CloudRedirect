@@ -152,6 +152,51 @@
                 </ui:CardControl>
             </StackPanel>
 
+            <StackPanel x:Name="ParentalSection">
+                <TextBlock Text="{res:Loc Settings_Parental}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,4" />
+
+                <TextBlock Text="{res:Loc Settings_ParentalHint}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,12" />
+
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_ParentalIgnorePlaytime}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_ParentalIgnorePlaytimeHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="ParentalIgnorePlaytimeToggle"
+                                     Checked="SyncToggle_Changed"
+                                     Unchecked="SyncToggle_Changed" />
+                </ui:CardControl>
+
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_ParentalBypassPlaytime}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_ParentalBypassPlaytimeHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="ParentalBypassPlaytimeToggle"
+                                     Checked="SyncToggle_Changed"
+                                     Unchecked="SyncToggle_Changed" />
+                </ui:CardControl>
+
+            </StackPanel>
+
             <TextBlock Text="{res:Loc Settings_DangerZone}"
                        FontSize="20" FontWeight="SemiBold"
                        Foreground="#E74C3C"

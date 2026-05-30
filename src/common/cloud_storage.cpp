@@ -57,7 +57,7 @@ static std::mutex                        g_mutex;
 static std::mutex                        g_missingMetadataMutex;
 static std::unordered_set<std::string>   g_missingMetadataPaths;
 
-// Per-app blob path index: maps filename -> cloud path. Avoids 3-call fallback.
+// Per-app blob path index: maps filename -> resolved cloud path (avoids fallback chain).
 static std::mutex                        g_blobIndexMutex;
 struct BlobIndex {
     std::unordered_map<std::string, std::string> filenameToPath; // filename -> full cloud path
@@ -141,6 +141,7 @@ std::shared_ptr<std::mutex> AcquireAppSyncMutex(uint32_t accountId, uint32_t app
 }
 
 // Show an immediate dialog for critical auth failures (token refresh broken).
+// Guarded by std::once_flag so the user sees it at most once per Steam session.
 static std::once_flag g_authFailureOnce;
 void NotifyAuthFailure(const std::string& providerName) {
     std::call_once(g_authFailureOnce, [&providerName] {
@@ -969,7 +970,6 @@ bool IsCloudActive() {
     return g_provider && g_provider->IsAuthenticated();
 }
 
-
 bool StoreBlob(uint32_t accountId, uint32_t appId,
                const std::string& filename,
                const uint8_t* data, size_t len) {
@@ -1161,7 +1161,8 @@ static std::string ResolveBlobCloudPath(uint32_t accountId, uint32_t appId,
 
     {
         std::lock_guard<std::mutex> lk(g_blobIndexMutex);
-        // Don't overwrite fresher entries.
+        // Only store if not already populated (avoids overwriting a fresher index
+        // from a concurrent thread or re-inserting after invalidation).
         auto existing = g_blobIndex.find(key);
         if (existing == g_blobIndex.end() || !existing->second.populated)
             g_blobIndex[key] = std::move(idx);
@@ -1221,7 +1222,7 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
             shaHex = ShaToHex(mit->second.sha);
         }
 
-        // Cache-first: skip network if local SHA matches cloud SHA.
+        // Cache-first: caller supplied cloud-authoritative SHA (from FetchCloudState).
         // If local blob matches, skip network entirely.
         if (!expectedShaHex.empty() && expectedShaHex == shaHex) {
             std::vector<uint8_t> cached;
@@ -1279,7 +1280,8 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
 
             // 1. Canonical: blobs/{filename}/{sha}
             if (g_provider->Download(canonicalPath, data)) {
-                // Verify SHA matches expected.
+                // SHA verification: provider should serve content matching
+                // the SHA-addressed path. Mismatch indicates provider corruption or bug.
                 std::string actualSha = ShaToHex(FileUtil::SHA1(data.data(), data.size()));
                 if (actualSha != shaHex) {
                     LOG("[CloudStorage] RetrieveBlob: SHA MISMATCH on canonical path %s: expected=%s actual=%s, rejecting",
@@ -1338,17 +1340,21 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
             // 3. Pre-CAS legacy: blobs/{filename}
             std::string legacyPath = CloudBlobPath(accountId, appId, filename);
             if (g_provider->Download(legacyPath, data)) {
-                LOG("[CloudStorage] RetrieveBlob: fetched from legacy filename path: %s (%zu bytes)",
-                    filename.c_str(), data.size());
-                const uint8_t* writeData = data.empty() ? nullptr : data.data();
-                if (!LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
-                                                    writeData, data.size())) {
-                    LOG("[CloudStorage] RetrieveBlob: WARNING - failed to cache %s locally (legacy fallback)",
-                        filename.c_str());
-                }
-                // Promote to CAS in background so next download hits on first try.
                 std::string actualSha = ShaToHex(FileUtil::SHA1(data.data(), data.size()));
-                if (actualSha == shaHex) {
+                if (actualSha != shaHex) {
+                    LOG("[CloudStorage] RetrieveBlob: SHA MISMATCH on legacy path %s: expected=%s actual=%s, rejecting",
+                        legacyPath.c_str(), shaHex.c_str(), actualSha.c_str());
+                    data.clear();
+                } else {
+                    LOG("[CloudStorage] RetrieveBlob: fetched from legacy filename path: %s (%zu bytes)",
+                        filename.c_str(), data.size());
+                    const uint8_t* writeData = data.empty() ? nullptr : data.data();
+                    if (!LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                                        writeData, data.size())) {
+                        LOG("[CloudStorage] RetrieveBlob: WARNING - failed to cache %s locally (legacy fallback)",
+                            filename.c_str());
+                    }
+                    // Promote to CAS in background so next download hits on first try.
                     CloudWorkQueue::WorkItem upload;
                     upload.type = CloudWorkQueue::WorkItem::Upload;
                     upload.cloudPath = canonicalPath;
@@ -1361,9 +1367,10 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
                     del.cloudPath = legacyPath;
                     del.bestEffort = true;
                     CloudWorkQueue::EnqueueWork(std::move(del));
+
+                    if (found) *found = true;
+                    return data;
                 }
-                if (found) *found = true;
-                return data;
             }
         } else {
             // No SHA in manifest -- try legacy filename path.
@@ -1807,7 +1814,8 @@ int GarbageCollectBlobs(uint32_t accountId, uint32_t appId) {
         auto it = filenameToManifestRef.find(rel);
         if (it != filenameToManifestRef.end() &&
             existingCanonicalPaths.count(it->second.canonicalPath) == 0) {
-            // Canonical CAS missing; promote legacy blob.
+            // Manifest references this file but canonical CAS blob is missing.
+            // Promote legacy blob to canonical path instead of deleting.
             promotions.push_back({fi.path, it->second.canonicalPath, it->second.shaHex});
         } else {
             orphans.push_back(fi.path);

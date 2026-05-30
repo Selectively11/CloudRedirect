@@ -415,6 +415,53 @@ namespace CloudRedirect.Services.Patching
                     return false;
                 },
             },
+            // P6: fix GMRC pattern string. The May 27 2026 Steam update changed
+            // GetManifestRequestCode's prologue, breaking SteamTools' pattern scan.
+            // Patch the ASCII hex pattern in .rdata to match the new prologue.
+            new PatternPatch
+            {
+                Name = "P6 (GMRC pattern fix)",
+                // Scan for the common prefix "48 89 5C 24 18 55 " (18 ASCII bytes).
+                // Matches both old and new pattern strings. Validator confirms full match.
+                Pattern = new byte[] {
+                    0x34, 0x38, 0x20, 0x38, 0x39, 0x20, 0x35, 0x43, 0x20, 0x32,
+                    0x34, 0x20, 0x31, 0x38, 0x20, 0x35, 0x35, 0x20,
+                },
+                Mask = new byte[] {
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                },
+                PatchOffset = 0,
+                Validator = (data, hit) =>
+                {
+                    // Accept if the full old OR new pattern is present at this offset
+                    if (hit + 48 > data.Length) return false;
+                    // Old: ends with "56 57 41 55 41 57 48 8D 6C^\0"
+                    bool isOld = data[hit + 18] == 0x35 && data[hit + 19] == 0x36  // "56"
+                              && data[hit + 44] == 0x5E && data[hit + 45] == 0x00; // "^\0"
+                    // New: ends with "57 41 54 41 56 41 57 48 8D 6C\0"
+                    bool isNew = data[hit + 18] == 0x35 && data[hit + 19] == 0x37  // "57"
+                              && data[hit + 46] == 0x43 && data[hit + 47] == 0x00; // "C\0"
+                    return isOld || isNew;
+                },
+                // Old: "48 89 5C 24 18 55 56 57 41 55 41 57 48 8D 6C^\0\0\0"
+                Original = new byte[] {
+                    0x34, 0x38, 0x20, 0x38, 0x39, 0x20, 0x35, 0x43, 0x20, 0x32,
+                    0x34, 0x20, 0x31, 0x38, 0x20, 0x35, 0x35, 0x20, 0x35, 0x36,
+                    0x20, 0x35, 0x37, 0x20, 0x34, 0x31, 0x20, 0x35, 0x35, 0x20,
+                    0x34, 0x31, 0x20, 0x35, 0x37, 0x20, 0x34, 0x38, 0x20, 0x38,
+                    0x44, 0x20, 0x36, 0x43, 0x5E, 0x00, 0x00, 0x00,
+                },
+                // New: "48 89 5C 24 18 55 57 41 54 41 56 41 57 48 8D 6C\0\0"
+                Replacement = new byte[] {
+                    0x34, 0x38, 0x20, 0x38, 0x39, 0x20, 0x35, 0x43, 0x20, 0x32,
+                    0x34, 0x20, 0x31, 0x38, 0x20, 0x35, 0x35, 0x20, 0x35, 0x37,
+                    0x20, 0x34, 0x31, 0x20, 0x35, 0x34, 0x20, 0x34, 0x31, 0x20,
+                    0x35, 0x36, 0x20, 0x34, 0x31, 0x20, 0x35, 0x37, 0x20, 0x34,
+                    0x38, 0x20, 0x38, 0x44, 0x20, 0x36, 0x43, 0x00,
+                },
+                Region = ScanRegion.All,
+            },
         };
 
         // ── CloudRedirect hook finders ──────────────────────────────────

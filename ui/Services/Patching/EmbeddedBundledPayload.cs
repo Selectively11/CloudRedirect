@@ -50,17 +50,25 @@ internal static class EmbeddedBundledPayload
 
     private static Stream? GetResourceStream(long steamBuild)
     {
-        var fp = Fingerprint.ComputeFingerprint();
-        var resourceName = $"payloads/{steamBuild}/{fp}";
         var assembly = Assembly.GetExecutingAssembly();
 
-        var stream = assembly.GetManifestResourceStream(resourceName);
-        if (stream != null)
-            return stream;
+        // Try machine-specific fingerprint first (legacy)
+        var fp = Fingerprint.ComputeFingerprint();
+        var fpName = $"payloads/{steamBuild}/{fp}";
+        var stream = assembly.GetManifestResourceStream(fpName);
+        if (stream != null) return stream;
 
+        // Try generic payload (works on any machine)
+        var genericName = $"payloads/{steamBuild}/payload";
+        stream = assembly.GetManifestResourceStream(genericName);
+        if (stream != null) return stream;
+
+        // Fallback: scan for any resource under this build
+        var prefix = $"payloads/{steamBuild}/";
         foreach (var candidate in assembly.GetManifestResourceNames())
         {
-            if (candidate.Replace('\\', '/') == resourceName)
+            var normalized = candidate.Replace('\\', '/');
+            if (normalized.StartsWith(prefix))
                 return assembly.GetManifestResourceStream(candidate);
         }
 

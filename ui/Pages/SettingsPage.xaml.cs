@@ -59,7 +59,9 @@ public partial class SettingsPage : Page
         bool? SyncAchievements,
         bool? SyncPlaytime,
         bool? SyncLuas,
-        bool? AutoUpdateDll);
+        bool? AutoUpdateDll,
+        bool? ParentalIgnorePlaytime,
+        bool? ParentalBypassPlaytime);
 
     // M15: Move language/mode/sync-toggle config reads off the UI thread.
     // Loaded used to call ReadLanguageSetting + ReadModeSetting +
@@ -73,11 +75,11 @@ public partial class SettingsPage : Page
             var lang = ReadLanguageSetting();
             var mode = Services.SteamDetector.ReadModeSetting();
 
-            bool? a = null, p = null, l = null, u = null;
+            bool? a = null, p = null, l = null, u = null, pip = null, pbp = null;
             if (mode == "cloud_redirect")
-                ReadSyncTogglesInto(ref a, ref p, ref l, ref u);
+                ReadSyncTogglesInto(ref a, ref p, ref l, ref u, ref pip, ref pbp);
 
-            return new SettingsSnapshot(lang, mode, a, p, l, u);
+            return new SettingsSnapshot(lang, mode, a, p, l, u, pip, pbp);
         });
 
         ApplySettingsSnapshot(snapshot);
@@ -90,11 +92,14 @@ public partial class SettingsPage : Page
         if (snap.Mode == "cloud_redirect")
         {
             SyncSection.Visibility = Visibility.Visible;
-            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas, snap.AutoUpdateDll);
+            ParentalSection.Visibility = Visibility.Visible;
+            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas, snap.AutoUpdateDll,
+                             snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime);
         }
         else
         {
             SyncSection.Visibility = Visibility.Collapsed;
+            ParentalSection.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -123,7 +128,8 @@ public partial class SettingsPage : Page
         }
     }
 
-    private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas, bool? autoUpdateDll)
+    private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas, bool? autoUpdateDll,
+                                   bool? parentalIgnorePlaytime, bool? parentalBypassPlaytime)
     {
         _syncLoading = true;
         try
@@ -132,6 +138,8 @@ public partial class SettingsPage : Page
             if (playtime == true) SyncPlaytimeToggle.IsChecked = true;
             if (luas == true) SyncLuasToggle.IsChecked = true;
             if (autoUpdateDll == true) AutoUpdateDllToggle.IsChecked = true;
+            if (parentalIgnorePlaytime == true) ParentalIgnorePlaytimeToggle.IsChecked = true;
+            if (parentalBypassPlaytime == true) ParentalBypassPlaytimeToggle.IsChecked = true;
         }
         finally
         {
@@ -144,7 +152,8 @@ public partial class SettingsPage : Page
     /// thread. Used by LoadSettingsAsync inside Task.Run so the dispatcher
     /// path never opens config.json synchronously.
     /// </summary>
-    private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas, ref bool? autoUpdateDll)
+    private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas, ref bool? autoUpdateDll,
+                                              ref bool? parentalIgnorePlaytime, ref bool? parentalBypassPlaytime)
     {
         try
         {
@@ -163,6 +172,10 @@ public partial class SettingsPage : Page
                 luas = true;
             if (root.TryGetProperty("auto_update_dll", out var u) && u.ValueKind == JsonValueKind.True)
                 autoUpdateDll = true;
+            if (root.TryGetProperty("parental_ignore_playtime", out var pip) && pip.ValueKind == JsonValueKind.True)
+                parentalIgnorePlaytime = true;
+            if (root.TryGetProperty("parental_bypass_playtime", out var pbp) && pbp.ValueKind == JsonValueKind.True)
+                parentalBypassPlaytime = true;
         }
         catch { }
     }
@@ -327,13 +340,16 @@ public partial class SettingsPage : Page
     {
         var path = GetConfigPath();
         Services.ConfigHelper.SaveConfig(path,
-            new[] { "sync_achievements", "sync_playtime", "sync_luas", "auto_update_dll" },
+            new[] { "sync_achievements", "sync_playtime", "sync_luas", "auto_update_dll",
+                    "parental_ignore_playtime", "parental_bypass_playtime" },
             writer =>
             {
                 writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
                 writer.WriteBoolean("sync_playtime", SyncPlaytimeToggle.IsChecked == true);
                 writer.WriteBoolean("sync_luas", SyncLuasToggle.IsChecked == true);
                 writer.WriteBoolean("auto_update_dll", AutoUpdateDllToggle.IsChecked == true);
+                writer.WriteBoolean("parental_ignore_playtime", ParentalIgnorePlaytimeToggle.IsChecked == true);
+                writer.WriteBoolean("parental_bypass_playtime", ParentalBypassPlaytimeToggle.IsChecked == true);
             });
     }
 

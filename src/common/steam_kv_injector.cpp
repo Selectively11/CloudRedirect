@@ -24,7 +24,7 @@ namespace SteamKvInjector {
 
 // Global CSteamEngine* pointer. Same global already used by cloud_intercept.
 // (SC_RVA_GLOBAL_ENGINE = 0x17A70E8 in that module.)
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17A70E8;
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17BEA48;
 
 // Offset from *qword_1397A70E8 to the CAppInfoCache instance.
 // Pattern observed in many callers:
@@ -34,14 +34,14 @@ static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17A70E8;
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 0xE68;
 
 // CAppInfoCache::GetAppInfo(appId) -> appInfo*
-static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x4B56D0;
+static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x49D8A0;
 
 // CAppInfoCache::GetSection(appInfo, sectionId) -> KeyValues*
 // sectionId 10 = "ufs"
-static constexpr uintptr_t SC_RVA_GET_SECTION = 0x4B7A70;
+static constexpr uintptr_t SC_RVA_GET_SECTION = 0x49FBD0;
 
 // CAppInfoCache::ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
-static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x4B6810;
+static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49E910;
 
 // BlockOnInit -- calls CThread::Join off-engine-thread, crashes/deadlocks. Do not call.
 // Cache is already loaded before our RPC handlers run.
@@ -49,22 +49,22 @@ static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x4B6810;
 
 // KeyValues::FindKey(parent, name, bCreate, out)
 // When bCreate=1 creates the key if not present.
-static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xD1C700;
+static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xCF9130;
 
 // KeyValues::GetUint64(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xD1DBD0;
+static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xCFA480;
 
 // KeyValues::GetInt(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xD1D700;
+static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xCFA030;
 
 // KeyValues::SetUint64(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xD1DE40;
+static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xCFA6F0;
 
 // KeyValues::SetInt(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xD1DE80;
+static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xCFA730;
 
 // KeyValues::SetString(kv, value) -- sets string value on a KV leaf node
-static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xD1DEC0;
+static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xCFA770;
 
 // CAppInfoUpdater::RequestAppInfoUpdate -- not yet wired (offset unconfirmed).
 // Steam's background PICS populates KV on its own schedule; cached values suffice.
@@ -359,14 +359,14 @@ bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
 
 // Linux steamclient.so -- runtime signature scanning; falls back to hardcoded RVAs (May 2026 build)
 
-// Fallback RVAs (May 2026 steamclient.so, IDA image base 0x0).
-static constexpr uintptr_t FALLBACK_RVA_GLOBAL_ENGINE   = 0x2E84760;
-static constexpr uintptr_t FALLBACK_RVA_READ_CONFIG_U64 = 0xF49BD0;
-static constexpr uintptr_t FALLBACK_RVA_GET_SECTION     = 0xF47130;
-static constexpr uintptr_t FALLBACK_RVA_KV_FIND_KEY     = 0x24CEF30;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_UINT64   = 0x24CA040;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_INT32    = 0x24CA010;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x24C9EB0;
+// Fallback RVAs (May 27 2026 steamclient.so, IDA image base 0x0).
+static constexpr uintptr_t FALLBACK_RVA_GLOBAL_ENGINE   = 0x2ECD9C0;
+static constexpr uintptr_t FALLBACK_RVA_READ_CONFIG_U64 = 0xF76960;
+static constexpr uintptr_t FALLBACK_RVA_GET_SECTION     = 0xF75BD0;
+static constexpr uintptr_t FALLBACK_RVA_KV_FIND_KEY     = 0x24FD960;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_UINT64   = 0x24F89E0;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_INT32    = 0x24F89E0;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x24F8670;
 
 // Offset from CSteamEngine* to CAppInfoCache instance.
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 2952; // 0xB88
@@ -658,7 +658,9 @@ bool Init() {
                 (unsigned long)globalEng, (unsigned long)(globalEng - base));
         }
 
-        // KvSetString: scan backward from KvSetInt32 for type=2 pattern, then find prologue.
+        // KvSetString: scan backward from KvSetInt32 for the type=2 tail
+        // (and eax,0xE1; or eax,2; mov [esi+0Bh],al), then walk back to the
+        // push ebp/edi/esi/ebx prologue.
         uintptr_t kvSetStr = 0;
         if (kvSetI32) {
             const uint8_t kTyp2[] = { 0x83, 0xE0, 0xE1, 0x83, 0xC8, 0x02, 0x88, 0x46, 0x0B };

@@ -2,6 +2,7 @@
 #include "rpc_handlers.h"
 #include "app_state.h"
 #include "protobuf.h"
+#include "parental_bypass.h"
 #include "log.h"
 #include "http_server.h"
 #include "vdf.h"
@@ -73,33 +74,33 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 //   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
-static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4C4890;
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC890;
 
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
 // qword_1397A70E8 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17A70E8;
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17BEA48;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x128E7A0;
-// sub_138D199E0 = CNetPacket::CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD199E0;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x126A0F0;
+// sub_138D199E0 = CNetPacketΓåÆCProtoBufNetPacket wrapper
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCF62A0;
 // sub_138D263B0 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD263B0;
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD022B0;
 // sub_1380EB760 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EB760;
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EBEF0;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x126C130;
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1247A30;
 // sub_138BE7630 = protobuf ParseFromArray (fills body from raw bytes)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBE7630;
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC4280;
 // sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBE7A40;
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC4690;
 // CUser playtime state helpers
-static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9D7A90;
-static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9E8000;
-static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9EAEE0;
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BB3D0;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CB880;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9CE6B0;
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -187,11 +188,11 @@ static_assert(offsetof(JobRouteInfo, flags) == 20, "");
 // This function takes rcx = pointer-to-pointer, reads *rcx to get a pointer,
 // then does InterlockedIncrement64 on that second pointer.
 // RecvPkt calls this with &unk_139797BD8 before calling BRouteMsgToJob.
-static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDE27C0;
+static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDBA910;
 // Global that holds the pointer-to-counter for the refcount helper
-static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x1797BD8;
+static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17AE838;
 // sub_138D28CD0 = CUtlSortedVector::Find (looks up a CJob by jobId)
-static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD28CD0;
+static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD04D50;
 
 // SEH exception filter for crash diagnostics
 static thread_local uintptr_t s_crashFaultAddr = 0;
@@ -274,6 +275,9 @@ static void ScheduleStartupMetadataSync() {
 static std::atomic<bool> g_syncAchievements{false};
 static std::atomic<bool> g_syncPlaytime{false};
 static std::atomic<bool> g_syncLuas{false};
+
+static std::atomic<bool> g_parentalBypassPlaytime{false};
+static std::atomic<bool> g_parentalIgnorePlaytime{false};
 static std::atomic<uint64_t> g_detectedSteamVersion{0};
 
 // Cloud-redirect master toggle (default ON). When OFF the DLL still applies manifest pinning + patches but skips HTTP/storage/interception.
@@ -677,10 +681,10 @@ static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header,
 // CCMInterface discovery via CSteamEngine global
 //
 // Traversal: qword_139781D38 (global CSteamEngine*)
-//   -> engine+3144 (uint32 global user handle)
-//   -> engine+3296 (CUtlSortedVector user map)
-//     -> array[i] where handle matches -> CUser*
-//   -> CUser+72 (CCMInterface embedded in CBaseUser)
+//   ΓåÆ engine+3144 (uint32 global user handle)
+//   ΓåÆ engine+3296 (CUtlSortedVector user map)
+//     ΓåÆ array[i] where handle matches ΓåÆ CUser*
+//   ΓåÆ CUser+72 (CCMInterface embedded in CBaseUser)
 static void* FindCCMInterface() {
     uintptr_t userPtr = FindCurrentUser();
     if (!userPtr) return nullptr;
@@ -1212,7 +1216,30 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
-    // Fast check: only intercept Cloud.* methods
+    if (g_parentalBypassPlaytime.load() &&
+        strcmp(methodName, "Parental.GetSignedParentalSettings#1") == 0) {
+        bool result = g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
+        if (result && responseBody) {
+            auto respBytes = SerializeBodyToBytes(responseBody);
+            auto respFields = PB::Parse(respBytes.data(), respBytes.size());
+            const PB::Field* sf = PB::FindField(respFields, 1);
+            if (sf && sf->wireType == PB::LengthDelimited && sf->data) {
+                auto stripped = ParentalBypass::StripPlaytimeRestrictions(sf->data, sf->dataLen);
+                PB::Writer newResp;
+                newResp.WriteBytes(1, stripped.data(), stripped.size());
+                for (const auto& f : respFields) {
+                    if (f.fieldNum == 1) continue;
+                    if (f.wireType == PB::Varint)        newResp.WriteVarint(f.fieldNum, f.varintVal);
+                    else if (f.wireType == PB::Fixed64)  newResp.WriteFixed64(f.fieldNum, f.varintVal);
+                    else if (f.wireType == PB::LengthDelimited) newResp.WriteBytes(f.fieldNum, f.data, f.dataLen);
+                }
+                if (ParseBytesToBody(responseBody, newResp.Data().data(), newResp.Size()))
+                    LOG("[Parental] Stripped restrictions from GetSignedParentalSettings (slot4)");
+            }
+        }
+        return result;
+    }
+
     if (strncmp(methodName, "Cloud.", 6) != 0) {
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
@@ -1306,7 +1333,33 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
-    // Fast check: only intercept Cloud.* methods
+    if (g_parentalBypassPlaytime.load() &&
+        strcmp(methodName, "Parental.GetSignedParentalSettings#1") == 0) {
+        bool result = g_originalSlot5(thisptr, methodName, request, response, flags);
+        if (result && response) {
+            void* respBody = *(void**)((uintptr_t)response + 48);
+            if (respBody) {
+                auto respBytes = SerializeBodyToBytes(respBody);
+                auto respFields = PB::Parse(respBytes.data(), respBytes.size());
+                const PB::Field* sf = PB::FindField(respFields, 1);
+                if (sf && sf->wireType == PB::LengthDelimited && sf->data) {
+                    auto stripped = ParentalBypass::StripPlaytimeRestrictions(sf->data, sf->dataLen);
+                    PB::Writer newResp;
+                    newResp.WriteBytes(1, stripped.data(), stripped.size());
+                    for (const auto& f : respFields) {
+                        if (f.fieldNum == 1) continue;
+                        if (f.wireType == PB::Varint)        newResp.WriteVarint(f.fieldNum, f.varintVal);
+                        else if (f.wireType == PB::Fixed64)  newResp.WriteFixed64(f.fieldNum, f.varintVal);
+                        else if (f.wireType == PB::LengthDelimited) newResp.WriteBytes(f.fieldNum, f.data, f.dataLen);
+                    }
+                    if (ParseBytesToBody(respBody, newResp.Data().data(), newResp.Size()))
+                        LOG("[Parental] Stripped restrictions from GetSignedParentalSettings (slot5)");
+                }
+            }
+        }
+        return result;
+    }
+
     if (strncmp(methodName, "Cloud.", 6) != 0) {
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
@@ -1737,6 +1790,36 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
         return g_originalSlot8(thisptr, methodName, request);
     }
 
+    if (ParentalBypass::IsParentalNotification(methodName) && g_parentalBypassPlaytime.load()) {
+        if (request) {
+            void* bodyObj = *(void**)((uintptr_t)request + 48);
+            if (bodyObj && strcmp(methodName, ParentalBypass::NOTIFY_SETTINGS_CHANGE) == 0) {
+                auto bodyBytes = SerializeBodyToBytes(bodyObj);
+                auto notifFields = PB::Parse(bodyBytes.data(), bodyBytes.size());
+                const PB::Field* sf = PB::FindField(notifFields, ParentalBypass::NotifyFields::SERIALIZED_SETTINGS);
+                if (sf && sf->wireType == PB::LengthDelimited && sf->data) {
+                    auto stripped = ParentalBypass::StripPlaytimeRestrictions(sf->data, sf->dataLen);
+                    PB::Writer newNotif;
+                    newNotif.WriteBytes(ParentalBypass::NotifyFields::SERIALIZED_SETTINGS,
+                                       stripped.data(), stripped.size());
+                    for (const auto& f : notifFields) {
+                        if (f.fieldNum == ParentalBypass::NotifyFields::SERIALIZED_SETTINGS) continue;
+                        if (f.wireType == PB::Varint)        newNotif.WriteVarint(f.fieldNum, f.varintVal);
+                        else if (f.wireType == PB::Fixed64)  newNotif.WriteFixed64(f.fieldNum, f.varintVal);
+                        else if (f.wireType == PB::LengthDelimited) newNotif.WriteBytes(f.fieldNum, f.data, f.dataLen);
+                    }
+                    if (ParseBytesToBody(bodyObj, newNotif.Data().data(), newNotif.Size()))
+                        LOG("[Parental] Stripped restrictions from NotifySettingsChange");
+                }
+            }
+            if (ParentalBypass::ShouldSuppressNotification(methodName)) {
+                LOG("[Parental] SUPPRESSED %s", methodName);
+                return true;
+            }
+        }
+        return g_originalSlot8(thisptr, methodName, request);
+    }
+
     // Only intercept Cloud.* notifications
     if (strncmp(methodName, "Cloud.", 6) != 0) {
         return g_originalSlot8(thisptr, methodName, request);
@@ -1793,6 +1876,16 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
         return g_originalSlot8(thisptr, methodName, request);
     }
 
+    // ConflictResolution: parse chose_local_files so HandleLaunchIntent
+    // knows whether to skip pre-restore (user chose "keep local files").
+    if (strcmp(methodName, RPC_CONFLICT) == 0 && bodyObj) {
+        auto bodyBytes = SerializeBodyToBytes(bodyObj);
+        auto fields = PB::Parse(bodyBytes.data(), bodyBytes.size());
+        bool choseLocal = false;
+        if (auto* f = PB::FindField(fields, 2)) choseLocal = f->varintVal != 0;
+        RecordConflictResolution(realAppId, choseLocal);
+    }
+
     // Suppress other Cloud notifications for namespace apps
     LOG("[VtHook-Notif] SUPPRESSED %s app=%u (notification not sent to server)", methodName, realAppId);
     return true;  // Return success without actually sending
@@ -1805,6 +1898,33 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
     if (g_shuttingDown.load(std::memory_order_acquire))
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
     if (!methodName) {
+        return g_originalSlot7(thisptr, methodName, bodyObj, flags);
+    }
+
+    if (ParentalBypass::IsParentalNotification(methodName) && g_parentalBypassPlaytime.load()) {
+        if (bodyObj && strcmp(methodName, ParentalBypass::NOTIFY_SETTINGS_CHANGE) == 0) {
+            auto bodyBytes = SerializeBodyToBytes(bodyObj);
+            auto notifFields = PB::Parse(bodyBytes.data(), bodyBytes.size());
+            const PB::Field* sf = PB::FindField(notifFields, ParentalBypass::NotifyFields::SERIALIZED_SETTINGS);
+            if (sf && sf->wireType == PB::LengthDelimited && sf->data) {
+                auto stripped = ParentalBypass::StripPlaytimeRestrictions(sf->data, sf->dataLen);
+                PB::Writer newNotif;
+                newNotif.WriteBytes(ParentalBypass::NotifyFields::SERIALIZED_SETTINGS,
+                                   stripped.data(), stripped.size());
+                for (const auto& f : notifFields) {
+                    if (f.fieldNum == ParentalBypass::NotifyFields::SERIALIZED_SETTINGS) continue;
+                    if (f.wireType == PB::Varint)        newNotif.WriteVarint(f.fieldNum, f.varintVal);
+                    else if (f.wireType == PB::Fixed64)  newNotif.WriteFixed64(f.fieldNum, f.varintVal);
+                    else if (f.wireType == PB::LengthDelimited) newNotif.WriteBytes(f.fieldNum, f.data, f.dataLen);
+                }
+                if (ParseBytesToBody(bodyObj, newNotif.Data().data(), newNotif.Size()))
+                    LOG("[Parental] Stripped restrictions from NotifySettingsChange (direct)");
+            }
+        }
+        if (ParentalBypass::ShouldSuppressNotification(methodName)) {
+            LOG("[Parental] SUPPRESSED %s (direct)", methodName);
+            return true;
+        }
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
     }
 
@@ -1845,6 +1965,16 @@ static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodN
         return g_originalSlot7(thisptr, methodName, bodyObj, flags);
     }
 
+    // ConflictResolution: parse chose_local_files so HandleLaunchIntent
+    // knows whether to skip pre-restore (user chose "keep local files").
+    if (strcmp(methodName, RPC_CONFLICT) == 0) {
+        auto bodyBytes = SerializeBodyToBytes(bodyObj);
+        auto fields = PB::Parse(bodyBytes.data(), bodyBytes.size());
+        bool choseLocal = false;
+        if (auto* f = PB::FindField(fields, 2)) choseLocal = f->varintVal != 0;
+        RecordConflictResolution(realAppId, choseLocal);
+    }
+
     // Suppress other Cloud notifications for namespace apps
     LOG("[VtHook-Notif] SUPPRESSED %s app=%u (direct notification not sent to server)", methodName, realAppId);
     return true;
@@ -1859,11 +1989,11 @@ static bool LooksLikeFunctionPrologue(const uint8_t* p) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-    if (b[0] == 0x48 && b[1] == 0x89 && (b[2] == 0x5C || b[2] == 0x4C || b[2] == 0x54) && b[3] == 0x24) return true;
+    if ((b[0] == 0x48 || b[0] == 0x4C) && b[1] == 0x89 && (b[2] == 0x5C || b[2] == 0x4C || b[2] == 0x54 || b[2] == 0x44) && b[3] == 0x24) return true;
     if (b[0] == 0x48 && b[1] == 0x83 && b[2] == 0xEC) return true;
     if (b[0] == 0x48 && b[1] == 0x81 && b[2] == 0xEC) return true;
     if (b[0] == 0x4C && b[1] == 0x8B && b[2] == 0xDC) return true;
-    if (b[0] == 0x48 && b[1] == 0x8B && b[2] == 0xC4) return true;
+    if (b[0] == 0x48 && b[1] == 0x8B && (b[2] == 0xC4 || b[2] == 0xC2)) return true;
     if (b[0] == 0x40 && (b[1] == 0x53 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
     if (b[0] == 0x41 && (b[1] == 0x54 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
     if (b[0] == 0x53 || b[0] == 0x55 || b[0] == 0x56 || b[0] == 0x57) return true;
@@ -2976,7 +3106,7 @@ static void UploadLuaOnShutdown() {
 }
 
 // Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1779486452ULL, 1778281814ULL, 1778003620ULL };
+static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1779918128ULL, 1779486452ULL, 1778281814ULL };
 
 static bool IsSupportedSteamVersion(uint64_t v) {
     for (uint64_t s : SUPPORTED_STEAM_VERSIONS)
@@ -3118,7 +3248,7 @@ static void PreStageStatsFromLocalCache(const std::string& steamPath) {
 // DLL auto-update: check GitHub for a newer cloud_redirect.dll, replace on disk.
 
 static bool ParseVersion(const std::string& s, int out[3]) {
-    // "2.0.3" or "v2.0.3" -> {2, 0, 3}
+    // "2.0.3" or "v2.0.3" ΓåÆ {2, 0, 3}
     const char* p = s.c_str();
     if (*p == 'v' || *p == 'V') ++p;
     return sscanf(p, "%d.%d.%d", &out[0], &out[1], &out[2]) == 3;
@@ -3937,8 +4067,20 @@ void Init(const std::string& steamPath) {
             g_syncPlaytime = cfg["sync_playtime"].boolean();
         if (cfg["sync_luas"].type == Json::Type::Bool)
             g_syncLuas = cfg["sync_luas"].boolean();
-        LOG("[NS] Sync toggles: achievements=%d, playtime=%d, luas=%d",
-            g_syncAchievements.load(), g_syncPlaytime.load(), g_syncLuas.load());
+        if (cfg["parental_bypass_playtime"].type == Json::Type::Bool)
+            g_parentalBypassPlaytime = cfg["parental_bypass_playtime"].boolean();
+        if (cfg["parental_ignore_playtime"].type == Json::Type::Bool)
+            g_parentalIgnorePlaytime = cfg["parental_ignore_playtime"].boolean();
+        LOG("[NS] Parental: bypass=%d, ignore_playtime=%d",
+            g_parentalBypassPlaytime.load(), g_parentalIgnorePlaytime.load());
+
+        if (g_parentalBypassPlaytime.load() || g_parentalIgnorePlaytime.load()) {
+            ParentalBypass::PatchParentalSignatureCheck();
+            ParentalBypass::InstallParentalSettingsHook(g_parentalBypassPlaytime.load());
+        }
+        if (g_parentalIgnorePlaytime.load()) {
+            ParentalBypass::PatchPlaytimeEnforcement();
+        }
 
         // DLL auto-update (default OFF)
         if (cfg["auto_update_dll"].type == Json::Type::Bool && cfg["auto_update_dll"].boolean()) {
@@ -4102,6 +4244,8 @@ void InstallReleaseStateNop() {
     // Stub -- release-state patching removed from public builds.
 }
 
+
+
 void SetSendPktAddr(void* recvPktGlobalAddr) {
     if (!recvPktGlobalAddr) {
         LOG("[NS] SetSendPktAddr: recvPktGlobalAddr is null");
@@ -4112,11 +4256,9 @@ void SetSendPktAddr(void* recvPktGlobalAddr) {
     LOG("[NS] payload_base=%p", (void*)g_payloadBase);
 }
 
-// OnSendPkt
-// When vtable hook (Approach E) is active: only handles CCMInterface discovery,
-// SteamID capture, and logging. Namespace Cloud RPCs are intercepted by the vtable hook.
-// When vtable hook is NOT active: falls back to Approach D (packet injection).
+// OnSendPkt — vtable hook handles namespace Cloud RPCs; this is the fallback path.
 bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
+
     if (!g_cloudRedirectEnabled.load(std::memory_order_relaxed)) return false;
     if (g_proxySending) return false;
     // After Shutdown() the receive thread is gone; refuse new pushes so
@@ -4135,6 +4277,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 
     PacketView pkt;
     if (!ParsePacket(data, size, pkt)) return false;
+
     if (pkt.emsg != EMSG_SERVICE_METHOD) return false;
 
     auto methodSv = PB::GetString(pkt.header, HDR_TARGET_JOB_NAME);
@@ -4231,7 +4374,13 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 
     // ConflictResolution is a notification (no response expected)
     if (method == RPC_CONFLICT) {
-        LOG("[NS] ConflictResolution notification");
+        auto conflictFields = PB::Parse(pkt.bodyData, pkt.bodyLen);
+        uint32_t conflictAppId = CloudRpcUtils::ExtractAppId(method.c_str(), conflictFields);
+        bool choseLocal = false;
+        if (auto* f = PB::FindField(conflictFields, 2)) choseLocal = f->varintVal != 0;
+        if (conflictAppId && IsNamespaceApp(conflictAppId))
+            RecordConflictResolution(conflictAppId, choseLocal);
+        LOG("[NS] ConflictResolution notification app=%u choseLocal=%d", conflictAppId, choseLocal);
 #ifdef DEBUG_VERBOSE_LOGGING
         SpyLogFields("[Conflict]", pkt.bodyData, pkt.bodyLen);
 #endif

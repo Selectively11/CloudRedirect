@@ -66,6 +66,7 @@ set(COMMON_SOURCES
     src/common/autocloud_scan.cpp
     src/common/autocloud_bootstrap.cpp
     src/common/steam_kv_injector.cpp
+    src/common/parental_bypass.cpp
     src/common/miniz.c
     src/common/miniz_tdef.c
     src/common/miniz_tinfl.c

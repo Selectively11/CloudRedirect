@@ -164,7 +164,7 @@ OneDriveProvider::ListAppFiles(uint32_t accountId, uint32_t appId, bool* ok, boo
 
     auto folderPath = BuildFolderPath(accountId, appId);
     LOG("[OneDrive] ListAppFiles: looking up folder: %s", folderPath.c_str());
-    // Cache lookup; single fetch on miss (distinguishes 404 from error).
+    // Check cache first; fall back to a single fetch that distinguishes 404 from error.
     std::string folderId;
     {
         std::lock_guard<std::mutex> lock(m_itemIdCacheMtx);
@@ -238,6 +238,22 @@ bool OneDriveProvider::SimpleUpload(uint32_t accountId, uint32_t appId,
     auto r = ApiRequest("PUT", itemPath + "/content",
                          std::string((const char*)data, len),
                          "application/octet-stream");
+    if (r.status == 404) {
+        // Legacy flat blob blocking CAS directory creation — remove and retry.
+        auto lastSlash = filename.rfind('/');
+        if (lastSlash != std::string::npos) {
+            std::string parentFile = filename.substr(0, lastSlash);
+            if (parentFile.find("blobs/") == 0) {
+                LOG("[OneDrive] SimpleUpload '%s': 404, removing legacy blob '%s' and retrying",
+                    filename.c_str(), parentFile.c_str());
+                DoOneDriveDelete(accountId, appId, parentFile);
+                InvalidateItemId(BuildItemPath(accountId, appId, parentFile));
+                r = ApiRequest("PUT", itemPath + "/content",
+                               std::string((const char*)data, len),
+                               "application/octet-stream");
+            }
+        }
+    }
     if (r.status < 200 || r.status >= 300) {
         LOG("[OneDrive] SimpleUpload '%s' failed: HTTP %d", filename.c_str(), r.status);
         return false;
@@ -358,7 +374,8 @@ bool OneDriveProvider::SessionUpload(uint32_t accountId, uint32_t appId,
         }
     }
 
-    // Extract item ID for timestamp PATCH and cache.
+    // Extract item ID from final response (or fall back to path lookup) for
+    // timestamp PATCH and cache population.
     {
         std::string itemId;
         if (!lastBody.empty())

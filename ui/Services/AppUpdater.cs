@@ -100,7 +100,7 @@ internal static class AppUpdater
 
             if (!foundCandidate || remoteVersion == null) return null;
 
-            // Find the .exe asset and hash file
+            // Find the GUI exe asset and hash file (exact match to avoid grabbing the CLI exe)
             if (!root.TryGetProperty("assets", out var assets))
                 return null;
 
@@ -110,12 +110,12 @@ internal static class AppUpdater
             foreach (var asset in assets.EnumerateArray())
             {
                 var name = asset.GetProperty("name").GetString() ?? "";
-                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                if (name.Equals("CloudRedirect.exe", StringComparison.OrdinalIgnoreCase))
                 {
                     downloadUrl = asset.GetProperty("browser_download_url").GetString();
                     assetName = name;
                 }
-                else if (name == "CloudRedirect.exe.sha256")
+                else if (name.Equals("CloudRedirect.exe.sha256", StringComparison.OrdinalIgnoreCase))
                 {
                     sha256Url = asset.GetProperty("browser_download_url").GetString();
                 }
