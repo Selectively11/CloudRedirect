@@ -118,6 +118,13 @@ void Writer::WriteFixed64(uint32_t fieldNum, uint64_t value) {
     memcpy(buf_.data() + pos, &value, 8);
 }
 
+void Writer::WriteFixed32(uint32_t fieldNum, uint32_t value) {
+    WriteTag(fieldNum, Fixed32);
+    size_t pos = buf_.size();
+    buf_.resize(pos + 4);
+    memcpy(buf_.data() + pos, &value, 4);
+}
+
 void Writer::WriteBytes(uint32_t fieldNum, const uint8_t* data, size_t len) {
     WriteTag(fieldNum, LengthDelimited);
     WriteRawVarint(len);

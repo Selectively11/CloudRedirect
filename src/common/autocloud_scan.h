@@ -51,4 +51,8 @@ std::vector<AutoCloudUtil::AutoCloudRootOverrideNative> GetRootOverrides(
 std::unordered_map<std::string, std::string> GetRootTokenDirectories(
     const std::string& steamPath, uint32_t appId, uint32_t accountId = 0);
 
+// Look up a game's display name from Steam's appinfo.vdf cache.
+// Returns empty string if not found.
+std::string GetAppName(const std::string& steamPath, uint32_t appId);
+
 } // namespace AutoCloudScan

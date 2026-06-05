@@ -39,6 +39,8 @@
 #include <limits>
 #include <thread>
 
+namespace AutoCloudScan { std::string GetAppName(const std::string& steamPath, uint32_t appId); }
+
 namespace CloudIntercept {
 
 static void ShutdownImpl();
@@ -66,6 +68,18 @@ static constexpr uintptr_t RVA_DEPOT_MANIFEST_CNT  = 0x1C3870;  // g_nDepotManif
 
 static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 
+// CMsgClientGamesPlayed EMsg variants
+static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED              = 742;
+static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED_NO_DATABLOB  = 715;
+static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED_WITH_DATABLOB = 5410;
+
+// CMsgClientGamesPlayed protobuf field numbers
+static constexpr uint32_t GP_FIELD_GAMES_PLAYED    = 1;   // repeated GamePlayed (length-delimited)
+// CMsgClientGamesPlayed.GamePlayed field numbers
+static constexpr uint32_t GP_FIELD_GAME_ID         = 2;   // fixed64
+static constexpr uint32_t GP_FIELD_GAME_EXTRA_INFO = 7;   // string
+static constexpr uint32_t GP_FIELD_OWNER_ID        = 12;  // uint32
+
 // steamclient64.dll RVAs for manifest pinning inline detour
 // IDA image base: 0x138000000
 // sub_1384C4040 = CUserAppManager::BuildDepotDependency
@@ -77,8 +91,15 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
 static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC910;
-
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
+
+// CProtoBufMsg::BAsyncSend(uint32_t connectionHandle)
+// Hooks this to inject game_extra_info into CMsgClientGamesPlayed before serialization.
+static constexpr uintptr_t SC_RVA_BASYNC_SEND = 0xCF0DF0;
+static constexpr size_t SC_BAS_STOLEN_BYTES = 15;   // 5+5+1+4 bytes of prologue
+// CProtoBufMsg layout offsets
+static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x20;  // uint32_t EMsg | PROTO_FLAG
+static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x30;  // protobuf body object*
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
@@ -4302,7 +4323,126 @@ void InstallReleaseStateNop() {
     // Stub -- release-state patching removed from public builds.
 }
 
+// ── BAsyncSend inline detour (GamesPlayed rewriting) ───────────────────
+//
+// Intercepts CProtoBufMsg::BAsyncSend before serialization.
+// If the message is CMsgClientGamesPlayed, we serialize the body, inject
+// game_extra_info for namespace apps, and write the modified body back
+// into the live protobuf object before the original function serializes
+// and sends it.
 
+using BAsyncSendFn = uint8_t(__fastcall*)(void* pMsg, uint32_t connHandle);
+
+static uint8_t* g_basOrigAddr = nullptr;         // original BAsyncSend address
+static uint8_t  g_basTrampoline[64] = {};         // trampoline: stolen prologue + jmp back
+static BAsyncSendFn g_basOriginal = nullptr;      // trampoline as callable
+
+// Forward declaration - defined later in file
+static std::vector<uint8_t> RewriteGamesPlayed(const uint8_t* body, uint32_t bodyLen);
+
+// Rewrite the GamesPlayed body in-place on the live protobuf object.
+static void RewriteGamesPlayedBody(void* bodyObj) {
+    auto bodyBytes = SerializeBodyToBytes(bodyObj);
+    if (bodyBytes.empty()) return;
+
+    auto newBody = RewriteGamesPlayed(bodyBytes.data(), (uint32_t)bodyBytes.size());
+    if (newBody.empty()) return;
+
+    ParseBytesToBody(bodyObj, newBody.data(), newBody.size());
+}
+
+static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
+    if (HasNamespaceApps() && pMsg && g_serializeToArray && g_parseFromArray) {
+        uint32_t emsgRaw = *(uint32_t*)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_EMSG);
+        uint32_t emsg = emsgRaw & EMSG_MASK;
+
+        if (emsg == EMSG_CLIENT_GAMES_PLAYED ||
+            emsg == EMSG_CLIENT_GAMES_PLAYED_NO_DATABLOB ||
+            emsg == EMSG_CLIENT_GAMES_PLAYED_WITH_DATABLOB) {
+
+            void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
+            if (bodyObj) {
+                RewriteGamesPlayedBody(bodyObj);
+            }
+        }
+    }
+
+    return g_basOriginal(pMsg, connHandle);
+}
+
+void InstallGamesPlayedHook() {
+    if (!HasNamespaceApps()) return;
+
+    HMODULE hSteamClient = GetModuleHandleA("steamclient64.dll");
+    if (!hSteamClient) {
+        LOG("[GamesPlayed] steamclient64.dll not loaded");
+        return;
+    }
+
+    uintptr_t scBase = reinterpret_cast<uintptr_t>(hSteamClient);
+    g_basOrigAddr = reinterpret_cast<uint8_t*>(scBase + SC_RVA_BASYNC_SEND);
+
+    LOG("[GamesPlayed] BAsyncSend at %p (sc+0x%X)", g_basOrigAddr, SC_RVA_BASYNC_SEND);
+
+    // Verify prologue matches expected bytes
+    static const uint8_t expectedPrologue[SC_BAS_STOLEN_BYTES] = {
+        0x48, 0x89, 0x5C, 0x24, 0x10,   // mov [rsp+10h], rbx
+        0x48, 0x89, 0x74, 0x24, 0x18,   // mov [rsp+18h], rsi
+        0x57,                             // push rdi
+        0x48, 0x83, 0xEC, 0x50           // sub rsp, 50h
+    };
+
+    if (memcmp(g_basOrigAddr, expectedPrologue, SC_BAS_STOLEN_BYTES) != 0) {
+        LOG("[GamesPlayed] Prologue mismatch at BAsyncSend -- skipping hook");
+        g_basOrigAddr = nullptr;
+        return;
+    }
+
+    // Build trampoline: stolen bytes + jmp back to original+15
+    DWORD oldTrampolineProt;
+    VirtualProtect(g_basTrampoline, sizeof(g_basTrampoline), PAGE_EXECUTE_READWRITE, &oldTrampolineProt);
+
+    memcpy(g_basTrampoline, g_basOrigAddr, SC_BAS_STOLEN_BYTES);
+    uint8_t* jumpBack = g_basTrampoline + SC_BAS_STOLEN_BYTES;
+    // jmp [rip+0]; <8-byte addr>
+    jumpBack[0] = 0xFF;
+    jumpBack[1] = 0x25;
+    jumpBack[2] = 0x00;
+    jumpBack[3] = 0x00;
+    jumpBack[4] = 0x00;
+    jumpBack[5] = 0x00;
+    uintptr_t returnAddr = reinterpret_cast<uintptr_t>(g_basOrigAddr) + SC_BAS_STOLEN_BYTES;
+    memcpy(jumpBack + 6, &returnAddr, 8);
+
+    g_basOriginal = reinterpret_cast<BAsyncSendFn>(reinterpret_cast<uintptr_t>(g_basTrampoline));
+
+    // Patch original function with jmp to our hook
+    DWORD oldProt;
+    if (!VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[GamesPlayed] VirtualProtect failed (%u)", GetLastError());
+        g_basOrigAddr = nullptr;
+        return;
+    }
+
+    // Build detour: jmp [rip+0]; <8-byte hookAddr>; nop (15 bytes = 14+1)
+    uint8_t detour[SC_BAS_STOLEN_BYTES];
+    detour[0] = 0xFF;
+    detour[1] = 0x25;
+    detour[2] = 0x00;
+    detour[3] = 0x00;
+    detour[4] = 0x00;
+    detour[5] = 0x00;
+    uintptr_t hookAddr = reinterpret_cast<uintptr_t>(&BAsyncSendHook);
+    memcpy(detour + 6, &hookAddr, 8);
+    detour[14] = 0x90; // nop for the 15th byte
+    memcpy(g_basOrigAddr, detour, SC_BAS_STOLEN_BYTES);
+
+    FlushInstructionCache(GetCurrentProcess(), g_basOrigAddr, SC_BAS_STOLEN_BYTES);
+    VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, oldProt, &oldProt);
+
+    LOG("[GamesPlayed] Inline detour installed at %p -> BAsyncSendHook %p",
+        g_basOrigAddr, (void*)hookAddr);
+}
 
 void SetSendPktAddr(void* recvPktGlobalAddr) {
     if (!recvPktGlobalAddr) {
@@ -4312,6 +4452,121 @@ void SetSendPktAddr(void* recvPktGlobalAddr) {
 
     g_payloadBase = (uintptr_t)recvPktGlobalAddr - RVA_RECV_PKT_GLOBAL;
     LOG("[NS] payload_base=%p", (void*)g_payloadBase);
+}
+
+// ── GamesPlayed rewriting ──────────────────────────────────────────────
+//
+// When Steam sends CMsgClientGamesPlayed (EMsg 742/715/5410), each
+// games_played entry carries a game_id.  For LUA-unlocked (namespace)
+// apps the user has no server-side license, so friends see nothing or a
+// raw appId.  Setting game_extra_info on those entries makes Steam show
+// "Playing non-Steam game: <title>" instead.
+
+static std::mutex g_gameNameCacheMtx;
+static std::unordered_map<uint32_t, std::string> g_gameNameCache;
+
+static const std::string& LookupGameName(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_gameNameCacheMtx);
+    auto it = g_gameNameCache.find(appId);
+    if (it != g_gameNameCache.end()) return it->second;
+
+    std::string name = AutoCloudScan::GetAppName(g_steamPath, appId);
+    if (name.empty())
+        name = "App " + std::to_string(appId);
+    auto [ins, _] = g_gameNameCache.emplace(appId, std::move(name));
+    return ins->second;
+}
+
+// Rewrite CMsgClientGamesPlayed body: for each games_played entry whose
+// game_id is a namespace app and has no game_extra_info, inject the title.
+// Returns an empty vector if no changes were made (caller should send the
+// original packet unmodified).
+static std::vector<uint8_t> RewriteGamesPlayed(const uint8_t* body, uint32_t bodyLen) {
+    auto outerFields = PB::Parse(body, bodyLen);
+    bool needsRewrite = false;
+
+    // First pass: check if any entry needs rewriting
+    for (const auto& f : outerFields) {
+        if (f.fieldNum != GP_FIELD_GAMES_PLAYED || f.wireType != PB::LengthDelimited)
+            continue;
+        auto inner = PB::Parse(f.data, f.dataLen);
+        // Extract game_id (fixed64, field 2)
+        const auto* gameIdField = PB::FindField(inner, GP_FIELD_GAME_ID);
+        if (!gameIdField) continue;
+        uint32_t appId = (uint32_t)(gameIdField->varintVal & 0x00FFFFFF); // low 24 bits = appId in CGameID
+        if (appId == 0) continue;
+        if (!IsNamespaceApp(appId)) continue;
+        // Check if game_extra_info is already set
+        auto existing = PB::GetString(inner, GP_FIELD_GAME_EXTRA_INFO);
+        if (!existing.empty()) continue;
+        needsRewrite = true;
+        break;
+    }
+
+    if (!needsRewrite) return {};
+
+    // Second pass: rebuild body with game_extra_info injected
+    PB::Writer newBody;
+    for (const auto& f : outerFields) {
+        if (f.fieldNum != GP_FIELD_GAMES_PLAYED || f.wireType != PB::LengthDelimited) {
+            // Copy non-games_played fields as-is
+            if (f.wireType == PB::Varint)
+                newBody.WriteVarint(f.fieldNum, f.varintVal);
+            else if (f.wireType == PB::Fixed64)
+                newBody.WriteFixed64(f.fieldNum, f.varintVal);
+            else if (f.wireType == PB::LengthDelimited)
+                newBody.WriteBytes(f.fieldNum, f.data, f.dataLen);
+            else if (f.wireType == PB::Fixed32)
+                newBody.WriteFixed32(f.fieldNum, (uint32_t)f.varintVal);
+            continue;
+        }
+
+        auto inner = PB::Parse(f.data, f.dataLen);
+        const auto* gameIdField = PB::FindField(inner, GP_FIELD_GAME_ID);
+        uint32_t appId = gameIdField ? (uint32_t)(gameIdField->varintVal & 0x00FFFFFF) : 0;
+        bool isNs = appId > 0 && IsNamespaceApp(appId);
+        auto existingInfo = PB::GetString(inner, GP_FIELD_GAME_EXTRA_INFO);
+
+        if (isNs && existingInfo.empty()) {
+            // Rebuild this GamePlayed entry as a non-Steam game shortcut.
+            // The friends server shows "Playing non-Steam game: <title>"
+            // when game_id has CGameID type 2 (shortcut).
+            const std::string& name = LookupGameName(appId);
+
+            // Build a shortcut-style CGameID: type=2, appId=0, modId=hash
+            // CGameID layout: bits 0-23 = appId, bits 24-31 = type, bits 32-63 = modId
+            // Hash the game name to produce a stable modId (like Steam does for shortcuts)
+            uint32_t modId = 0;
+            for (char c : name) modId = modId * 31 + (uint8_t)c;
+            modId |= 0x80000000; // set high bit like Steam shortcut hashes
+            uint64_t shortcutGameId = ((uint64_t)modId << 32) | (2ULL << 24); // type=2, appId=0
+
+            PB::Writer sub;
+            for (const auto& sf : inner) {
+                if (sf.fieldNum == GP_FIELD_GAME_ID) continue;         // replace with shortcut
+                if (sf.fieldNum == GP_FIELD_GAME_EXTRA_INFO) continue; // replace with title
+                if (sf.fieldNum == GP_FIELD_OWNER_ID) continue;        // clear
+                if (sf.wireType == PB::Varint)
+                    sub.WriteVarint(sf.fieldNum, sf.varintVal);
+                else if (sf.wireType == PB::Fixed64)
+                    sub.WriteFixed64(sf.fieldNum, sf.varintVal);
+                else if (sf.wireType == PB::LengthDelimited)
+                    sub.WriteBytes(sf.fieldNum, sf.data, sf.dataLen);
+                else if (sf.wireType == PB::Fixed32)
+                    sub.WriteFixed32(sf.fieldNum, (uint32_t)sf.varintVal);
+            }
+            sub.WriteFixed64(GP_FIELD_GAME_ID, shortcutGameId);
+            sub.WriteString(GP_FIELD_GAME_EXTRA_INFO, name);
+            sub.WriteVarint(GP_FIELD_OWNER_ID, 0);
+            newBody.WriteSubmessage(GP_FIELD_GAMES_PLAYED, sub);
+            LOG("[GamesPlayed] Injected game_extra_info for app %u: \"%s\"", appId, name.c_str());
+        } else {
+            // Copy unmodified
+            newBody.WriteBytes(f.fieldNum, f.data, f.dataLen);
+        }
+    }
+
+    return {newBody.Data().begin(), newBody.Data().end()};
 }
 
 // OnSendPkt — vtable hook handles namespace Cloud RPCs; this is the fallback path.
@@ -4737,6 +4992,21 @@ static void ShutdownImpl() {
         g_bddTrampoline = nullptr;
         g_origBuildDepotDependency = nullptr;
         g_bddOrigAddr = nullptr;
+    }
+
+    // Restore BAsyncSend detour
+    if (g_basOrigAddr) {
+        HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
+        if (currentSC) {
+            DWORD oldProt;
+            if (VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                memcpy(g_basOrigAddr, g_basTrampoline, SC_BAS_STOLEN_BYTES);
+                FlushInstructionCache(GetCurrentProcess(), g_basOrigAddr, SC_BAS_STOLEN_BYTES);
+                VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, oldProt, &oldProt);
+            }
+        }
+        g_basOriginal = nullptr;
+        g_basOrigAddr = nullptr;
     }
 
     // Both threads poll g_shuttingDown; 5s is generous. Stuck network I/O

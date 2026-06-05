@@ -1382,4 +1382,8 @@ std::unordered_map<std::string, std::string> GetRootTokenDirectories(
     return result;
 }
 
+std::string GetAppName(const std::string& steamPath, uint32_t appId) {
+    return GetAppNameFromAppInfo(steamPath, appId);
+}
+
 } // namespace AutoCloudScan

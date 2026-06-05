@@ -34,6 +34,7 @@ void InstallManifestPinHook();
 
 // Stub -- release-state patching removed from public builds.
 void InstallReleaseStateNop();
+void InstallGamesPlayedHook();
 
 // compute payload base and set up cave replacement buffer globals
 void SetSendPktAddr(void* recvPktGlobalAddr);

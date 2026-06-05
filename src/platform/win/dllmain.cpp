@@ -65,6 +65,8 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
 
             CloudIntercept::InstallReleaseStateNop();
 
+            CloudIntercept::InstallGamesPlayedHook();
+
             LOG("CloudRedirect fully initialized with hooks");
         } catch (const std::exception& ex) {
             LOG("CloudRedirect init FAILED: %s", ex.what());
