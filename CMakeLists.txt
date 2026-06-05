@@ -149,7 +149,7 @@ else()
     target_link_libraries(cloud_redirect PRIVATE dl pthread)
     # Steam on Linux is 32-bit; use LINUX_32BIT=ON when cross-compiling on 64-bit host
     # Match Steam's pre-C++11 ABI
-    target_compile_definitions(cloud_redirect PRIVATE _GLIBCXX_USE_CXX11_ABI=0)
+    target_compile_definitions(cloud_redirect PRIVATE _GLIBCXX_USE_CXX11_ABI=0 _FILE_OFFSET_BITS=64)
     if(LINUX_32BIT)
         target_compile_options(cloud_redirect PRIVATE -m32)
         target_link_options(cloud_redirect PRIVATE -m32)
