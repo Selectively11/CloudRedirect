@@ -150,6 +150,20 @@ class Program
         }
         Console.WriteLine("OK");
 
+        // Patch SteamTools.exe so it doesn't overwrite Core.dll on startup and
+        // doesn't show its interactive activation menu. The UI's "run all" flow
+        // applies this; the CLI must too, or users get prompted to "push 1 or 2".
+        Console.WriteLine();
+        Console.WriteLine("Patching SteamTools.exe...");
+        var stResult = patcher.PatchSteamToolsExe();
+        if (stResult == 1)
+            Console.WriteLine("OK");
+        else if (stResult == 0)
+            Console.WriteLine("Skipped (SteamTools.exe not installed).");
+        else
+            Console.WriteLine("WARNING: SteamTools.exe patch failed -- see messages above. " +
+                              "STFixer patches still applied; you may be prompted by SteamTools on startup.");
+
         // Deploy DLL
         Console.WriteLine();
         Console.WriteLine("Deploying cloud_redirect.dll...");
