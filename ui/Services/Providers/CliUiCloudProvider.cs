@@ -87,6 +87,72 @@ internal sealed class CliUiCloudProvider : IUiCloudProvider
         }
     }
 
+    public async Task<CloudProviderClient.DownloadBlobResult> DownloadAppBlobAsync(
+        string accountId, string appId, string filename, CancellationToken cancel)
+    {
+        var arg = filename.Contains(' ') ? $"\"{filename}\"" : filename;
+        var result = await RunCliAsync($"download-blob {_provider} {accountId} {appId} {arg}", cancel);
+
+        if (result.ExitCode != 0)
+        {
+            var error = TryGetError(result.Output) ?? $"CLI exited with code {result.ExitCode}";
+            return new CloudProviderClient.DownloadBlobResult(false, null, error);
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(result.Output);
+            var root = doc.RootElement;
+
+            bool found = root.TryGetProperty("found", out var foundProp) && foundProp.GetBoolean();
+            string? error = root.TryGetProperty("error", out var errorProp) ? errorProp.GetString() : null;
+            string? content = root.TryGetProperty("content", out var contentProp) ? contentProp.GetString() : null;
+
+            return new CloudProviderClient.DownloadBlobResult(found, content, error);
+        }
+        catch (JsonException ex)
+        {
+            return new CloudProviderClient.DownloadBlobResult(false, null, $"Invalid CLI response: {ex.Message}");
+        }
+    }
+
+    public async Task<CloudProviderClient.ListAllStatsResult> ListAllStatsAsync(CancellationToken cancel)
+    {
+        var result = await RunCliAsync($"list-all-stats {_provider}", cancel);
+        if (result.ExitCode != 0)
+        {
+            var error = TryGetError(result.Output) ?? $"CLI exited with code {result.ExitCode}";
+            return new CloudProviderClient.ListAllStatsResult(
+                Array.Empty<CloudProviderClient.CloudStatsEntry>(), error);
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(result.Output);
+            var root = doc.RootElement;
+            string? error = root.TryGetProperty("error", out var errorProp) ? errorProp.GetString() : null;
+
+            var entries = new List<CloudProviderClient.CloudStatsEntry>();
+            if (root.TryGetProperty("apps", out var appsArr) && appsArr.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in appsArr.EnumerateArray())
+                {
+                    var acct = item.TryGetProperty("account_id", out var a) ? a.GetString() : null;
+                    var app = item.TryGetProperty("app_id", out var p) ? p.GetString() : null;
+                    var content = item.TryGetProperty("content", out var c) ? c.GetString() : null;
+                    if (!string.IsNullOrEmpty(acct) && !string.IsNullOrEmpty(app) && !string.IsNullOrEmpty(content))
+                        entries.Add(new CloudProviderClient.CloudStatsEntry(acct!, app!, content!));
+                }
+            }
+            return new CloudProviderClient.ListAllStatsResult(entries, error);
+        }
+        catch (JsonException ex)
+        {
+            return new CloudProviderClient.ListAllStatsResult(
+                Array.Empty<CloudProviderClient.CloudStatsEntry>(), $"Invalid CLI response: {ex.Message}");
+        }
+    }
+
     public async Task<CloudProviderClient.DeleteBlobsResult> DeleteAppBlobsAsync(
         string accountId, string appId,
         IReadOnlyCollection<string> blobFilenames, CancellationToken cancel)

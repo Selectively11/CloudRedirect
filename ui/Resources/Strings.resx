@@ -67,6 +67,72 @@
   <data name="Nav_ManifestPinning" xml:space="preserve">
     <value>Manifest Pinning</value>
   </data>
+  <data name="Nav_Stats" xml:space="preserve">
+    <value>Stats &amp; Playtime</value>
+  </data>
+  <data name="Stats_Hint" xml:space="preserve">
+    <value>WIP WIP BLAH BLAH BLAH LOREM IPSUM</value>
+  </data>
+  <data name="Stats_Refresh" xml:space="preserve">
+    <value>Refresh</value>
+  </data>
+  <data name="Stats_NoData" xml:space="preserve">
+    <value>No synced stats found in the cloud yet. Launch a Lua-unlocked game with CloudRedirect active, let it sync, then refresh.</value>
+  </data>
+  <data name="Stats_NoCloud" xml:space="preserve">
+    <value>No cloud provider is configured. Set up Google Drive, OneDrive, or a folder in Cloud Provider settings to view synced stats.</value>
+  </data>
+  <data name="Stats_AppFallbackName" xml:space="preserve">
+    <value>App {0}</value>
+  </data>
+  <data name="Stats_AccountHeader" xml:space="preserve">
+    <value>Account {0}</value>
+  </data>
+  <data name="Stats_PlaytimeForever" xml:space="preserve">
+    <value>PLAYTIME (TOTAL)</value>
+  </data>
+  <data name="Stats_Playtime2Weeks" xml:space="preserve">
+    <value>LAST 2 WEEKS</value>
+  </data>
+  <data name="Stats_LastPlayed" xml:space="preserve">
+    <value>LAST PLAYED</value>
+  </data>
+  <data name="Stats_AchievementsHeader" xml:space="preserve">
+    <value>Achievements</value>
+  </data>
+  <data name="Stats_StatsHeader" xml:space="preserve">
+    <value>Stats</value>
+  </data>
+  <data name="Stats_Minutes" xml:space="preserve">
+    <value>{0} min</value>
+  </data>
+  <data name="Stats_Hours" xml:space="preserve">
+    <value>{0} h</value>
+  </data>
+  <data name="Stats_NoPlaytime" xml:space="preserve">
+    <value>None</value>
+  </data>
+  <data name="Stats_Never" xml:space="preserve">
+    <value>Never</value>
+  </data>
+  <data name="Stats_Locked" xml:space="preserve">
+    <value>Locked</value>
+  </data>
+  <data name="Stats_StatId" xml:space="preserve">
+    <value>Stat {0}</value>
+  </data>
+  <data name="Stats_AchievementBit" xml:space="preserve">
+    <value>Stat {0} · bit {1}</value>
+  </data>
+  <data name="Stats_SummaryPlaytime" xml:space="preserve">
+    <value>{0} played</value>
+  </data>
+  <data name="Stats_SummaryAchievements" xml:space="preserve">
+    <value>{0} achievements</value>
+  </data>
+  <data name="Stats_SummaryStats" xml:space="preserve">
+    <value>{0} stats</value>
+  </data>
   <data name="Nav_Settings" xml:space="preserve">
     <value>Settings</value>
   </data>

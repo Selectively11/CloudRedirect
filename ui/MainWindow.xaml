@@ -114,6 +114,9 @@
                 <ui:NavigationViewItem Content="{res:Loc Nav_ManifestPinning}"
                                          Icon="{ui:SymbolIcon Pin24}"
                                          TargetPageType="{x:Type pages:ManifestPinningPage}" />
+                <ui:NavigationViewItem Content="{res:Loc Nav_Stats}"
+                                         Icon="{ui:SymbolIcon Trophy24}"
+                                         TargetPageType="{x:Type pages:StatsPage}" />
             </ui:NavigationView.MenuItems>
 
             <ui:NavigationView.FooterMenuItems>

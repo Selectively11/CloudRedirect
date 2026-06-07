@@ -29,6 +29,9 @@ std::string CmdListRemoteAppIds(const std::string& provider, const std::string& 
 std::string CmdListRemoteAppFiles(const std::string& provider, const std::string& accountId, const std::string& appId);
 std::string CmdDeleteRemoteApp(const std::string& provider, const std::string& accountId, const std::string& appId);
 std::string CmdListBlobs(const std::string& provider, const std::string& accountId, const std::string& appId);
+std::string CmdDownloadBlob(const std::string& provider, const std::string& accountId,
+                            const std::string& appId, const std::string& blobName);
+std::string CmdListAllStats(const std::string& provider);
 std::string CmdDeleteBlobs(const std::string& provider, const std::string& accountId, const std::string& appId,
                            const std::vector<std::string>& blobNames);
 std::string CmdSyncRemoteApp(const std::string& provider, const std::string& accountId, const std::string& appId,

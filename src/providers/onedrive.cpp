@@ -230,6 +230,74 @@ OneDriveProvider::DownloadFileById(const std::string& itemId) {
     return std::nullopt;
 }
 
+std::vector<ICloudProvider::SearchHit>
+OneDriveProvider::SearchByName(const std::string& filename, bool* outSupported) {
+    if (outSupported) *outSupported = true;
+    std::vector<SearchHit> hits;
+
+    // Graph search. Each hit's parentReference.path is like
+    //   "/drive/root:/CloudRedirect/{accountId}/{appId}"
+    // so account/app come straight from the path -- no extra lookups.
+    std::string url = "/v1.0/me/drive/root/search(q='" + EncodePath(filename) + "')"
+                      "?$select=id,name,parentReference&$top=200";
+
+    while (!url.empty()) {
+        auto r = ApiGet(url);
+        if (r.status != 200) {
+            LOG("[OneDrive] SearchByName('%s'): HTTP %d", filename.c_str(), r.status);
+            if (hits.empty() && outSupported) *outSupported = (r.status == 404);
+            return hits;
+        }
+
+        auto j = Json::Parse(r.body);
+        auto& items = j["value"];
+        for (size_t i = 0; i < items.size(); ++i) {
+            auto& item = items[i];
+            std::string name = UrlDecode(item["name"].str());
+            if (name != filename) continue; // search is fuzzy; require exact name
+
+            std::string parentPath = item["parentReference"]["path"].str();
+            // Find the segment after "CloudRedirect/".
+            const std::string marker = "CloudRedirect/";
+            size_t pos = parentPath.find(marker);
+            if (pos == std::string::npos) continue;
+            std::string rest = parentPath.substr(pos + marker.size()); // "{acct}/{app}" (maybe more)
+            size_t slash = rest.find('/');
+            if (slash == std::string::npos) continue;
+            std::string accountId = rest.substr(0, slash);
+            std::string appId = rest.substr(slash + 1);
+            // appId may have a trailing "/sub" -- keep only the first segment.
+            size_t slash2 = appId.find('/');
+            if (slash2 != std::string::npos) appId = appId.substr(0, slash2);
+
+            // Our layout uses numeric account/app folder names.
+            bool ok = !accountId.empty() && !appId.empty();
+            for (char c : accountId) if (c < '0' || c > '9') { ok = false; break; }
+            for (char c : appId)     if (c < '0' || c > '9') { ok = false; break; }
+            if (!ok) continue;
+
+            auto content = DownloadFileById(item["id"].str());
+            if (!content || content->empty()) continue;
+
+            SearchHit hit;
+            hit.path = accountId + "/" + appId + "/" + filename;
+            hit.content = std::move(*content);
+            hits.push_back(std::move(hit));
+        }
+
+        // Pagination.
+        auto nextLink = j["@odata.nextLink"].str();
+        url.clear();
+        if (!nextLink.empty()) {
+            size_t pathStart = nextLink.find("/v1.0/");
+            if (pathStart != std::string::npos) url = nextLink.substr(pathStart);
+        }
+    }
+
+    LOG("[OneDrive] SearchByName('%s'): %zu match(es)", filename.c_str(), hits.size());
+    return hits;
+}
+
 // simple upload (<=4MB): PUT content to path-based address
 bool OneDriveProvider::SimpleUpload(uint32_t accountId, uint32_t appId,
                                      const std::string& filename,

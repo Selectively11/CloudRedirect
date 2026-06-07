@@ -17,6 +17,11 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <algorithm>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -438,6 +443,105 @@ std::string CmdListBlobs(const std::string& provider, const std::string& account
     });
 }
 
+// Search the cloud directly for every stats.json and return each one's content.
+// Uses the provider's native filename search (Drive) -- one query, no per-account
+// or per-app enumeration. The UI just renders the result.
+// Output: {"success":true,"apps":[{"account_id":"..","app_id":"..","content":"<json>"},...]}
+std::string CmdListAllStats(const std::string& provider) {
+    std::string tokenPath = GetTokenPath(provider);
+    if (tokenPath.empty()) {
+        return JsonError("Cannot determine config directory");
+    }
+
+    auto prov = CreateCloudProvider(provider);
+    if (!prov) {
+        return JsonError("Unknown provider: " + provider);
+    }
+    if (!prov->Init(tokenPath)) {
+        return JsonError("Failed to initialize provider");
+    }
+    if (!prov->IsAuthenticated()) {
+        prov->Shutdown();
+        return JsonError("Not authenticated");
+    }
+
+    bool supported = false;
+    auto hits = prov->SearchByName("stats.json", &supported);
+    prov->Shutdown();
+
+    if (!supported) {
+        return JsonError("Search not supported for provider: " + provider);
+    }
+
+    std::ostringstream apps;
+    apps << "[";
+    bool first = true;
+    for (const auto& h : hits) {
+        // h.path is "<accountId>/<appId>/stats.json".
+        size_t s1 = h.path.find('/');
+        if (s1 == std::string::npos) continue;
+        size_t s2 = h.path.find('/', s1 + 1);
+        if (s2 == std::string::npos) continue;
+        std::string accountId = h.path.substr(0, s1);
+        std::string appId = h.path.substr(s1 + 1, s2 - s1 - 1);
+        std::string content(reinterpret_cast<const char*>(h.content.data()), h.content.size());
+
+        if (!first) apps << ",";
+        apps << JsonObject({
+            {"account_id", JsonString(accountId)},
+            {"app_id", JsonString(appId)},
+            {"content", JsonString(content)}
+        });
+        first = false;
+    }
+    apps << "]";
+    return std::string("{\"success\":true,\"apps\":") + apps.str() + "}";
+}
+
+std::string CmdDownloadBlob(const std::string& provider, const std::string& accountId,
+                            const std::string& appId, const std::string& blobName) {
+    std::string tokenPath = GetTokenPath(provider);
+    if (tokenPath.empty()) {
+        return JsonError("Cannot determine config directory");
+    }
+
+    auto prov = CreateCloudProvider(provider);
+    if (!prov) {
+        return JsonError("Unknown provider: " + provider);
+    }
+
+    if (!prov->Init(tokenPath)) {
+        return JsonError("Failed to initialize provider");
+    }
+
+    if (!prov->IsAuthenticated()) {
+        prov->Shutdown();
+        return JsonError("Not authenticated");
+    }
+
+    // Metadata-text blobs (e.g. stats.json) live at <accountId>/<appId>/<name>
+    // and are stored uncompressed, so the raw download is the literal content.
+    std::string path = accountId + "/" + appId + "/" + blobName;
+    std::vector<uint8_t> data;
+    bool ok = prov->Download(path, data);
+    prov->Shutdown();
+
+    if (!ok) {
+        return JsonObject({
+            {"success", JsonBool(false)},
+            {"found", JsonBool(false)},
+            {"error", JsonString("Blob not found")}
+        });
+    }
+
+    std::string content(reinterpret_cast<const char*>(data.data()), data.size());
+    return JsonObject({
+        {"success", JsonBool(true)},
+        {"found", JsonBool(true)},
+        {"content", JsonString(content)}
+    });
+}
+
 std::string CmdDeleteBlobs(const std::string& provider, const std::string& accountId, const std::string& appId,
                            const std::vector<std::string>& blobNames) {
     std::string tokenPath = GetTokenPath(provider);
@@ -775,6 +879,8 @@ static void PrintUsage() {
     fprintf(stderr, "  list-remote-app-files <provider> <account_id> <app_id>  List every file path in one remote app\n");
     fprintf(stderr, "  delete-remote-app <provider> <account_id> <app_id>  Delete app from cloud\n");
     fprintf(stderr, "  list-blobs <provider> <account_id> <app_id>  List blob files in app\n");
+    fprintf(stderr, "  download-blob <provider> <account_id> <app_id> <blob>  Download a single blob's content\n");
+    fprintf(stderr, "  list-all-stats <provider>  Search the cloud for every app's stats.json\n");
     fprintf(stderr, "  delete-blobs <provider> <account_id> <app_id> <blob>...  Delete specific blobs\n");
     fprintf(stderr, "  sync-remote-app <provider> <account_id> <app_id> <cloud_root>  Run SyncFromCloud for one app\n");
     fprintf(stderr, "  sync-all-remote-apps <provider> <account_id> <cloud_root>  Run SyncAllFromCloud for one account\n");
@@ -835,6 +941,20 @@ int RunCli(int argc, char** argv) {
             return 1;
         }
         result = CmdListBlobs(argv[3], argv[4], argv[5]);
+    }
+    else if (strcmp(command, "download-blob") == 0) {
+        if (argc < 7) {
+            fprintf(stderr, "Error: download-blob requires <provider> <account_id> <app_id> <blob>\n");
+            return 1;
+        }
+        result = CmdDownloadBlob(argv[3], argv[4], argv[5], argv[6]);
+    }
+    else if (strcmp(command, "list-all-stats") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Error: list-all-stats requires <provider>\n");
+            return 1;
+        }
+        result = CmdListAllStats(argv[3]);
     }
     else if (strcmp(command, "delete-blobs") == 0) {
         if (argc < 7) {

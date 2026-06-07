@@ -23,6 +23,18 @@ internal interface IUiCloudProvider
         string accountId, string appId, CancellationToken cancel);
 
     /// <summary>
+    /// Download a single named metadata blob (e.g. stats.json) stored at
+    /// {accountId}/{appId}/{filename}. Returns Found=false if it does not exist.
+    /// </summary>
+    Task<CloudProviderClient.DownloadBlobResult> DownloadAppBlobAsync(
+        string accountId, string appId, string filename, CancellationToken cancel);
+
+    /// <summary>
+    /// Search the cloud for every app's stats.json and return each one's content.
+    /// </summary>
+    Task<CloudProviderClient.ListAllStatsResult> ListAllStatsAsync(CancellationToken cancel);
+
+    /// <summary>
     /// Delete the named blobs. The facade has already filtered unsafe names
     /// (path separators, traversal, reserved DOS names, trailing dot/space).
     /// </summary>

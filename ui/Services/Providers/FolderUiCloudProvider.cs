@@ -57,6 +57,80 @@ internal sealed class FolderUiCloudProvider : IUiCloudProvider
         return Task.FromResult(new CloudProviderClient.ListBlobsResult(names, true, null));
     }
 
+    public Task<CloudProviderClient.DownloadBlobResult> DownloadAppBlobAsync(
+        string accountId, string appId, string filename, CancellationToken cancel)
+    {
+        // Metadata-text blobs (stats.json) live at {accountId}/{appId}/{name},
+        // not under blobs/ (those are SHA content blobs).
+        var appDir = Path.Combine(_syncPath, accountId, appId);
+        var appDirFull = Path.GetFullPath(appDir);
+        if (!appDirFull.EndsWith(Path.DirectorySeparatorChar) &&
+            !appDirFull.EndsWith(Path.AltDirectorySeparatorChar))
+        {
+            appDirFull += Path.DirectorySeparatorChar;
+        }
+
+        string path;
+        try { path = Path.GetFullPath(Path.Combine(appDir, filename)); }
+        catch { return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, "Invalid path")); }
+
+        if (!path.StartsWith(appDirFull, StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, "Path traversal rejected"));
+
+        if (!File.Exists(path))
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, null));
+
+        try
+        {
+            var content = File.ReadAllText(path);
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(true, content, null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, ex.Message));
+        }
+    }
+
+    public Task<CloudProviderClient.ListAllStatsResult> ListAllStatsAsync(CancellationToken cancel)
+    {
+        // Folder provider has no search API; scan the sync root directly for
+        // {accountId}/{appId}/stats.json. Cheap on a local/network folder.
+        var entries = new List<CloudProviderClient.CloudStatsEntry>();
+        try
+        {
+            if (!Directory.Exists(_syncPath))
+                return Task.FromResult(new CloudProviderClient.ListAllStatsResult(entries, null));
+
+            foreach (var acctDir in Directory.GetDirectories(_syncPath))
+            {
+                var accountId = Path.GetFileName(acctDir);
+                if (string.IsNullOrEmpty(accountId) || !ulong.TryParse(accountId, out _)) continue;
+
+                foreach (var appDir in Directory.GetDirectories(acctDir))
+                {
+                    var appId = Path.GetFileName(appDir);
+                    if (string.IsNullOrEmpty(appId) || !uint.TryParse(appId, out _)) continue;
+
+                    var statsPath = Path.Combine(appDir, "stats.json");
+                    if (!File.Exists(statsPath)) continue;
+
+                    try
+                    {
+                        var content = File.ReadAllText(statsPath);
+                        if (!string.IsNullOrEmpty(content))
+                            entries.Add(new CloudProviderClient.CloudStatsEntry(accountId, appId, content));
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new CloudProviderClient.ListAllStatsResult(entries, ex.Message));
+        }
+        return Task.FromResult(new CloudProviderClient.ListAllStatsResult(entries, null));
+    }
+
     public Task<CloudProviderClient.DeleteBlobsResult> DeleteAppBlobsAsync(
         string accountId, string appId,
         IReadOnlyCollection<string> blobFilenames, CancellationToken cancel)

@@ -21,7 +21,13 @@ internal static class EmbeddedCli
         if (cliStream == null || dllStream == null)
             return null;
 
-        string baseDir = Path.Combine(Path.GetTempPath(), "CloudRedirect", ComputeResourceHash(cliStream));
+        // Hash BOTH the launcher stub and the DLL: the stub (cli_main) loads the
+        // DLL and runs the real CLI logic from it, so when only the DLL changes
+        // (e.g. a new command) the stub hash alone would not change and we'd
+        // reuse a temp dir with a stale DLL. Including the DLL forces a fresh
+        // extract whenever either resource changes.
+        string baseDir = Path.Combine(Path.GetTempPath(), "CloudRedirect",
+            ComputeResourceHash(cliStream, dllStream));
         Directory.CreateDirectory(baseDir);
 
         string exePath = Path.Combine(baseDir, "cloud_redirect_cli.exe");
@@ -46,11 +52,23 @@ internal static class EmbeddedCli
         return exePath;
     }
 
-    private static string ComputeResourceHash(Stream stream)
+    private static string ComputeResourceHash(params Stream[] streams)
     {
-        stream.Position = 0;
         using var sha = System.Security.Cryptography.SHA256.Create();
-        var hash = sha.ComputeHash(stream);
-        return Convert.ToHexString(hash).Substring(0, 16);
+        foreach (var stream in streams)
+        {
+            stream.Position = 0;
+            var bytes = new byte[stream.Length];
+            int read = 0;
+            while (read < bytes.Length)
+            {
+                int n = stream.Read(bytes, read, bytes.Length - read);
+                if (n == 0) break;
+                read += n;
+            }
+            sha.TransformBlock(bytes, 0, read, null, 0);
+        }
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return Convert.ToHexString(sha.Hash!).Substring(0, 16);
     }
 }

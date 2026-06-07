@@ -2,6 +2,7 @@ build/
 build-*/
 ui/bin/
 ui/obj/
+ui/publish/
 ui-linux/build/
 flatpak/.flatpak-builder/
 flatpak/build-dir/

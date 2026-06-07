@@ -558,6 +558,84 @@ GoogleDriveProvider::DownloadFileById(const std::string& fileId) {
     return std::vector<uint8_t>(r.body.begin(), r.body.end());
 }
 
+std::vector<ICloudProvider::SearchHit>
+GoogleDriveProvider::SearchByName(const std::string& filename, bool* outSupported) {
+    if (outSupported) *outSupported = true;
+    std::vector<SearchHit> hits;
+
+    // Per-folder-id name resolution with a tiny local cache (account/app
+    // folders repeat across hits). Returns "" on failure.
+    std::unordered_map<std::string, std::pair<std::string, std::string>> folderInfo; // id -> {name, parentId}
+    auto getFolder = [&](const std::string& id) -> std::pair<std::string, std::string> {
+        auto it = folderInfo.find(id);
+        if (it != folderInfo.end()) return it->second;
+        auto r = ApiGet("/drive/v3/files/" + id + "?fields=name,parents");
+        std::pair<std::string, std::string> info;
+        if (r.status == 200) {
+            auto j = Json::Parse(r.body);
+            info.first = j["name"].str();
+            auto& parents = j["parents"];
+            if (parents.size() > 0) info.second = parents[(size_t)0].str();
+        }
+        folderInfo[id] = info;
+        return info;
+    };
+
+    // Global search for the exact filename.
+    std::string q = "name='" + EscapeQuery(filename) + "'"
+                    " and mimeType!='application/vnd.google-apps.folder'"
+                    " and trashed=false";
+    std::string baseUrl = "/drive/v3/files?q=" + UrlEncode(q) +
+        "&fields=nextPageToken,files(id,name,parents)&pageSize=1000";
+    std::string pageToken;
+
+    do {
+        std::string url = baseUrl;
+        if (!pageToken.empty()) url += "&pageToken=" + UrlEncode(pageToken);
+
+        auto r = ApiGet(url);
+        if (r.status != 200) {
+            LOG("[GDrive] SearchByName('%s'): HTTP %d", filename.c_str(), r.status);
+            if (hits.empty() && outSupported) *outSupported = (r.status == 404);
+            return hits;
+        }
+
+        auto j = Json::Parse(r.body);
+        auto& files = j["files"];
+        for (size_t i = 0; i < files.size(); ++i) {
+            std::string fileId = files[i]["id"].str();
+            auto& parents = files[i]["parents"];
+            if (parents.size() == 0) continue;
+
+            // parent = appId folder, grandparent = accountId folder.
+            std::string appFolderId = parents[(size_t)0].str();
+            auto appInfo = getFolder(appFolderId);          // {appId, accountFolderId}
+            if (appInfo.first.empty() || appInfo.second.empty()) continue;
+            auto acctInfo = getFolder(appInfo.second);      // {accountId, rootFolderId}
+            if (acctInfo.first.empty()) continue;
+
+            // Only accept numeric account/app folder names (our layout).
+            bool ok = !appInfo.first.empty() && !acctInfo.first.empty();
+            for (char c : appInfo.first)  if (c < '0' || c > '9') { ok = false; break; }
+            for (char c : acctInfo.first) if (c < '0' || c > '9') { ok = false; break; }
+            if (!ok) continue;
+
+            auto content = DownloadFileById(fileId);
+            if (!content || content->empty()) continue;
+
+            SearchHit hit;
+            hit.path = acctInfo.first + "/" + appInfo.first + "/" + filename;
+            hit.content = std::move(*content);
+            hits.push_back(std::move(hit));
+        }
+
+        pageToken = j["nextPageToken"].str();
+    } while (!pageToken.empty());
+
+    LOG("[GDrive] SearchByName('%s'): %zu match(es)", filename.c_str(), hits.size());
+    return hits;
+}
+
 GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindFileInFolderStatus(
     const std::string& name, const std::string& folderId, std::string* outId) {
     std::string q = "name='" + EscapeQuery(name) + "'"

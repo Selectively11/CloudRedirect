@@ -80,6 +80,23 @@ public:
         if (outComplete) *outComplete = true;
         return true;
     }
+
+    // A blob found by a global filename search: its full relative path
+    // ("{accountId}/{appId}/{filename}") and content.
+    struct SearchHit {
+        std::string path;
+        std::vector<uint8_t> content;
+    };
+
+    // Search the whole account for files with the given exact name (e.g.
+    // "stats.json") and return each match's path + content. Default: not
+    // supported (empty result, supported=false) -- callers fall back to listing.
+    // Providers that support a native search (Drive) override this for speed.
+    virtual std::vector<SearchHit> SearchByName(const std::string& /*filename*/,
+                                                bool* outSupported = nullptr) {
+        if (outSupported) *outSupported = false;
+        return {};
+    }
 };
 
 std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name);
