@@ -4283,6 +4283,8 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                 for (int i = 0; i < 60 && !g_shuttingDown.load(); ++i)
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (g_shuttingDown.load()) return;
+                // Pure playtime feature: skip the cloud pull + live push when off.
+                if (!MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) continue;
                 auto changed = StatsStore::RefreshFromCloud(GetNamespaceApps());
                 if (changed.empty()) continue;
                 PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(changed);

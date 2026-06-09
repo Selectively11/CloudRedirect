@@ -3,6 +3,7 @@
 #include "vdf.h"
 #include "log.h"
 #include "file_util.h"
+#include "metadata_sync.h"
 
 #include <fstream>
 #include <sstream>
@@ -1012,8 +1013,10 @@ void EndSession(uint32_t appId) {
     stats.playtime.lastPlayedTime = now;
 
     // Steam flushes the native blob on game close; merge any new unlocks (also
-    // catches another device's, so they're never lost).
-    if (ReimportNativeStatsLocked(appId, stats))
+    // catches another device's). Gated on sync_achievements, not sync_playtime
+    // (EndSession runs under the latter).
+    if (MetadataSync::syncAchievements.load(std::memory_order_relaxed) &&
+        ReimportNativeStatsLocked(appId, stats))
         LOG("[Stats] Session end: merged new native achievements/stats for app %u (crc=%u)",
             appId, stats.crcStats);
 

@@ -237,17 +237,31 @@ void CloudHooks::InstallGamesPlayedObserver(uintptr_t steamclientBase, size_t st
         LOG("[GamesPlayed] serializer not resolved -- playtime tracking disabled");
         return;
     }
-    GamesPlayedHook::SetSerializer(&SerializeBodyTL);
-    GamesPlayedHook::Install(steamclientBase, steamclientSize);
 
-    // Resolve the playtime writer/message helpers and install the CUser-capture
-    // detour used to apply cross-device playtime updates live.
-    if (LivePlaytime::Resolve(steamclientBase, steamclientSize, g_parseFromArray))
-        LivePlaytime::InstallUserCapture();
+    const bool playtime = MetadataSync::syncPlaytime.load(std::memory_order_relaxed);
+    const bool achievements = MetadataSync::syncAchievements.load(std::memory_order_relaxed);
 
-    // Resolve the packet-wrap + job-routing functions used to serve the legacy
-    // CMsgClientGetUserStats (818) achievement fetch with a 819 response.
-    AchievementInject::Resolve(steamclientBase, steamclientSize, &SerializeBodyTL);
+    // Install only the detours a feature needs (a disabled one adds no trampoline).
+    // The CCMInterface::Send observer is shared (GamesPlayed 5410 = playtime;
+    // StoreUserStats2/GetUserStats 5466/818 = achievements), so install it if either
+    // wants it.
+    if (playtime || achievements) {
+        GamesPlayedHook::SetSerializer(&SerializeBodyTL);
+        GamesPlayedHook::Install(steamclientBase, steamclientSize);
+    } else {
+        LOG("[Stats] playtime + achievement sync off -- CCMInterface::Send observer not installed");
+    }
+
+    // CUser-capture detour serves live playtime only; skip when playtime is off.
+    if (playtime) {
+        if (LivePlaytime::Resolve(steamclientBase, steamclientSize, g_parseFromArray))
+            LivePlaytime::InstallUserCapture();
+    }
+
+    // Resolve (no detour, just function pointers) the packet-wrap + job-routing
+    // used to serve the legacy 818 achievement fetch with a 819 response.
+    if (achievements)
+        AchievementInject::Resolve(steamclientBase, steamclientSize, &SerializeBodyTL);
 }
 
 static std::optional<CloudIntercept::RpcResult> DispatchCloudRpc(
@@ -382,6 +396,8 @@ static void EnsureInitialized() {
                 for (int i = 0; i < 60 && !g_shuttingDown.load(std::memory_order_acquire); ++i)
                     sleep(1);
                 if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                // Pure playtime feature: skip the cloud pull + live push when off.
+                if (!MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) continue;
                 auto changed = StatsStore::RefreshFromCloud(CloudIntercept::GetNamespaceApps());
                 if (!changed.empty() && LivePlaytime::Ready()) {
                     PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(changed);
