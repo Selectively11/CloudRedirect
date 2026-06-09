@@ -230,6 +230,12 @@ static void DoInit()
     if (!pbOk)
         Log::Error("Protobuf helpers not fully resolved -- cloud RPCs may fail");
 
+    // Observe outbound CMsgClientGamesPlayed to track namespace-app playtime.
+    if (pbOk)
+    {
+        CloudHooks::InstallGamesPlayedObserver(steamBase, steamSize);
+    }
+
     // Sweep stray *.cloudredirect metadata from userdata/{app}/remote/.
     {
         std::string steamPath = CloudIntercept::GetSteamPath();

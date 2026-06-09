@@ -1,5 +1,12 @@
 #include "cloud_hooks.h"
 #include "cloud_intercept.h"
+#include "stats_hooks.h"
+#include "gamesplayed_hook.h"
+#include "live_playtime.h"
+#include "achievement_inject.h"
+#include "stats_store.h"
+#include "stats_handlers.h"
+#include "metadata_sync.h"
 #include "rpc_handlers.h"
 #include "app_state.h"
 #include "local_storage.h"
@@ -216,6 +223,33 @@ static bool ParseIntoMessage(void* msg, const uint8_t* data, size_t len) {
     return g_parseFromArray(msg, data, (int)len) != 0;
 }
 
+// Serialize a protobuf body object into a thread-local buffer for the
+// GamesPlayed observer (runs on Steam's network thread).
+static const uint8_t* SerializeBodyTL(void* bodyObj, size_t* outLen) {
+    static thread_local std::vector<uint8_t> tlBuf;
+    tlBuf = SerializeMessage(bodyObj);
+    if (outLen) *outLen = tlBuf.size();
+    return tlBuf.empty() ? nullptr : tlBuf.data();
+}
+
+void CloudHooks::InstallGamesPlayedObserver(uintptr_t steamclientBase, size_t steamclientSize) {
+    if (!g_serializeToArray) {
+        LOG("[GamesPlayed] serializer not resolved -- playtime tracking disabled");
+        return;
+    }
+    GamesPlayedHook::SetSerializer(&SerializeBodyTL);
+    GamesPlayedHook::Install(steamclientBase, steamclientSize);
+
+    // Resolve the playtime writer/message helpers and install the CUser-capture
+    // detour used to apply cross-device playtime updates live.
+    if (LivePlaytime::Resolve(steamclientBase, steamclientSize, g_parseFromArray))
+        LivePlaytime::InstallUserCapture();
+
+    // Resolve the packet-wrap + job-routing functions used to serve the legacy
+    // CMsgClientGetUserStats (818) achievement fetch with a 819 response.
+    AchievementInject::Resolve(steamclientBase, steamclientSize, &SerializeBodyTL);
+}
+
 static std::optional<CloudIntercept::RpcResult> DispatchCloudRpc(
     const char* method, uint32_t appId, const std::vector<PB::Field>& reqBody) {
     using namespace CloudIntercept;
@@ -263,6 +297,16 @@ static void EnsureInitialized() {
             auto cfg = Json::Parse(configStr);
             std::string providerName = cfg["provider"].str();
 
+            // Native stats/playtime sync gates. Absent -> keep default (ON).
+            // When off, the matching native path does not interfere with Steam.
+            if (cfg["sync_achievements"].type == Json::Type::Bool)
+                MetadataSync::syncAchievements = cfg["sync_achievements"].boolean();
+            if (cfg["sync_playtime"].type == Json::Type::Bool)
+                MetadataSync::syncPlaytime = cfg["sync_playtime"].boolean();
+            LOG("[Stats] Sync gates: achievements=%d, playtime=%d",
+                MetadataSync::syncAchievements.load() ? 1 : 0,
+                MetadataSync::syncPlaytime.load() ? 1 : 0);
+
             if (!providerName.empty() && providerName != "local") {
                 provider = CreateCloudProvider(providerName);
                 if (provider) {
@@ -295,6 +339,62 @@ static void EnsureInitialized() {
         LocalMetadataStore::Init(storageRoot);
         PendingOpsJournal::Init(storageRoot);
         HttpServer::Start(storageRoot, CloudIntercept::GetAccountId());
+
+        // Native stats / playtime store (cloud-backed). Per-app stats blobs ride
+        // each app's Steam Cloud sync, same as the CN/root-token metadata blobs.
+        StatsStore::SetCloudProvider(
+            [](uint32_t appId, std::string& outJson) -> bool {
+                uint32_t accountId = CloudIntercept::GetAccountId();
+                if (accountId == 0) return false;
+                std::vector<uint8_t> data;
+                if (!CloudStorage::DownloadCloudMetadataWithLegacyFallback(
+                        accountId, appId, "stats.json", nullptr, data) || data.empty())
+                    return false;
+                outJson.assign(reinterpret_cast<const char*>(data.data()), data.size());
+                return true;
+            },
+            [](uint32_t appId, const std::string& json) {
+                uint32_t accountId = CloudIntercept::GetAccountId();
+                if (accountId == 0) return;
+                // Queued: serializes on the cloud work queue (safe from any thread).
+                CloudStorage::UploadCloudMetadataTextAsync(accountId, appId, "stats.json", json);
+            });
+        // Track playtime/stats for namespace (lua) apps only -- real owned games
+        // must never have their playtime recorded or synced.
+        StatsHandlers::SetNamespacePredicate(
+            [](uint32_t appId) { return CloudIntercept::IsNamespaceApp(appId); });
+        StatsStore::SetNamespacePredicate(
+            [](uint32_t appId) { return CloudIntercept::IsNamespaceApp(appId); });
+        StatsStore::SetAccountIdProvider(
+            []() -> uint32_t { return CloudIntercept::GetAccountId(); });
+        StatsStore::Init(cloudRedirectRoot, CloudIntercept::GetSteamPath());
+        StatsHandlers::Init();
+        // Seed managed apps so playtime/achievements are available before the
+        // user launches anything: pulls each app's cloud stats blob and imports
+        // Steam's native data.
+        StatsStore::SeedApps(CloudIntercept::GetNamespaceApps());
+
+        // Re-pull the cloud every 60s for another device's playtime advances.
+        // RefreshFromCloud merges to disk; advanced apps are queued for a live
+        // update applied on the network thread (LivePlaytime::DrainOnNetThread).
+        std::thread([] {
+            for (;;) {
+                for (int i = 0; i < 60 && !g_shuttingDown.load(std::memory_order_acquire); ++i)
+                    sleep(1);
+                if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                auto changed = StatsStore::RefreshFromCloud(CloudIntercept::GetNamespaceApps());
+                if (!changed.empty() && LivePlaytime::Ready()) {
+                    PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(changed);
+                    if (body.Size() > 0)
+                        LivePlaytime::Queue(body.Data());
+                }
+            }
+        }).detach();
+        StatsHooks::SetProtobufHelpers(
+            [](void* msg) { return SerializeMessage(msg); },
+            [](void* msg, const uint8_t* data, size_t len) {
+                return ParseIntoMessage(msg, data, len);
+            });
 
         g_initialized.store(true, std::memory_order_release);
         
@@ -340,7 +440,33 @@ extern "C" int hook_BYieldingSend(void* pThis, const char* methodName, void* req
         origFn = g_origBYieldingSend.load(std::memory_order_acquire);
     }
     if (!origFn) return 0;
-    
+
+    // The playtime writer touches Steam's minutes-played map and posts callbacks,
+    // so queued updates are drained here on the network thread, not on the poller.
+    LivePlaytime::DrainOnNetThread();
+    // Queued 819 achievement responses route to their waiting job here (needs the
+    // network thread's coroutine TLS, same as any inbound CM packet).
+    AchievementInject::DrainOnNetThread();
+
+    // Native stats / playtime service methods (Player.*) ride this same path.
+    // GetUserStats is answered from our store; GetLastPlayedTimes needs the real
+    // server reply first, then we append our namespace apps' playtime.
+    if (methodName && g_serializeToArray && g_parseFromArray) {
+        if (strcmp(methodName, StatsHandlers::RPC_GET_USER_STATS) == 0) {
+            EnsureInitialized();
+            if (StatsHooks::TryHandleGetUserStats(methodName, request, response, flags))
+                return 1;
+            return origFn(pThis, methodName, request, response, flags);
+        }
+        if (strcmp(methodName, StatsHandlers::RPC_GET_LAST_PLAYED) == 0) {
+            EnsureInitialized();
+            int result = origFn(pThis, methodName, request, response, flags);
+            if (result)
+                StatsHooks::MergeLastPlayedTimes(methodName, request, response);
+            return result;
+        }
+    }
+
     if (!IsCloudRpc(methodName) || !g_serializeToArray || !g_parseFromArray)
         return origFn(pThis, methodName, request, response, flags);
 
@@ -618,6 +744,8 @@ extern "C" bool hook_IsCloudEnabledForApp(void* pThis, unsigned int appId)
 
 void CloudHooks::BeginShutdown() {
     g_shuttingDown.store(true, std::memory_order_release);
+    GamesPlayedHook::Remove();
+    LivePlaytime::RemoveUserCapture();
     for (int i = 0; i < 300 && g_hookRefCount.load(std::memory_order_acquire) > 0; ++i)
         usleep(10000); // 10ms, up to 3s total
 }

@@ -11,6 +11,8 @@ namespace StatsHandlers {
 // Service RPC method names
 inline constexpr const char* RPC_GET_USER_STATS = "Player.GetUserStats#1";
 inline constexpr const char* RPC_GET_LAST_PLAYED = "Player.ClientGetLastPlayedTimes#1";
+// Server->client notification method (we push this to update playtime live).
+inline constexpr const char* RPC_GET_LAST_PLAYED_NOTIFY = "PlayerClient.NotifyLastPlayedTimes#1";
 
 // Namespace-app predicate. The platform layer installs this so playtime
 // session tracking (and any persistence) is restricted to namespace/lua apps
@@ -35,6 +37,10 @@ CloudIntercept::RpcResult HandleGetUserStats(uint32_t appId, const std::vector<P
 // Service RPC handler for Player.ClientGetLastPlayedTimes#1
 CloudIntercept::RpcResult HandleGetLastPlayedTimes(const std::vector<PB::Field>& reqBody);
 
+// Build a CPlayer_LastPlayedTimes_Notification body (repeated Game games) for the
+// given apps, for the platform layer to inject as a live server notification.
+PB::Writer BuildLastPlayedNotificationBody(const std::vector<uint32_t>& appIds);
+
 // Legacy EMsg handlers - return response body bytes
 // Returns nullopt if this EMsg should pass through to real server
 std::optional<std::vector<uint8_t>> HandleLegacyGetUserStats(
@@ -46,6 +52,10 @@ std::optional<std::vector<uint8_t>> HandleLegacyStoreUserStats2(
 // Called when we see CMsgClientGamesPlayed (EMsg 5410) pass through.
 // We don't intercept it - just observe it to track playtime.
 void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen);
+
+// Observe CMsgClientStoreUserStats2 (EMsg 5466) to capture achievement unlocks
+// the moment the game stores them. body = serialized message; game_id is field 1.
+void ObserveStoreUserStats(const uint8_t* body, size_t bodyLen);
 
 // Shutdown - flush and cleanup
 void Shutdown();

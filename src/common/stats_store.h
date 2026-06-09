@@ -106,6 +106,12 @@ const std::vector<uint8_t>& GetSchema(uint32_t appId);
 // Compute CRC32 over current stat values for an app.
 uint32_t ComputeCrc(uint32_t appId);
 
+// Re-read Steam's native blob for an app and merge any newly unlocked
+// achievements / updated stat values into the store, then push to the cloud if
+// anything changed. Called when an achievement-store message is observed on the
+// wire (the genuine unlock event). Safe to call from the network thread.
+void CaptureNativeUnlocks(uint32_t appId);
+
 // Playtime tracking
 void StartSession(uint32_t appId);
 void EndSession(uint32_t appId);

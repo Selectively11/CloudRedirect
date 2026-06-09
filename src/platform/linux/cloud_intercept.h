@@ -13,6 +13,9 @@ void InitLinux();
 bool IsNamespaceApp(uint32_t appId);
 bool HasNamespaceApps();
 
+// Snapshot of all managed namespace app IDs.
+std::vector<uint32_t> GetNamespaceApps();
+
 // Dynamically register an app as a namespace app
 void RegisterNamespaceApp(uint32_t appId);
 

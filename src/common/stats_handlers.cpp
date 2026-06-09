@@ -1,5 +1,6 @@
 #include "stats_handlers.h"
 #include "stats_store.h"
+#include "metadata_sync.h"
 #include "protobuf.h"
 #include "log.h"
 
@@ -47,21 +48,11 @@ CloudIntercept::RpcResult HandleGetUserStats(uint32_t appId, const std::vector<P
 
     PB::Writer resp;
 
-    // Authoritative server contract (IDA-verified: CAPIJobRequestUserStats @
-    // steamclient!0x138A45A20 / legacy sub_138A44F70):
-    //   * crc_stats is a server-owned opaque token. The client stores whatever
-    //     crc we last sent and echoes it in the request (field 4). It never
-    //     recomputes it from data.
-    //   * The client adopts our stats ONLY when our crc_stats (response field 2)
-    //     DIFFERS from the client's current crc (request field 4). When they
-    //     match and we send no stats, the client logs "we must be up to date"
-    //     and leaves its local stats untouched.
-    // So we are the source of truth: always report OUR crc. Send schema + the
-    // full stats array only when the client is stale (clientCrc != ourCrc),
-    // which makes the client adopt our (cloud-restored) data. When they match,
-    // send crc only -> client no-ops. We hold the authoritative copy even if
-    // empty, so we never clobber: an empty store only happens when Steam itself
-    // had no stats blob for this app.
+    // crc_stats is a server-owned opaque token the client echoes back; it adopts
+    // our stats only when our crc (response field 2) differs from its own (request
+    // field 4). So always report OUR crc and send schema+stats only when the client
+    // is stale; matching crc -> client no-ops. (CAPIJobRequestUserStats @
+    // steamclient!0x138A45A20 / legacy sub_138A44F70.)
 
     // Field 2: crc_stats (always our authoritative token)
     resp.WriteVarint(2, stats.crcStats);
@@ -126,8 +117,20 @@ CloudIntercept::RpcResult HandleGetUserStats(uint32_t appId, const std::vector<P
 //             first_playtime(5, uint32),
 //             playtime_windows_forever(6), playtime_mac_forever(7),
 //             playtime_linux_forever(8)
-// Returning this response makes Steam populate its own in-memory minutes-played
-// record (the same one the library UI reads), so playtime shows natively.
+// This response populates Steam's in-memory minutes-played record (read by the
+// library UI). Writes one Game submessage (field 1).
+static void WriteGame(PB::Writer& out, uint32_t appId, const StatsStore::PlaytimeData& pt) {
+    PB::Writer game;
+    game.WriteVarint(1, appId);                       // appid (int32)
+    game.WriteVarint(2, pt.lastPlayedTime);           // last_playtime (uint32)
+    game.WriteVarint(3, pt.minutesLastTwoWeeks);      // playtime_2weeks (int32)
+    game.WriteVarint(4, pt.minutesForever);           // playtime_forever (int32)
+    if (pt.playtimeWindows) game.WriteVarint(6, pt.playtimeWindows);
+    if (pt.playtimeMac)     game.WriteVarint(7, pt.playtimeMac);
+    if (pt.playtimeLinux)   game.WriteVarint(8, pt.playtimeLinux);
+    out.WriteSubmessage(1, game);                     // games (repeated)
+}
+
 CloudIntercept::RpcResult HandleGetLastPlayedTimes(const std::vector<PB::Field>& reqBody) {
     uint32_t minLastPlayed = 0;
     auto* minField = PB::FindField(reqBody, 1);
@@ -147,23 +150,26 @@ CloudIntercept::RpcResult HandleGetLastPlayedTimes(const std::vector<PB::Field>&
         if (pt.minutesForever == 0 && pt.lastPlayedTime == 0)
             continue;
 
-        PB::Writer game;
-        game.WriteVarint(1, appId);                       // appid (int32)
-        game.WriteVarint(2, pt.lastPlayedTime);           // last_playtime (uint32)
-        game.WriteVarint(3, pt.minutesLastTwoWeeks);      // playtime_2weeks (int32)
-        game.WriteVarint(4, pt.minutesForever);           // playtime_forever (int32)
-        // Per-platform forever fields so the native record is internally consistent.
-        if (pt.playtimeWindows) game.WriteVarint(6, pt.playtimeWindows);
-        if (pt.playtimeMac)     game.WriteVarint(7, pt.playtimeMac);
-        if (pt.playtimeLinux)   game.WriteVarint(8, pt.playtimeLinux);
-
-        resp.WriteSubmessage(1, game);                    // games (repeated)
+        WriteGame(resp, appId, pt);
         ++emitted;
     }
 
     LOG("[Stats] GetLastPlayedTimes: returned %zu game(s) (min_last_played=%u)",
         emitted, minLastPlayed);
     return CloudIntercept::RpcResult(std::move(resp));
+}
+
+// Build a CPlayer_LastPlayedTimes_Notification body (repeated Game games, field 1)
+// for the given apps. The platform layer injects this as a server notification so
+// a running client adopts the new playtime live. Empty if no app has playtime.
+PB::Writer BuildLastPlayedNotificationBody(const std::vector<uint32_t>& appIds) {
+    PB::Writer body;
+    for (uint32_t appId : appIds) {
+        StatsStore::PlaytimeData pt = StatsStore::GetPlaytime(appId);
+        if (pt.minutesForever == 0 && pt.lastPlayedTime == 0) continue;
+        WriteGame(body, appId, pt);
+    }
+    return body;
 }
 
 // Legacy EMsg 818: CMsgClientGetUserStats
@@ -338,6 +344,22 @@ void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
     for (uint32_t appId : ended) {
         g_activeApps.erase(appId);
     }
+}
+
+// Observe CMsgClientStoreUserStats2 (EMsg 5466, game_id field 1) -- sent on
+// unlock. The body has no timestamps, but Steam writes them to the native blob in
+// the same store job, so re-read the blob here to sync the new unlocks.
+void ObserveStoreUserStats(const uint8_t* body, size_t bodyLen) {
+    if (!MetadataSync::syncAchievements.load(std::memory_order_relaxed)) return;
+
+    auto fields = PB::Parse(body, bodyLen);
+    auto* gameIdField = PB::FindField(fields, 1); // game_id (fixed64)
+    if (!gameIdField) return;
+
+    uint32_t appId = (uint32_t)(gameIdField->varintVal & 0xFFFFFF);
+    if (appId == 0 || !IsNamespaceApp(appId)) return;
+
+    StatsStore::CaptureNativeUnlocks(appId);
 }
 
 void Shutdown() {

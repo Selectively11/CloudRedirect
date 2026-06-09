@@ -75,6 +75,8 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED              = 742;
 static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED_NO_DATABLOB  = 715;
 static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED_WITH_DATABLOB = 5410;
+// CMsgClientStoreUserStats2 -- sent when a game unlocks an achievement / sets a stat.
+static constexpr uint32_t EMSG_CLIENT_STORE_USER_STATS2        = 5466;
 
 // CMsgClientGamesPlayed protobuf field numbers
 static constexpr uint32_t GP_FIELD_GAMES_PLAYED    = 1;   // repeated GamePlayed (length-delimited)
@@ -105,6 +107,11 @@ static constexpr uint32_t CPROTOBUFMSG_OFF_DESC   = 0x08;  // typed-body descrip
 static constexpr uint32_t CPROTOBUFMSG_OFF_CONN   = 0x1C;  // uint32_t connection handle
 static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x20;  // uint32_t EMsg | PROTO_FLAG
 static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x30;  // protobuf body object*
+
+// g_pJobCur (qword_1397DC0C0): the CJob coroutine currently running; its CJobID
+// is at CJob+32 (GetJobID, asserted at userremotestorage.cpp:3920).
+static constexpr uintptr_t SC_RVA_JOBCUR_GLOBAL = 0x17DC0C0;
+static constexpr uint32_t  JOB_OFF_JOBID        = 32;
 
 // Schema-fetch injection: build a CMsgClientGetUserStats (EMsg 818) and send it
 // via BAsyncSend, asking the server for the latest achievement schema of any app
@@ -143,6 +150,31 @@ static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1247A70;
 static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC42F0;
 // sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
 static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC4700;
+// Live playtime update -- the write half of CUser's playtime refresh
+// (sub_1389DA1D0), driven from a synthesized response instead of a CM RPC.
+//   sub_1389C7930  = the writer: iterates the parsed Game array, updates
+//                    m_mapTrackingPlaytimeForApp, writes localconfig (sub_1389CB7D0),
+//                    and fires the 1020046 "minutes played changed" UI callback.
+//   sub_138CF07F0  = CProtoBufMsg ctor (zeroes the wrapper)
+//   sub_138CF3390  = CProtoBufMsg init (allocates the inner MessageLite body at [6])
+//   sub_138CF0AA0  = CProtoBufMsg dtor
+//   off_1396C1360  = CPlayer_GetLastPlayedTimes_Response type descriptor
+//   ??_7CProtoBufMsg<...Response> = typed wrapper vtable
+//   off_1396D3F48  = "Software\\Valve\\Steam\\LastPlayedTimesSyncTime" registry key
+static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9C7930;
+static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCF07F0;
+static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xCF3390;
+static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCF0AA0;
+static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16C1360;
+static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x1323380;
+// off_1396D3F48: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
+static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16D3F48;
+// CUser member offsets used by the writer path
+static constexpr uint32_t USER_OFF_REGISTRY          = 3272;   // CUser+0xCC8: registry obj (sync-time write)
+// Inner CPlayer_GetLastPlayedTimes_Response message offsets
+static constexpr uint32_t RESP_OFF_GAMES_COUNT       = 24;     // repeated games: element count
+static constexpr uint32_t RESP_OFF_GAMES_ARRAY       = 32;     // repeated games: array base ptr
+
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -425,6 +457,11 @@ static bool HasNamespaceApps() {
     return !g_namespaceApps.empty();
 }
 
+static std::vector<uint32_t> GetNamespaceApps() {
+    std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
+    return std::vector<uint32_t>(g_namespaceApps.begin(), g_namespaceApps.end());
+}
+
 uint32_t GetAccountId();  // defined later
 void RequestSchemaForApp(uint32_t appId);  // defined later (schema auto-fetch)
 
@@ -673,6 +710,19 @@ static uint64_t GetJobIdSource(const std::vector<PB::Field>& header) {
     return f ? f->varintVal : JOBID_NONE;
 }
 
+// Jobid of the running coroutine. Correlates an outbound 818 with the 819 we
+// inject back: the framework stamps the header's jobid_source only after our send
+// hook, but the sending job already holds the id. SEH-isolated against a faulting
+// global read (no C++ objects in scope).
+static uint64_t ReadCurrentJobId() {
+    uint64_t jobId = 0;
+    __try {
+        uintptr_t jobCur = *(uintptr_t*)(g_steamClientBase + SC_RVA_JOBCUR_GLOBAL);
+        if (jobCur) jobId = *(uint64_t*)(jobCur + JOB_OFF_JOBID);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { jobId = 0; }
+    return jobId;
+}
+
 static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header, const PB::Writer& body) {
     uint32_t emsgRaw = emsg | PROTO_FLAG;
     uint32_t headerLen = (uint32_t)header.Size();
@@ -783,7 +833,7 @@ struct QueuedInjection {
     uint32_t pktSize;
     CNetPacket* pktStruct; // malloc'd CNetPacket
     uint64_t jobIdTarget;  // job to route the response to
-    uint32_t emsg;         // EMsg type (147 = response, 152 = send-to-client)
+    uint32_t emsg;         // EMsg type (147 service-method resp, 819 legacy user-stats resp)
     char methodName[128];
 };
 
@@ -795,6 +845,35 @@ static std::mutex g_injectMutex;
 static thread_local bool t_drainingInjectQueue = false;
 
 static void ProcessQueuedInjection(QueuedInjection* ctx); // defined below
+
+// Live playtime-update queue. The writer touches the CUser map + UI callbacks, so
+// it must run on the net thread; the poller only enqueues the serialized response
+// body and the net-thread drain applies it via ApplyLastPlayedUpdate.
+static std::queue<std::vector<uint8_t>> g_playtimeUpdateQueue;
+static std::mutex g_playtimeUpdateMutex;
+static void ApplyLastPlayedUpdate(const std::vector<uint8_t>& respBody); // defined below
+
+// Enqueue a serialized CPlayer_GetLastPlayedTimes_Response body for the net thread
+// to push into the running client's playtime map. Safe to call from any thread.
+static void QueueLastPlayedUpdate(const std::vector<uint8_t>& respBody) {
+    if (respBody.empty()) return;
+    std::lock_guard<std::mutex> lock(g_playtimeUpdateMutex);
+    g_playtimeUpdateQueue.push(respBody);
+}
+
+// Drain queued playtime updates. Caller MUST be on Steam's network thread.
+static void DrainPlaytimeUpdateQueueOnNetThread() {
+    std::vector<std::vector<uint8_t>> batch;
+    {
+        std::lock_guard<std::mutex> lock(g_playtimeUpdateMutex);
+        while (!g_playtimeUpdateQueue.empty()) {
+            batch.push_back(std::move(g_playtimeUpdateQueue.front()));
+            g_playtimeUpdateQueue.pop();
+        }
+    }
+    for (auto& body : batch)
+        ApplyLastPlayedUpdate(body);
+}
 
 // ── Schema-request queue ──────────────────────────────────────────────────
 // Outbound GetUserStats schema requests MUST be sent on Steam's network thread:
@@ -954,35 +1033,45 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     LOG("[INJECT]   jobMgr=%p route: tgt=%llu emsg=%d flags=%d",
         jobMgr, (unsigned long long)ctx->jobIdTarget, route.emsg, route.flags);
 
-    // Pre-check: verify job still exists. BRouteMsgToJob silently no-ops on a
-    // missing slot but returns 1, which would log a false success while the
-    // game's pending download silently fails.
-    using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
-    FindJobFn findJob = (FindJobFn)(g_steamClientBase + SC_RVA_FIND_JOB);
-    int jobSlot = -1;
-    bool findJobThrew = false;
-    __try {
-        void* slotMap = (void*)((uintptr_t)jobMgr + 0x200);
-        jobSlot = findJob(slotMap, &route.jobidTarget);
-        if (jobSlot >= 0) {
-            uintptr_t slotArr = *(uintptr_t*)((uintptr_t)jobMgr + 0x230);
-            void* cjobPtr = *(void**)(slotArr + (uintptr_t)jobSlot * 24 + 8);
-            uint32_t jobState = cjobPtr ? *(uint32_t*)((uintptr_t)cjobPtr + 0x84) : 999;
-            LOG("[INJECT]   FindJob slot=%d cjob=%p state=%u", jobSlot, cjobPtr, jobState);
-        } else {
-            LOG("[INJECT]   FindJob: job not found (slot=%d) -- timed out, dropping inject for %s",
-                jobSlot, ctx->methodName);
+    // Two routing modes in BRouteMsgToJob (sub_138D02320, jobmgr.cpp):
+    //  - RESPONSE: matched to a WAITING job by jobid_target (resume-by-jobid).
+    //  - NOTIFICATION: no waiting job; routed by target_job_name via
+    //    GMapJobTypesByName().Find(name) -> spawns the registered listener job.
+    // A notification (jobIdTarget == JOBID_NONE) must SKIP the waiting-job
+    // pre-check, otherwise we'd drop a perfectly routable server push.
+    bool isNotification = (ctx->jobIdTarget == JOBID_NONE);
+    if (!isNotification) {
+        // Pre-check: verify the waiting job still exists. BRouteMsgToJob silently
+        // no-ops on a missing slot but returns 1 (false success), masking a
+        // dropped response.
+        using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
+        FindJobFn findJob = (FindJobFn)(g_steamClientBase + SC_RVA_FIND_JOB);
+        int jobSlot = -1;
+        bool findJobThrew = false;
+        __try {
+            void* slotMap = (void*)((uintptr_t)jobMgr + 0x200);
+            jobSlot = findJob(slotMap, &route.jobidTarget);
+            if (jobSlot >= 0) {
+                uintptr_t slotArr = *(uintptr_t*)((uintptr_t)jobMgr + 0x230);
+                void* cjobPtr = *(void**)(slotArr + (uintptr_t)jobSlot * 24 + 8);
+                uint32_t jobState = cjobPtr ? *(uint32_t*)((uintptr_t)cjobPtr + 0x84) : 999;
+                LOG("[INJECT]   FindJob slot=%d cjob=%p state=%u", jobSlot, cjobPtr, jobState);
+            } else {
+                LOG("[INJECT]   FindJob: job not found (slot=%d) -- timed out, dropping inject for %s",
+                    jobSlot, ctx->methodName);
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            LOG("[INJECT]   EXCEPTION in FindJob: code=0x%08X", GetExceptionCode());
+            findJobThrew = true;
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG("[INJECT]   EXCEPTION in FindJob: code=0x%08X", GetExceptionCode());
-        findJobThrew = true;
-    }
-    if (jobSlot < 0 && !findJobThrew) {
-        // Drop without routing: BRouteMsgToJob would log a misleading "success" otherwise.
-        __try { g_releaseWrapped(wrappedPkt); } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
-        delete ctx;
-        return;
+        if (jobSlot < 0 && !findJobThrew) {
+            __try { g_releaseWrapped(wrappedPkt); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
+            delete ctx;
+            return;
+        }
+    } else {
+        LOG("[INJECT]   notification %s: routing by target_job_name (no waiting job)", ctx->methodName);
     }
 
     // Increment refcount (matches RecvPkt at 0x13859D4CC)
@@ -1108,7 +1197,131 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     return true;
 }
 
+// Route a 819 response built from the store to the waiting CAPIJobRequestUserStats
+// by jobid_target. Unlike InjectResponse this is a raw EMsg, not a service-method
+// response: the header carries only steamid + jobid_target, no target_job_name.
+// Otherwise it shares the inject queue / drain / cleanup path.
+static bool InjectLegacyUserStatsResponse(uint64_t jobIdTarget, uint32_t appId,
+                                          const std::vector<uint8_t>& body) {
+    if (!g_wrapPacket || !g_bRouteMsgToJob || !g_releaseWrapped || !g_cmInterface)
+        return false;
 
+    // 819 header: steamid (validates against the connection) + jobid_target (the
+    // value the framework stamped as jobid_source on the outbound 818).
+    PB::Writer hdr;
+    if (g_steamId.load()) hdr.WriteFixed64(HDR_STEAMID, g_steamId.load());
+    hdr.WriteFixed64(HDR_JOBID_TARGET, jobIdTarget);
+
+    // Frame: [emsg|protoflag (4)][hdrLen (4)][header][body]; body length is implicit
+    // (cubData carries the total). BuildPacket takes a body Writer, so frame with an
+    // empty body and append the already-serialized 819 bytes.
+    PB::Writer emptyBody;
+    auto pktData = BuildPacket(EMSG_CLIENT_GET_USER_STATS_RESP, hdr, emptyBody);
+    pktData.insert(pktData.end(), body.begin(), body.end());
+
+    uint8_t* pktBuf = (uint8_t*)VirtualAlloc(nullptr, pktData.size(),
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pktBuf) return false;
+    memcpy(pktBuf, pktData.data(), pktData.size());
+
+    auto* fakePkt = (CNetPacket*)malloc(sizeof(CNetPacket));
+    if (!fakePkt) { VirtualFree(pktBuf, 0, MEM_RELEASE); return false; }
+    memset(fakePkt, 0, sizeof(CNetPacket));
+    fakePkt->pubData = pktBuf;
+    fakePkt->cubData = (uint32_t)pktData.size();
+    fakePkt->m_cRef = 1;
+
+    auto* ctx = new QueuedInjection();
+    ctx->pktBuf = pktBuf;
+    ctx->pktSize = (uint32_t)pktData.size();
+    ctx->pktStruct = fakePkt;
+    ctx->jobIdTarget = jobIdTarget;
+    ctx->emsg = EMSG_CLIENT_GET_USER_STATS_RESP;
+    snprintf(ctx->methodName, sizeof(ctx->methodName), "ClientGetUserStatsResponse(app=%u)", appId);
+
+    {
+        std::lock_guard<std::mutex> lock(g_injectMutex);
+        g_injectQueue.push(ctx);
+    }
+    LOG("[Stats] Queued legacy 819 for app=%u jobid=%llu (%zu bytes)",
+        appId, (unsigned long long)jobIdTarget, pktData.size());
+    return true;
+}
+
+// Push another device's playtime into the client's tracking map + library UI by
+// feeding a synthesized response to Steam's own writer (sub_1389C7930: updates
+// m_mapTrackingPlaytimeForApp, localconfig, fires the 1020046 UI callback).
+// Direct-write because NotifyLastPlayedTimes#1 is a service-method listener, not
+// in GMapJobTypesByName, so BRouteMsgToJob can't route to it.
+// respBody = serialized CPlayer_GetLastPlayedTimes_Response. Net thread only.
+static void ApplyLastPlayedUpdate(const std::vector<uint8_t>& respBody) {
+    if (!g_parseFromArray || respBody.empty()) return;
+
+    uintptr_t pUser = FindCurrentUser();
+    if (!pUser) {
+        LOG("[Stats] ApplyLastPlayedUpdate: no current user");
+        return;
+    }
+
+    // CProtoBufMsg<CPlayer_GetLastPlayedTimes_Response> on the stack (sub_1389DA1D0):
+    // ctor zeroes the wrapper, [0]=typed vtable, [1]=descriptor, init allocates the
+    // inner MessageLite body at wrapper[6].
+    uintptr_t wrapper[11] = {0};
+    using MsgCtorFn = void(__fastcall*)(void* self, int a2, int a3);
+    using MsgInitFn = void(__fastcall*)(void* self);
+    using MsgDtorFn = void(__fastcall*)(void* self);
+    using WriterFn  = uint32_t(__fastcall*)(uintptr_t pUser, uintptr_t gamesArray, int count);
+    using RegWriteFn = void(__fastcall*)(void* reg, int type, const char* key, uint32_t val);
+
+    auto msgCtor = (MsgCtorFn)(g_steamClientBase + SC_RVA_MSG_CTOR);
+    auto msgInit = (MsgInitFn)(g_steamClientBase + SC_RVA_MSG_INIT);
+    auto msgDtor = (MsgDtorFn)(g_steamClientBase + SC_RVA_MSG_DTOR);
+    auto writer  = (WriterFn) (g_steamClientBase + SC_RVA_PLAYTIME_WRITER);
+
+    __try {
+        msgCtor(wrapper, 0, 0);
+        wrapper[0] = g_steamClientBase + SC_RVA_RESP_WRAPPER_VT;
+        wrapper[1] = g_steamClientBase + SC_RVA_RESP_DESCRIPTOR;
+        msgInit(wrapper);
+
+        uintptr_t inner = wrapper[6]; // m_pProtoBufBody (the inner MessageLite)
+        if (!inner) {
+            LOG("[Stats] ApplyLastPlayedUpdate: inner body alloc failed");
+            return;
+        }
+
+        if (!g_parseFromArray((void*)inner, (const char*)respBody.data(), (int)respBody.size())) {
+            LOG("[Stats] ApplyLastPlayedUpdate: ParseFromArray failed (%zu bytes)", respBody.size());
+            msgDtor(wrapper);
+            return;
+        }
+
+        // sub_1389DA1D0: v2 = *(inner+32); games = (v2 ? v2+8 : 0); count = *(inner+24)
+        uintptr_t arrayBase = *(uintptr_t*)(inner + RESP_OFF_GAMES_ARRAY);
+        int count = *(int*)(inner + RESP_OFF_GAMES_COUNT);
+        uintptr_t games = arrayBase ? (arrayBase + 8) : 0;
+
+        if (games && count > 0) {
+            uint32_t syncTime = writer(pUser, games, count);
+            // Persist LastPlayedTimesSyncTime (sub_1389DA1D0 tail).
+            __try {
+                uintptr_t reg = pUser + USER_OFF_REGISTRY;
+                auto regWrite = (RegWriteFn)(*(uintptr_t*)(*(uintptr_t*)reg + 80));
+                const char* key = *(const char**)(g_steamClientBase + SC_RVA_REGKEY_SYNCTIME);
+                regWrite((void*)reg, 3, key, syncTime);
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                LOG("[Stats] ApplyLastPlayedUpdate: sync-time write threw (non-fatal)");
+            }
+            LOG("[Stats] ApplyLastPlayedUpdate: pushed %d game(s) to live client map", count);
+        } else {
+            LOG("[Stats] ApplyLastPlayedUpdate: no games parsed (count=%d)", count);
+        }
+
+        msgDtor(wrapper);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Stats] ApplyLastPlayedUpdate: EXCEPTION code=0x%08X", GetExceptionCode());
+    }
+}
 
 uint32_t GetAccountId() {
     return (uint32_t)(g_steamId.load() & 0xFFFFFFFF);
@@ -2421,6 +2634,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     // Drain on the network-recv thread (valid Coroutine_Continue TLS).
     DrainInjectQueueOnNetThread();
     DrainSchemaQueueOnNetThread();   // schema sends must run on the net thread
+    DrainPlaytimeUpdateQueueOnNetThread(); // live playtime push (touches CUser map)
 
     if (!pkt || !pkt->pubData || pkt->cubData < 8)
         return g_originalRecvPkt(thisptr, pkt);
@@ -4035,11 +4249,11 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
             outJson.assign(reinterpret_cast<const char*>(data.data()), data.size());
             return true;
         },
-        // push: upload the per-app stats blob (fire-and-forget)
+        // push: queue the per-app stats blob (serialized on the cloud work queue)
         [](uint32_t appId, const std::string& json) {
             uint32_t accountId = GetAccountId();
             if (accountId == 0) return;
-            CloudStorage::UploadCloudMetadataText(accountId, appId, "stats.json", json);
+            CloudStorage::UploadCloudMetadataTextAsync(accountId, appId, "stats.json", json);
         });
     // Restrict all playtime/stats tracking to namespace/lua apps only -- real
     // owned games must never have their playtime recorded or synced.
@@ -4047,6 +4261,7 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     // Resolve current accountId lazily so the store can import Steam's native
     // UserGameStats blobs (appcache\stats\UserGameStats_<accountId>_<appId>.bin).
     StatsStore::SetAccountIdProvider([]() -> uint32_t { return GetAccountId(); });
+    StatsStore::SetNamespacePredicate([](uint32_t appId) { return IsNamespaceApp(appId); });
     // When an import finds no achievement schema, fetch it from Steam's server.
     StatsStore::SetSchemaMissingCallback([](uint32_t appId) {
         // Run off-thread: this is called under the store mutex during import,
@@ -4055,6 +4270,29 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     });
     StatsStore::Init(cloudRoot, g_steamPath);
     StatsHandlers::Init();
+    StatsStore::SeedApps(GetNamespaceApps());
+
+    // Background: poll the cloud for another device's playtime advances and push the
+    // new totals into the running client's tracking map + library UI -- mirroring
+    // Steam's own CUser playtime refresh write path, minus the network round-trip.
+    // The writer must run on Steam's network thread, so we only enqueue here; the
+    // net-thread drain (DrainPlaytimeUpdateQueueOnNetThread) applies it.
+    {
+        std::thread poller([] {
+            for (;;) {
+                for (int i = 0; i < 60 && !g_shuttingDown.load(); ++i)
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (g_shuttingDown.load()) return;
+                auto changed = StatsStore::RefreshFromCloud(GetNamespaceApps());
+                if (changed.empty()) continue;
+                PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(changed);
+                if (body.Size() > 0)
+                    QueueLastPlayedUpdate(body.Data());
+            }
+        });
+        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+        g_bgThreads.push_back(std::move(poller));
+    }
 
     SteamKvInjector::Init();
 
@@ -4321,6 +4559,53 @@ static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
                 }
                 if (g_showNonSteamGame.load(std::memory_order_relaxed))
                     RewriteGamesPlayedBody(bodyObj);
+            }
+        }
+        else if (emsg == EMSG_CLIENT_STORE_USER_STATS2 &&
+                 MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
+            // The client sends this when a game unlocks an achievement / sets a
+            // stat. The body has no unlock timestamps, but Steam writes the native
+            // blob with fresh AchievementTimes in the same store job, so we re-read
+            // it here to sync the new unlocks.
+            void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
+            if (bodyObj) {
+                auto observeBytes = SerializeBodyToBytes(bodyObj);
+                if (!observeBytes.empty()) {
+                    LOG("[Stats] StoreUserStats2 observed (emsg=%u, %zu bytes) -> capturing unlocks",
+                        emsg, observeBytes.size());
+                    StatsHandlers::ObserveStoreUserStats(observeBytes.data(), observeBytes.size());
+                }
+            }
+        }
+        else if (emsg == EMSG_CLIENT_GET_USER_STATS &&
+                 MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
+            // Namespace apps fetch stats over the legacy 818 path (appid below the
+            // service-method threshold; see CAPIJobRequestUserStats_BYieldingRun),
+            // so serve a 819 from the store. The job MERGES our stats into its
+            // native blob loaded from disk (YieldingMergeStats -> "using SERVER
+            // stats data"); with no local UserGameStats_<acct>_<appid>.bin the load
+            // fails and it skips, so this surfaces another device's unlocks only
+            // when the game has been run here.
+            void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
+            if (bodyObj) {
+                auto reqBytes = SerializeBodyToBytes(bodyObj);
+                if (!reqBytes.empty()) {
+                    auto fields = PB::Parse(reqBytes.data(), reqBytes.size());
+                    auto* f1 = PB::FindField(fields, 1);   // game_id (fixed64)
+                    uint32_t appId = f1 ? (uint32_t)(f1->varintVal & 0xFFFFFF) : 0;
+                    if (appId != 0 && IsNamespaceApp(appId)) {
+                        uint64_t jobId = ReadCurrentJobId();
+                        auto built = StatsHandlers::HandleLegacyGetUserStats(
+                            reqBytes.data(), reqBytes.size(), g_steamId.load());
+                        if (built.has_value() && !built->empty()) {
+                            LOG("[Stats] GetUserStats(818) observed app=%u jobid=%llu -> serving 819",
+                                appId, (unsigned long long)jobId);
+                            InjectLegacyUserStatsResponse(jobId, appId, *built);
+                        } else {
+                            LOG("[Stats] GetUserStats(818) app=%u: store had nothing to serve", appId);
+                        }
+                    }
+                }
             }
         }
     }
@@ -4830,6 +5115,7 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
     // packets are far more frequent during the cloud-RPC bursts that fill the queue.
     DrainInjectQueueOnNetThread();
     DrainSchemaQueueOnNetThread();   // schema sends must run on the net thread
+    DrainPlaytimeUpdateQueueOnNetThread(); // live playtime push (touches CUser map)
 
     // Try to discover the real CCMInterface via CSteamEngine global.
     // This also installs the vtable hook once CCMInterface is found.

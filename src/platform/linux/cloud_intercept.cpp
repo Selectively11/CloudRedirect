@@ -267,6 +267,11 @@ bool HasNamespaceApps() {
     return !g_namespaceApps.empty();
 }
 
+std::vector<uint32_t> GetNamespaceApps() {
+    std::lock_guard<std::mutex> lock(g_nsMutex);
+    return std::vector<uint32_t>(g_namespaceApps.begin(), g_namespaceApps.end());
+}
+
 std::string GetSteamPath() {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_steamPath.empty())

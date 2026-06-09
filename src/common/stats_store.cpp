@@ -599,6 +599,54 @@ static void MergePlaytime(PlaytimeData& dst, const PlaytimeData& src) {
     dst.minutesForever  = dst.playtimeWindows + dst.playtimeMac + dst.playtimeLinux;
 }
 
+// Union-merge achievements: an unlock is monotonic, so a bit stays unlocked if
+// either side has it. The existing unlock timestamp wins (so a re-import can't
+// rewrite an earlier unlock, including one another device recorded); native fills
+// bits we don't yet hold. Names are adopted from src when we lack them. Returns
+// true if dst changed.
+static bool MergeAchievements(std::vector<AchievementBlock>& dst,
+                              const std::vector<AchievementBlock>& src) {
+    bool changed = false;
+    for (const auto& s : src) {
+        AchievementBlock* d = nullptr;
+        for (auto& a : dst) { if (a.statId == s.statId) { d = &a; break; } }
+        if (!d) {
+            dst.push_back(s);
+            changed = true;
+            continue;
+        }
+        if ((d->bits | s.bits) != d->bits) { d->bits |= s.bits; changed = true; }
+        for (int bit = 0; bit < 32; ++bit) {
+            if (d->unlockTimes[bit] == 0 && s.unlockTimes[bit] != 0) {
+                d->unlockTimes[bit] = s.unlockTimes[bit];
+                changed = true;
+            }
+            if (d->names[bit].empty() && !s.names[bit].empty())
+                d->names[bit] = s.names[bit];
+        }
+    }
+    return changed;
+}
+
+// Merge the latest stat values from src into dst (this device's native stats are
+// authoritative for their own values). Returns true if dst changed.
+static bool MergeStatValues(std::vector<StatEntry>& dst,
+                            const std::vector<StatEntry>& src) {
+    bool changed = false;
+    for (const auto& s : src) {
+        bool found = false;
+        for (auto& d : dst) {
+            if (d.statId == s.statId) {
+                if (d.value != s.value) { d.value = s.value; changed = true; }
+                found = true;
+                break;
+            }
+        }
+        if (!found) { dst.push_back(s); changed = true; }
+    }
+    return changed;
+}
+
 bool LoadAppStats(uint32_t appId, AppStats& out) {
     std::string path = StatsPath(appId);
     bool haveLocal = false;
@@ -702,6 +750,40 @@ static void EnsureNativeImportLocked(uint32_t appId, AppStats& stats) {
         stats.crcStats = ComputeCrcLocked(stats);
         g_dirty[appId] = true;
         SaveAppStats(appId, stats);
+    }
+}
+
+// Re-read Steam's native blob and merge any newly unlocked achievements / updated
+// stat values into the cached store. Unlike EnsureNativeImportLocked this runs
+// even when we already hold data -- it is the capture point for unlocks earned
+// during a session that has just ended (Steam flushes the blob on game close).
+// Merges (never overwrites) so cross-device unlocks survive. Caller holds mutex.
+static bool ReimportNativeStatsLocked(uint32_t appId, AppStats& stats) {
+    if (!g_accountIdProvider || g_accountIdProvider() == 0) return false;
+
+    AppStats native;
+    if (!ImportNativeStats(appId, native)) return false;
+
+    bool changed = MergeStatValues(stats.stats, native.stats);
+    if (MergeAchievements(stats.achievements, native.achievements)) changed = true;
+    if (stats.schema.empty() && !native.schema.empty()) {
+        stats.schema = std::move(native.schema);
+        changed = true;
+    }
+    if (changed) stats.crcStats = ComputeCrcLocked(stats);
+    return changed;
+}
+
+void CaptureNativeUnlocks(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    auto& stats = g_cache[appId];
+    // Make sure the base data exists (first observation may precede any import).
+    if (stats.stats.empty()) EnsureNativeImportLocked(appId, stats);
+    if (ReimportNativeStatsLocked(appId, stats)) {
+        g_dirty[appId] = true;
+        SaveAppStats(appId, stats);   // pushes to cloud
+        g_dirty[appId] = false;
+        LOG("[Stats] Captured native unlocks for app %u (crc=%u)", appId, stats.crcStats);
     }
 }
 
@@ -928,6 +1010,12 @@ void EndSession(uint32_t appId) {
         + stats.playtime.playtimeMac + stats.playtime.playtimeLinux;
     stats.playtime.minutesLastTwoWeeks += minutes;
     stats.playtime.lastPlayedTime = now;
+
+    // Steam flushes the native blob on game close; merge any new unlocks (also
+    // catches another device's, so they're never lost).
+    if (ReimportNativeStatsLocked(appId, stats))
+        LOG("[Stats] Session end: merged new native achievements/stats for app %u (crc=%u)",
+            appId, stats.crcStats);
 
     // Queue the push (not a blocking curl on the net thread, which raced at close).
     g_dirty[appId] = true;

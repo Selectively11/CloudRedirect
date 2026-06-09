@@ -100,6 +100,10 @@ else()
         src/platform/linux/vtable_hook.cpp
         src/platform/linux/cloud_hooks.cpp
         src/platform/linux/cloud_intercept.cpp
+        src/platform/linux/stats_hooks.cpp
+        src/platform/linux/gamesplayed_hook.cpp
+        src/platform/linux/live_playtime.cpp
+        src/platform/linux/achievement_inject.cpp
         src/platform/linux/http_transport_linux.cpp
         src/platform/linux/token_store_linux.cpp
         src/platform/linux/log.cpp
