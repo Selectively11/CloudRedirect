@@ -95,8 +95,8 @@ static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC010;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
 static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1249C10;
-// sub_138BE7630 = protobuf ParseFromArray (fills body from raw bytes)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC5BB0;
+// protobuf ParseFromArray, 3-arg (msgObj, data, int size)
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC5940;
 // sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
 static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC5D50;
 // CUser playtime state helpers
