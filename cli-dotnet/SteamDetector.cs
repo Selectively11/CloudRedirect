@@ -9,7 +9,7 @@ public static class SteamDetector
 {
     private static string? _cachedPath;
 
-    public static readonly long[] SupportedSteamVersions = { 1780352834, 1779918128, 1779486452, 1778281814, 1778003620 };
+    public static readonly long[] SupportedSteamVersions = { 1781041600, 1780352834, 1779918128, 1779486452, 1778281814, 1778003620 };
 
     public static long ExpectedSteamVersion => SupportedSteamVersions[0];
 

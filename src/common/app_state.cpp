@@ -7,13 +7,84 @@
 #include "log.h"
 #include "manifest_store.h"
 
+#include <chrono>
 #include <ctime>
+#include <mutex>
+#include <unordered_map>
 
 using CloudIntercept::IsReservedBlobFilename;
 
 namespace CloudStorage {
 
 static ICloudProvider* g_stateProvider = nullptr;
+
+// ---- Serve-path cloud-state cache -------------------------------------------
+// Backs FetchCloudStateForServe only. FetchCloudState never reads it; it only
+// refreshes it on each live fetch.
+namespace {
+
+// Staleness ceiling. Covers a download burst (serve runs right after the
+// GetChangelist that warmed the cache) while bounding cross-machine staleness.
+constexpr int64_t kServeCacheMaxAgeMs = 3000;
+
+struct ServeCacheEntry {
+    uint64_t cn = 0;
+    int64_t  fetchedAtMs = 0;
+    bool     foreignSession = false; // active session in the fetched state
+    StateFetchResult result;
+};
+
+std::mutex g_serveCacheMtx;
+std::unordered_map<uint64_t, ServeCacheEntry> g_serveCache; // key = (acct<<32)|app
+
+// This client's id (set by NoteOwnClientId). Used to tell our own session from a
+// foreign one: only a foreign session is contention. Counting ours would disable
+// the cache during the very download burst it exists for. Not latched from
+// PublishCloudState -- RMW paths can republish a foreign machine's session.
+std::atomic<uint64_t> g_ownClientId{0};
+
+inline uint64_t ServeCacheKey(uint32_t accountId, uint32_t appId) {
+    return (static_cast<uint64_t>(accountId) << 32) | appId;
+}
+
+inline int64_t NowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
+// See g_ownClientId.
+void NoteOwnClientId(uint64_t clientId) {
+    if (clientId != 0)
+        g_ownClientId.store(clientId, std::memory_order_relaxed);
+}
+
+// Drop the cached entry for an app. Called on every local state mutation so a
+// stale snapshot can never outlive a change CR itself made.
+static void InvalidateServeCache(uint32_t accountId, uint32_t appId) {
+    std::lock_guard<std::mutex> lk(g_serveCacheMtx);
+    g_serveCache.erase(ServeCacheKey(accountId, appId));
+}
+
+// Record a live fetch for the serve path to reuse. Latest good parse wins, even
+// with a LOWER cn: that's a legitimate rewind (state wiped/recreated), not a
+// partial read -- partial reads fail parse upstream and never reach here.
+static void RefreshServeCache(uint32_t accountId, uint32_t appId,
+                              const StateFetchResult& result) {
+    if (result.status != StateFetchStatus::Ok) return; // only cache good reads
+    std::lock_guard<std::mutex> lk(g_serveCacheMtx);
+    uint64_t key = ServeCacheKey(accountId, appId);
+    ServeCacheEntry e;
+    e.cn = result.state.cn;
+    e.fetchedAtMs = NowMs();
+    // Unknown own id (0) -> any session counts as foreign (conservative).
+    uint64_t own = g_ownClientId.load(std::memory_order_relaxed);
+    e.foreignSession = result.state.hasActiveSession() &&
+                       result.state.session.clientId != own;
+    e.result = result;
+    g_serveCache[key] = std::move(e);
+}
 
 void AppState_Init(ICloudProvider* provider) {
     g_stateProvider = provider;
@@ -180,7 +251,7 @@ bool DeserializeState(const std::string& json, CloudAppState& outState) {
 static constexpr const char* kStateFilename = "state.cloudredirect";
 static constexpr size_t MAX_STATE_SIZE = 16 * 1024 * 1024; // 16 MB
 
-StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
+static StateFetchResult FetchCloudStateLive(uint32_t accountId, uint32_t appId) {
     InflightSyncScope guard;
     if (!guard) return { StateFetchStatus::FetchFailed, {}, {} };
     if (!g_stateProvider || !g_stateProvider->IsAuthenticated())
@@ -295,6 +366,36 @@ StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
     return { StateFetchStatus::FetchFailed, {}, {} };
 }
 
+// Public always-fresh fetch. Performs the live read AND refreshes the serve
+// cache so the serve path always sees CR's most recent observation.
+StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
+    StateFetchResult result = FetchCloudStateLive(accountId, appId);
+    RefreshServeCache(accountId, appId, result);
+    return result;
+}
+
+// Serve-path accessor: reuse a recent snapshot when provably safe, else live.
+StateFetchResult FetchCloudStateForServe(uint32_t accountId, uint32_t appId) {
+    {
+        std::lock_guard<std::mutex> lk(g_serveCacheMtx);
+        auto it = g_serveCache.find(ServeCacheKey(accountId, appId));
+        if (it != g_serveCache.end()) {
+            const ServeCacheEntry& e = it->second;
+            int64_t ageMs = NowMs() - e.fetchedAtMs;
+            // Reuse only when fresh and the snapshot had no foreign session;
+            // otherwise go live (under contention another machine may publish a
+            // newer state at any moment).
+            if (ageMs >= 0 && ageMs < kServeCacheMaxAgeMs && !e.foreignSession) {
+                LOG("[AppState] FetchCloudStateForServe app %u: cache hit (CN=%llu, age=%lldms)",
+                    appId, (unsigned long long)e.cn, (long long)ageMs);
+                return e.result;
+            }
+        }
+    }
+    // Miss / stale / contention -> authoritative live fetch (also refreshes cache).
+    return FetchCloudState(accountId, appId);
+}
+
 bool PublishCloudState(uint32_t accountId, uint32_t appId,
                        const CloudAppState& state,
                        const std::string& /*etag*/) {
@@ -322,6 +423,10 @@ bool PublishCloudState(uint32_t accountId, uint32_t appId,
         g_stateProvider->Upload(cnPath,
             reinterpret_cast<const uint8_t*>(cnStr.data()), cnStr.size());
     }
+
+    // A local mutation just landed: the serve cache's snapshot is now stale.
+    // Drop it so the next serve read re-fetches (and re-warms with the new cn).
+    InvalidateServeCache(accountId, appId);
 
     LOG("[AppState] PublishCloudState app %u: published CN=%llu, %zu files",
         appId, state.cn, state.files.size());

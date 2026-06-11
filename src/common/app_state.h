@@ -72,7 +72,22 @@ void AppState_Init(ICloudProvider* provider);
 void AppState_Shutdown();
 
 // Handles migration from old cn.cloudredirect + manifest.cloudredirect.
+// Always performs a live provider fetch. Read-modify-write callers (any fetch
+// that precedes a PublishCloudState) must use this, not the cached serve
+// accessor, to avoid clobbering a concurrent cross-machine update with a stale base.
 StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId);
+
+// Cache-aware accessor for the serve path only. Returns a recently-fetched state
+// without re-hitting the provider, only when provably safe:
+//   - cached entry younger than the hard max-age, AND
+//   - no active foreign session in that snapshot.
+// Otherwise delegates to FetchCloudState (live). Invalidated by every local
+// mutation. Not for read-modify-write callers.
+StateFetchResult FetchCloudStateForServe(uint32_t accountId, uint32_t appId);
+
+// Report this client's own Steam id so the serve cache treats only foreign-client
+// sessions as contention. See g_ownClientId in app_state.cpp.
+void NoteOwnClientId(uint64_t clientId);
 
 // If etag is non-empty, uses conditional write (OneDrive).
 bool PublishCloudState(uint32_t accountId, uint32_t appId,

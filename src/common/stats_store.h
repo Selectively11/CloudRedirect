@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include <mutex>
 #include <functional>
@@ -34,13 +35,29 @@ struct AchievementBlock {
     std::string names[32];    // per-bit human-readable display name (from schema)
 };
 
+// One device's own contribution to an app's playtime. A device only ever writes
+// the field matching the platform it runs on; the other two stay whatever that
+// device last observed (normally 0). Counters are monotonic per device.
+struct DevicePlaytime {
+    uint32_t windows = 0;
+    uint32_t mac = 0;
+    uint32_t lin = 0;   // NOTE: not 'linux' -- that's a predefined macro on Linux/GCC
+};
+
 struct PlaytimeData {
-    uint32_t minutesForever;
-    uint32_t minutesLastTwoWeeks;
-    uint32_t lastPlayedTime;       // unix timestamp
-    uint32_t playtimeWindows;
-    uint32_t playtimeMac;
-    uint32_t playtimeLinux;
+    // Derived aggregates (sum across all devices). Recomputed from perDevice on
+    // load/merge/accrue; serialized for readers (UI) that want the totals.
+    uint32_t minutesForever = 0;
+    uint32_t minutesLastTwoWeeks = 0;
+    uint32_t lastPlayedTime = 0;       // unix timestamp (max across devices)
+    uint32_t playtimeWindows = 0;
+    uint32_t playtimeMac = 0;
+    uint32_t playtimeLinux = 0;
+
+    // Authoritative per-device sub-totals, keyed by stable device id (hostname).
+    // Cloud stats.json is last-writer-wins; keying by device makes each writer own
+    // its key so merge (union + max-per-device) never clobbers or double-counts.
+    std::map<std::string, DevicePlaytime> perDevice;
 };
 
 struct AppStats {
@@ -88,7 +105,19 @@ bool LoadAppStats(uint32_t appId, AppStats& out);
 void SaveAppStats(uint32_t appId, const AppStats& stats);
 
 // Get or create stats entry for an app (thread-safe, cached in memory).
+// Returns a live cache reference; caller must hold the store lock (background
+// poller/unlock-capture mutate the same vectors). Read handlers should use
+// Snapshot() instead. Kept for lock-holding/single-threaded-init callers.
 AppStats& GetOrCreate(uint32_t appId);
+
+// Thread-safe by-value snapshot for read handlers: seeds the app (cloud pull +
+// native import) like GetOrCreate, then returns a COPY taken under the store
+// lock, so the caller can build a response without racing background mutations.
+AppStats Snapshot(uint32_t appId);
+
+// Thread-safe explicit reset (CMsgClientStoreUserStats2 explicit_reset): clears
+// stats/achievements and zeroes the crc under the store lock.
+void ResetStats(uint32_t appId);
 
 // Update a single stat value. Returns the new CRC.
 uint32_t SetStat(uint32_t appId, uint32_t statId, uint32_t value);

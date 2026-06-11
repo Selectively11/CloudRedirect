@@ -487,6 +487,9 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
                 if (!overrideRule.root.empty() &&
                     (!overrideRule.useInstead.empty() || !overrideRule.addPath.empty() ||
                      !overrideRule.pathTransforms.empty())) {
+                    LOG("GetAutoCloudFileList: app %u parsed override root='%s' os='%s' oscompare='%s' useinstead='%s'",
+                        appId, overrideRule.root.c_str(), overrideRule.os.c_str(),
+                        overrideRule.osCompare.c_str(), overrideRule.useInstead.c_str());
                     overrides.push_back(std::move(overrideRule));
                 }
             }
@@ -631,6 +634,16 @@ ScanResult GetFileList(const std::string& steamPath,
         return outResult;
     }
     outResult.hasRules = true;
+
+    // Final rule set after overrides. Two rules with the same root/path here were
+    // not collapsed by the override.
+    LOG("GetAutoCloudFileList: app %u final rule set (%zu rules) after overrides:", appId, rules.size());
+    for (size_t i = 0; i < rules.size(); ++i) {
+        const auto& r = rules[i];
+        LOG("  rule[%zu]: root='%s' cloudRoot='%s' path='%s' resolvedPath='%s' pattern='%s' recursive=%u platforms=0x%X siblings=%zu",
+            i, r.root.c_str(), r.cloudRoot.c_str(), r.path.c_str(), r.resolvedPath.c_str(),
+            r.pattern.c_str(), r.recursive ? 1u : 0u, r.platforms, r.siblings.size());
+    }
 
     std::filesystem::path appUserdataDir = FileUtil::Utf8ToPath(steamPath) / "userdata" /
         std::to_string(accountId) / std::to_string(appId);
@@ -873,23 +886,6 @@ ScanResult GetFileList(const std::string& steamPath,
     // Sibling dedupe; separate from primary so siblings can't trip the abort.
     std::unordered_set<std::string> emittedSiblings;
 
-    // Per-rule double-count accounting (see ScanResult comment). YldOnAppExit
-    // counts each on-disk file once per matching rule, with NO cross-rule dedup --
-    // unlike `files` below, which is deduped via seenRootsByCloudPath. We therefore
-    // tally claims here BEFORE that dedup, so countedInstances reflects what the
-    // native exit loop actually charges against maxnumfiles.
-    //
-    // Each rule that reaches a valid scan dir contributes one AutoCloudRuleClaimTally;
-    // AggregateRuleCollisions() turns these into countedInstances / collision factor
-    // / headroom. Keying by the resolved physical dir is what makes this correct
-    // across Windows/macOS/Linux roots: a Mac-only or Linux-only rule simply never
-    // resolves to a dir on this OS (platform-filtered or no root mapping), so it is
-    // absent from the tallies and correctly contributes nothing.
-    std::vector<AutoCloudUtil::AutoCloudRuleClaimTally> ruleClaimTallies;
-    // Index into ruleClaimTallies for the rule currently being walked, so the
-    // considerFile lambda can attribute claims without re-resolving the dir.
-    size_t activeRuleTallyIdx = static_cast<size_t>(-1);
-
     bool hasRootCollision = false;
     bool scanLimitHit = false;
     size_t visitedFiles = 0;
@@ -990,26 +986,6 @@ ScanResult GetFileList(const std::string& steamPath,
 
         std::string scanRootPrefix = FileUtil::MakePathPrefix(scanRootUtf8);
 
-        // Attribution key for double-count accounting: the resolved physical scan
-        // directory (normalized, case-insensitive). Two effective rules with this
-        // same key are the collision that YldOnAppExit double-counts. recursive is
-        // folded in because a recursive and non-recursive rule on the same dir do
-        // not claim an identical file set, so they should not be treated as one
-        // collision group for the multiplication factor.
-        {
-            // This rule reached a valid, existing scan dir -> it participates in the
-            // exit walk. Register one tally; claims accrue into it via considerFile.
-            // recursive is folded into the dir key because a recursive and a
-            // non-recursive rule on the same dir do not claim an identical file set,
-            // so they are not one collision group for the multiplication factor.
-            AutoCloudUtil::AutoCloudRuleClaimTally tally;
-            tally.physicalDirKey = ToLowerAscii(NormalizeSlashes(scanRootUtf8)) +
-                                   (rule.recursive ? "\x01r" : "\x01n");
-            tally.siblingWeight = 1 + rule.siblings.size();
-            activeRuleTallyIdx = ruleClaimTallies.size();
-            ruleClaimTallies.push_back(std::move(tally));
-        }
-
         auto considerFile = [&](const std::filesystem::directory_entry& entry) {
             std::error_code fileEc;
             // Junction/symlink gate before is_regular_file.
@@ -1038,13 +1014,6 @@ ScanResult GetFileList(const std::string& steamPath,
                 const std::string& exTarget = exPat.find('/') == std::string::npos ? leaf : relFromRoot;
                 if (WildcardMatchInsensitive(exPat, exTarget)) return;
             }
-
-            // This file matches the current rule's pattern -> YldOnAppExit's exit
-            // loop counts it for THIS rule. Tally the claim now, BEFORE the
-            // cross-rule dedup below (which only affects our unique `files` list,
-            // not the native exit count).
-            if (activeRuleTallyIdx < ruleClaimTallies.size())
-                ++ruleClaimTallies[activeRuleTallyIdx].claimedFiles;
 
             std::string cloudPath = normalizedCloudPath.empty() ? relFromRoot : normalizedCloudPath + "/" + relFromRoot;
             std::string collisionKey = ToLowerAscii(NormalizeSlashes(cloudPath));
@@ -1081,10 +1050,6 @@ ScanResult GetFileList(const std::string& steamPath,
                     siblingRel = NormalizeSlashes(FileUtil::PathToUtf8(siblingPath.filename()));
                 }
                 if (!IsSafeRelativePath(siblingRel)) continue;
-                // Existing sibling on disk -> YldOnAppExit counts it for this rule
-                // too. Tally before dedup, same as the primary claim above.
-                if (activeRuleTallyIdx < ruleClaimTallies.size())
-                    ++ruleClaimTallies[activeRuleTallyIdx].claimedFiles;
                 std::string siblingCloudPath = normalizedCloudPath.empty()
                     ? siblingRel
                     : normalizedCloudPath + "/" + siblingRel;
@@ -1142,15 +1107,6 @@ ScanResult GetFileList(const std::string& steamPath,
         outResult.files.clear();
         LOG("GetAutoCloudFileList: aborting app %u bootstrap due to root/path collision", appId);
     }
-
-    // Finalize per-rule double-count accounting for the quota multiplier. These
-    // describe what CAutoCloudManager::YldOnAppExit charges against maxnumfiles,
-    // which (unlike outResult.files) is NOT cross-rule deduped on the exit path.
-    AutoCloudUtil::RuleCollisionAggregate agg =
-        AutoCloudUtil::AggregateRuleCollisions(ruleClaimTallies);
-    outResult.countedInstances = agg.countedInstances;
-    outResult.maxCollisionFactor = agg.maxCollisionFactor;
-    outResult.collisionSiblingHeadroom = agg.collisionSiblingHeadroom;
 
     LOG("GetAutoCloudFileList: found %zu rule-matched Auto-Cloud files for app %u (scanLimitHit=%d, hasRootCollision=%d)",
         outResult.files.size(), appId, (int)scanLimitHit, (int)hasRootCollision);

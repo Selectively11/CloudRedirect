@@ -42,9 +42,10 @@ CloudIntercept::RpcResult HandleGetUserStats(uint32_t appId, const std::vector<P
 
     LOG("[Stats] GetUserStats app=%u clientCrc=%u", appId, clientCrc);
 
-    // GetOrCreate seeds our store from Steam's native UserGameStats blob on
-    // first access, so for a real app `stats` now holds the authoritative data.
-    auto& stats = StatsStore::GetOrCreate(appId);
+    // Snapshot seeds our store from Steam's native UserGameStats blob on first
+    // access, then returns a COPY taken under the store lock -- safe to read here
+    // while background threads (poller / unlock capture) mutate the live entry.
+    StatsStore::AppStats stats = StatsStore::Snapshot(appId);
 
     PB::Writer resp;
 
@@ -202,7 +203,7 @@ std::optional<std::vector<uint8_t>> HandleLegacyGetUserStats(
     LOG("[Stats] Legacy GetUserStats app=%u gameId=%llu clientCrc=%u schemaVer=%d",
         appId, (unsigned long long)gameId, clientCrc, schemaVersion);
 
-    auto& stats = StatsStore::GetOrCreate(appId);
+    StatsStore::AppStats stats = StatsStore::Snapshot(appId);
 
     // If client has no schema (version=-1) and we don't have one either,
     // pass through to let the real server provide the schema.
@@ -268,10 +269,7 @@ std::optional<std::vector<uint8_t>> HandleLegacyStoreUserStats2(
         appId, (unsigned long long)gameId, explicitReset);
 
     if (explicitReset) {
-        auto& stats = StatsStore::GetOrCreate(appId);
-        stats.stats.clear();
-        stats.achievements.clear();
-        stats.crcStats = 0;
+        StatsStore::ResetStats(appId);   // clears stats/achievements under the store lock
     }
 
     std::vector<StatsStore::StatEntry> entries;
@@ -350,6 +348,10 @@ void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
 // unlock. The body has no timestamps, but Steam writes them to the native blob in
 // the same store job, so re-read the blob here to sync the new unlocks.
 void ObserveStoreUserStats(const uint8_t* body, size_t bodyLen) {
+    // Raw flag only -- this is SHARED (Windows+Linux) code. The ST-gate
+    // (AchievementsEnabled / StGateOpen) is applied by the WINDOWS callers at
+    // their hook sites; baking it in here would force Linux OFF since
+    // steamToolsPresent is structurally always-false on Linux.
     if (!MetadataSync::syncAchievements.load(std::memory_order_relaxed)) return;
 
     auto fields = PB::Parse(body, bodyLen);

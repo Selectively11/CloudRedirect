@@ -63,7 +63,8 @@ public partial class SettingsPage : Page
         bool? ShowNonSteamGame,
         bool? ParentalIgnorePlaytime,
         bool? ParentalBypassPlaytime,
-        bool? SchemaFetch);
+        bool? SchemaFetch,
+        bool? OverrideNonStGate);
 
     // M15: Move language/mode/sync-toggle config reads off the UI thread.
     // Loaded used to call ReadLanguageSetting + ReadModeSetting +
@@ -77,11 +78,11 @@ public partial class SettingsPage : Page
             var lang = ReadLanguageSetting();
             var mode = Services.SteamDetector.ReadModeSetting();
 
-            bool? a = null, p = null, l = null, u = null, nsg = null, pip = null, pbp = null, sf = null;
+            bool? a = null, p = null, l = null, u = null, nsg = null, pip = null, pbp = null, sf = null, ovr = null;
             if (mode == "cloud_redirect")
-                ReadSyncTogglesInto(ref a, ref p, ref l, ref u, ref nsg, ref pip, ref pbp, ref sf);
+                ReadSyncTogglesInto(ref a, ref p, ref l, ref u, ref nsg, ref pip, ref pbp, ref sf, ref ovr);
 
-            return new SettingsSnapshot(lang, mode, a, p, l, u, nsg, pip, pbp, sf);
+            return new SettingsSnapshot(lang, mode, a, p, l, u, nsg, pip, pbp, sf, ovr);
         });
 
         ApplySettingsSnapshot(snapshot);
@@ -98,7 +99,7 @@ public partial class SettingsPage : Page
             ExtraSection.Visibility = Visibility.Visible;
             ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas, snap.AutoUpdateDll,
                              snap.ShowNonSteamGame, snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime,
-                             snap.SchemaFetch);
+                             snap.SchemaFetch, snap.OverrideNonStGate);
         }
         else
         {
@@ -107,7 +108,7 @@ public partial class SettingsPage : Page
             // Auto-update DLL lives in the always-visible Updates section, so it
             // reflects the real setting even when the sync/extra sections are hidden.
             ApplySyncToggles(false, false, false, snap.AutoUpdateDll, false,
-                             snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime, false);
+                             snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime, false, false);
         }
     }
 
@@ -138,7 +139,7 @@ public partial class SettingsPage : Page
 
     private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas, bool? autoUpdateDll,
                                    bool? showNonSteamGame, bool? parentalIgnorePlaytime, bool? parentalBypassPlaytime,
-                                   bool? schemaFetch)
+                                   bool? schemaFetch, bool? overrideNonStGate)
     {
         _syncLoading = true;
         try
@@ -151,6 +152,7 @@ public partial class SettingsPage : Page
             if (parentalIgnorePlaytime == true) ParentalIgnorePlaytimeToggle.IsChecked = true;
             if (parentalBypassPlaytime == true) ParentalBypassPlaytimeToggle.IsChecked = true;
             if (schemaFetch == true) GetAchievementDataToggle.IsChecked = true;
+            if (overrideNonStGate == true) OverrideNonStGateToggle.IsChecked = true;
         }
         finally
         {
@@ -165,7 +167,7 @@ public partial class SettingsPage : Page
     /// </summary>
     private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas, ref bool? autoUpdateDll,
                                               ref bool? showNonSteamGame, ref bool? parentalIgnorePlaytime, ref bool? parentalBypassPlaytime,
-                                              ref bool? schemaFetch)
+                                              ref bool? schemaFetch, ref bool? overrideNonStGate)
     {
         try
         {
@@ -197,6 +199,9 @@ public partial class SettingsPage : Page
             // Experimental schema fetch: default off when key absent.
             if (root.TryGetProperty("experimental_schema_fetch", out var sf) && sf.ValueKind == JsonValueKind.True)
                 schemaFetch = true;
+            // UNSUPPORTED WIP OVERRIDE NON-ST CLIENT GATE: default off when absent.
+            if (root.TryGetProperty("override_non_st_client_gate", out var ovr) && ovr.ValueKind == JsonValueKind.True)
+                overrideNonStGate = true;
         }
         catch { }
     }
@@ -375,7 +380,7 @@ public partial class SettingsPage : Page
         Services.ConfigHelper.SaveConfig(path,
             new[] { "sync_achievements", "sync_playtime", "sync_luas", "auto_update_dll",
                     "show_non_steam_game", "parental_ignore_playtime", "parental_bypass_playtime",
-                    "experimental_schema_fetch" },
+                    "experimental_schema_fetch", "override_non_st_client_gate" },
             writer =>
             {
                 writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
@@ -386,6 +391,7 @@ public partial class SettingsPage : Page
                 writer.WriteBoolean("parental_ignore_playtime", ParentalIgnorePlaytimeToggle.IsChecked == true);
                 writer.WriteBoolean("parental_bypass_playtime", ParentalBypassPlaytimeToggle.IsChecked == true);
                 writer.WriteBoolean("experimental_schema_fetch", GetAchievementDataToggle.IsChecked == true);
+                writer.WriteBoolean("override_non_st_client_gate", OverrideNonStGateToggle.IsChecked == true);
             });
     }
 

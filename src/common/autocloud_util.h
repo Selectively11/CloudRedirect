@@ -172,57 +172,6 @@ struct AutoCloudRootOverrideNative {
     std::vector<std::pair<std::string, std::string>> pathTransforms;
 };
 
-// Per-rule tally produced by the AutoCloud scan walk: how many on-disk files
-// (primaries + existing siblings) the rule claimed, the resolved physical
-// directory it scanned (case-normalized + recursive flag), and its sibling
-// weight (1 + siblingCount). Feeds RuleCollisionAggregate below.
-struct AutoCloudRuleClaimTally {
-    std::string physicalDirKey;  // normalized resolved scan dir (+ recursion tag)
-    size_t claimedFiles = 0;     // files this rule matched on disk (pre cross-rule dedup)
-    size_t siblingWeight = 1;    // 1 + rule.siblings.size()
-};
-
-// What CAutoCloudManager::YldOnAppExit charges against maxnumfiles, derived from
-// per-rule claim tallies. This is the pure, filesystem-free core of the mixed-root
-// quota multiplier so it can be unit-tested across Windows/macOS/Linux rule shapes.
-struct RuleCollisionAggregate {
-    // Sum of claimedFiles across all rules == the per-rule, NON-deduped instance
-    // count the exit walk charges (a file in a dir hit by N rules counts N times).
-    size_t countedInstances = 0;
-    // Largest number of distinct rules resolving to one physical directory == the
-    // per-file multiplication factor on the exit path. 1 = no collision.
-    size_t maxCollisionFactor = 0;
-    // Budget slack for the worst-colliding dir: (#rules there) * (max siblingWeight
-    // there), mirroring the (1 + siblingCount) the exit loop consumes per rule pass.
-    size_t collisionSiblingHeadroom = 0;
-};
-
-// Aggregate per-rule claim tallies into the exit-walk accounting. Rules that
-// claimed zero files still count toward the collision factor IF they resolved to a
-// shared directory (they participate in the walk), but only directories that other
-// rules also resolve to can produce a factor > 1. macOS/Linux-only rules that
-// never resolve to a dir on this OS are simply absent from `tallies` and thus
-// correctly contribute nothing.
-inline RuleCollisionAggregate AggregateRuleCollisions(
-        const std::vector<AutoCloudRuleClaimTally>& tallies) {
-    struct DirAgg { size_t rules = 0; size_t maxSiblingWeight = 1; };
-    std::unordered_map<std::string, DirAgg> byDir;
-    RuleCollisionAggregate out;
-    for (const auto& t : tallies) {
-        out.countedInstances += t.claimedFiles;
-        DirAgg& d = byDir[t.physicalDirKey];
-        ++d.rules;
-        if (t.siblingWeight > d.maxSiblingWeight) d.maxSiblingWeight = t.siblingWeight;
-    }
-    for (const auto& [dir, d] : byDir) {
-        if (d.rules > out.maxCollisionFactor) {
-            out.maxCollisionFactor = d.rules;
-            out.collisionSiblingHeadroom = d.rules * d.maxSiblingWeight;
-        }
-    }
-    return out;
-}
-
 struct AppInfoKVNode {
     std::string key;
     std::string stringValue;
@@ -429,8 +378,13 @@ inline void ApplyRootOverridesForPlatform(AutoCloudRuleNative& rule,
                                           const std::vector<AutoCloudRootOverrideNative>& overrides,
                                           AutoCloudEffectivePlatform platform) {
     for (const auto& overrideRule : overrides) {
-        if (!IsRootOverrideActiveForPlatform(overrideRule, platform)) continue;
-        if (_stricmp(rule.root.c_str(), overrideRule.root.c_str()) != 0) continue;
+        bool active = IsRootOverrideActiveForPlatform(overrideRule, platform);
+        bool rootMatch = _stricmp(rule.root.c_str(), overrideRule.root.c_str()) == 0;
+        LOG("ApplyRootOverride: rule.root='%s' vs override.root='%s' os='%s' active=%d rootMatch=%d -> useinstead='%s'",
+            rule.root.c_str(), overrideRule.root.c_str(), overrideRule.os.c_str(),
+            active ? 1 : 0, rootMatch ? 1 : 0, overrideRule.useInstead.c_str());
+        if (!active) continue;
+        if (!rootMatch) continue;
 
         if (!overrideRule.useInstead.empty()) {
             rule.root = overrideRule.useInstead;

@@ -151,6 +151,22 @@
                                      Unchecked="SyncToggle_Changed" />
                 </ui:CardControl>
 
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="UNSUPPORTED WIP OVERRIDE NON-ST CLIENT GATE"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="BLAH BLAH TEST ONLY"
+                                       Foreground="{DynamicResource SystemFillColorAttentionBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="OverrideNonStGateToggle"
+                                     Checked="SyncToggle_Changed"
+                                     Unchecked="SyncToggle_Changed" />
+                </ui:CardControl>
+
                 <ui:CardControl Margin="0,0,0,32">
                     <ui:CardControl.Header>
                         <StackPanel>

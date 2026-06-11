@@ -61,6 +61,10 @@ static std::unordered_set<std::string>   g_missingMetadataPaths;
 static std::mutex                        g_blobIndexMutex;
 struct BlobIndex {
     std::unordered_map<std::string, std::string> filenameToPath; // filename -> full cloud path
+    // sha1hex -> a cloud path holding that content. Identical-content files store
+    // bytes only under the FIRST filename that uploaded the sha; retrieval by another
+    // filename 404s. This map lets RetrieveBlob find bytes by content hash instead.
+    std::unordered_map<std::string, std::string> shaToPath;      // sha1hex -> full cloud path
     bool populated = false;
 };
 static std::unordered_map<uint64_t, BlobIndex> g_blobIndex; // key = (accountId<<32)|appId
@@ -1159,12 +1163,17 @@ static std::string ResolveBlobCloudPath(uint32_t accountId, uint32_t appId,
                 std::string fname = rel.substr(0, lastSlash);
                 // Canonical always wins over legacy (unconditional overwrite).
                 idx.filenameToPath[fname] = fi.path;
+                // first writer wins; all copies byte-identical.
+                idx.shaToPath.emplace(leaf, fi.path);
                 continue;
             }
         }
 
         // Legacy SHA-only: blobs/{sha}
-        if (isHexSha(rel)) continue; // can't map to filename without manifest
+        if (isHexSha(rel)) {
+            idx.shaToPath.emplace(rel, fi.path); // usable by content hash
+            continue; // can't map to filename without manifest
+        }
 
         // Legacy filename-only: blobs/{filename} -- only if canonical not already set.
         idx.filenameToPath.emplace(rel, fi.path);
@@ -1184,6 +1193,35 @@ static std::string ResolveBlobCloudPath(uint32_t accountId, uint32_t appId,
             g_blobIndex[key] = std::move(idx);
     }
     return result;
+}
+
+// Resolve a blob path by CONTENT HASH (sha1hex), independent of filename. Used
+// as a fallback when the {filename}/{sha} path misses because the identical
+// content was uploaded under a different filename. Reuses the same index/listing
+// as ResolveBlobCloudPath (no extra network on a populated index).
+static std::string ResolveBlobCloudPathBySHA(uint32_t accountId, uint32_t appId,
+                                             const std::string& shaHex) {
+    if (shaHex.size() != 40) return {};
+    uint64_t key = (static_cast<uint64_t>(accountId) << 32) | appId;
+    {
+        std::lock_guard<std::mutex> lk(g_blobIndexMutex);
+        auto it = g_blobIndex.find(key);
+        if (it != g_blobIndex.end() && it->second.populated) {
+            auto sit = it->second.shaToPath.find(shaHex);
+            if (sit != it->second.shaToPath.end()) return sit->second;
+            return {};
+        }
+    }
+    // Populate the index (filename resolver does the listing + fills shaToPath),
+    // then re-check by sha.
+    ResolveBlobCloudPath(accountId, appId, /*filename=*/std::string());
+    std::lock_guard<std::mutex> lk(g_blobIndexMutex);
+    auto it = g_blobIndex.find(key);
+    if (it != g_blobIndex.end() && it->second.populated) {
+        auto sit = it->second.shaToPath.find(shaHex);
+        if (sit != it->second.shaToPath.end()) return sit->second;
+    }
+    return {};
 }
 
 // Invalidate the blob index for an app (called after uploads/promotions change the layout).
@@ -1229,13 +1267,34 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
         return {};
     }
 
-    // CAS: resolve filename->SHA from manifest, download by SHA.
+    // CAS: resolve filename->SHA, download by SHA.
     if (cloudActive) {
+        // Local manifest is only a cache; on a fresh machine it's empty, so SHA
+        // resolution must fall back to authoritative cloud state. Priority order:
+        // local manifest -> cloud state -> caller's expectedShaHex (also cloud-derived).
         Manifest manifest = LoadLocalManifest(accountId, appId);
         auto mit = manifest.find(filename);
         std::string shaHex;
         if (mit != manifest.end() && !mit->second.sha.empty()) {
             shaHex = ShaToHex(mit->second.sha);
+        }
+        if (shaHex.empty()) {
+            // Local cache miss -> consult the authoritative cloud state. Serve
+            // path: use the cache-aware accessor (faithful to a single restore
+            // burst snapshot; falls back to live when stale or under contention).
+            auto cloud = FetchCloudStateForServe(accountId, appId);
+            if (cloud.status == StateFetchStatus::Ok) {
+                auto cit = cloud.state.files.find(filename);
+                if (cit != cloud.state.files.end() && !cit->second.sha.empty()) {
+                    shaHex = ShaToHex(cit->second.sha);
+                    LOG("[CloudStorage] RetrieveBlob: resolved SHA from cloud state for %s (local manifest miss)",
+                        filename.c_str());
+                }
+            }
+        }
+        if (shaHex.empty() && !expectedShaHex.empty()) {
+            shaHex = expectedShaHex;
+            LOG("[CloudStorage] RetrieveBlob: using caller expectedShaHex for %s", filename.c_str());
         }
 
         // Cache-first: caller supplied cloud-authoritative SHA (from FetchCloudState).
@@ -1383,6 +1442,38 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
                     del.cloudPath = legacyPath;
                     del.bestEffort = true;
                     CloudWorkQueue::EnqueueWork(std::move(del));
+
+                    if (found) *found = true;
+                    return data;
+                }
+            }
+
+            // 4. Content-hash fallback: bytes for this SHA may live under a different
+            //    filename's CAS dir (see shaToPath). Serve any path holding the SHA --
+            //    byte-identical by definition.
+            std::string shaPath = ResolveBlobCloudPathBySHA(accountId, appId, shaHex);
+            if (!shaPath.empty() && shaPath != canonicalPath &&
+                g_provider->Download(shaPath, data)) {
+                std::string actualSha = ShaToHex(FileUtil::SHA1(data.data(), data.size()));
+                if (actualSha != shaHex) {
+                    LOG("[CloudStorage] RetrieveBlob: SHA MISMATCH on content-hash path %s: expected=%s actual=%s, rejecting",
+                        shaPath.c_str(), shaHex.c_str(), actualSha.c_str());
+                    data.clear();
+                } else {
+                    LOG("[CloudStorage] RetrieveBlob: fetched by content hash (sha=%s, stored under other filename %s): %s (%zu bytes)",
+                        shaHex.c_str(), shaPath.c_str(), filename.c_str(), data.size());
+                    const uint8_t* writeData = data.empty() ? nullptr : data.data();
+                    LocalStorage::WriteFileNoIncrement(accountId, appId, filename,
+                                                       writeData, data.size());
+                    // Promote a copy to this filename's canonical path so the next
+                    // request hits first try. Don't delete the source -- another
+                    // filename references it.
+                    CloudWorkQueue::WorkItem upload;
+                    upload.type = CloudWorkQueue::WorkItem::Upload;
+                    upload.cloudPath = canonicalPath;
+                    upload.data = data;
+                    upload.bestEffort = true;
+                    CloudWorkQueue::EnqueueWork(std::move(upload));
 
                     if (found) *found = true;
                     return data;
@@ -1753,25 +1844,44 @@ int GarbageCollectBlobs(uint32_t accountId, uint32_t appId) {
         return 0;
     }
 
-    // Build the set of paths the manifest expects to find on the provider.
-    Manifest manifest = LoadLocalManifest(accountId, appId);
+    // Build the keep-set from the authoritative cloud state, not the local manifest.
+    // The manifest is only a cache and is routinely incomplete (2nd device, post-wipe),
+    // so using it caused GC to delete blobs other machines still reference. If we
+    // can't see the authoritative reference set, we must not delete anything.
+    CloudStorage::StateFetchResult cloudState = FetchCloudState(accountId, appId);
+    if (cloudState.status != CloudStorage::StateFetchStatus::Ok) {
+        LOG("[GC] app=%u: cloud state unavailable (status=%d) -- refusing GC to avoid deleting referenced blobs",
+            appId, (int)cloudState.status);
+        return -1;
+    }
+
+    // Keep-set = union of cloud-state files and local manifest (local may hold a
+    // freshly-uploaded file not yet in the fetched state). Keyed by both canonical
+    // path AND content SHA (see step 1 below for why the SHA key matters).
     std::unordered_set<std::string> keepCanonicalPaths;
-    std::unordered_set<std::string> keepLegacySHAs;
-    // filename -> (canonical cloud path, expected SHA hex) for promoting legacy blobs
+    std::unordered_set<std::string> keepLegacySHAs;   // also: any referenced content SHA
     struct ManifestRef {
         std::string canonicalPath;
         std::string shaHex;
     };
     std::unordered_map<std::string, ManifestRef> filenameToManifestRef;
-    for (const auto& [filename, entry] : manifest) {
-        if (entry.sha.empty()) continue;
-        std::string shaHex = ShaToHex(entry.sha);
+
+    auto addRef = [&](const std::string& filename, const std::vector<uint8_t>& sha) {
+        if (sha.empty()) return;
+        std::string shaHex = ShaToHex(sha);
         std::string canonPath =
             CloudBlobPathByNameAndSHA(accountId, appId, filename, shaHex);
         keepCanonicalPaths.insert(canonPath);
         keepLegacySHAs.insert(shaHex);
         filenameToManifestRef[filename] = {canonPath, shaHex};
-    }
+    };
+
+    for (const auto& [filename, fe] : cloudState.state.files)
+        addRef(filename, fe.sha);
+
+    Manifest manifest = LoadLocalManifest(accountId, appId);
+    for (const auto& [filename, entry] : manifest)
+        addRef(filename, entry.sha);
 
     // Collect the set of canonical paths that actually exist on the provider.
     std::unordered_set<std::string> existingCanonicalPaths;
@@ -1806,12 +1916,19 @@ int GarbageCollectBlobs(uint32_t accountId, uint32_t appId) {
         if (fi.path.size() <= blobPrefix.size()) continue;
         std::string rel = fi.path.substr(blobPrefix.size());
 
-        // 1. Canonical path: keep iff (filename, sha) is in manifest.
+        // 1. Canonical path blobs/{filename}/{sha}: keep iff the exact path is
+        //    referenced OR its content SHA is referenced by ANY file. The SHA
+        //    check is essential: identical-content files share ONE physical blob
+        //    (stored under the first filename), so the other filenames' canonical
+        //    paths don't exist on Drive -- without the SHA keep, the shared blob
+        //    would be deleted and every referencing file would 404.
         size_t lastSlash = rel.rfind('/');
         if (lastSlash != std::string::npos) {
             std::string leaf = rel.substr(lastSlash + 1);
             if (isHexSha(leaf)) {
-                if (keepCanonicalPaths.count(fi.path) == 0) {
+                bool referenced = keepCanonicalPaths.count(fi.path) != 0 ||
+                                  keepLegacySHAs.count(leaf) != 0;
+                if (!referenced) {
                     orphans.push_back(fi.path);
                 }
                 continue;

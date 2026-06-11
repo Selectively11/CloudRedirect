@@ -341,28 +341,6 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
     )
     target_include_directories(vdf_tests PRIVATE src/common)
     add_test(NAME vdf_tests COMMAND vdf_tests)
-
-    # Mixed-root quota multiplier collision accounting (header-only logic in
-    # autocloud_util.h). Pulls log + platform helpers because autocloud_util.h
-    # includes log.h / file_util.h transitively.
-    if(WIN32)
-        add_executable(rule_collision_tests
-            tests/rule_collision_tests.cpp
-            src/platform/win/log.cpp
-            src/platform/win/platform_win.cpp
-        )
-        target_include_directories(rule_collision_tests PRIVATE src/common src/platform/win)
-        target_compile_definitions(rule_collision_tests PRIVATE CLOUDREDIRECT_TESTING)
-        target_link_libraries(rule_collision_tests PRIVATE Shlwapi Advapi32 Shell32 Ole32)
-    else()
-        add_executable(rule_collision_tests
-            tests/rule_collision_tests.cpp
-            src/platform/linux/log.cpp
-        )
-        target_include_directories(rule_collision_tests PRIVATE src/common src/platform/linux)
-        target_compile_definitions(rule_collision_tests PRIVATE CLOUDREDIRECT_TESTING)
-    endif()
-    add_test(NAME rule_collision_tests COMMAND rule_collision_tests)
 endif()
 
 # ── UI (Windows only) ───────────────────────────────────────────────────

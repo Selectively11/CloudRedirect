@@ -39,6 +39,9 @@ static NamespacePredicate g_isNamespaceApp;
 // Persist to disk; pushCloud=false writes locally only (used by startup reconcile).
 static void WriteAppStats(uint32_t appId, const AppStats& stats, bool pushCloud);
 
+// Playtime helpers (defined below; forward-declared for use in (de)serialization).
+static void RecomputePlaytimeTotals(PlaytimeData& pt);
+
 void SetCloudProvider(CloudPullFn pull, CloudPushFn push) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_cloudPull = std::move(pull);
@@ -535,6 +538,30 @@ static bool ParseAppStatsJson(const std::string& content, AppStats& out) {
         out.playtime.playtimeWindows = (uint32_t)pt["windows"].integer();
         out.playtime.playtimeMac = (uint32_t)pt["mac"].integer();
         out.playtime.playtimeLinux = (uint32_t)pt["linux"].integer();
+
+        // Per-device sub-totals (authoritative). Object: deviceId -> {windows,mac,linux}.
+        const auto& pd = pt["per_device"];
+        if (pd.type == Json::Type::Object) {
+            for (const auto& [dev, v] : pd.objVal) {
+                if (v.type != Json::Type::Object) continue;
+                DevicePlaytime dp;
+                dp.windows = (uint32_t)v["windows"].integer();
+                dp.mac     = (uint32_t)v["mac"].integer();
+                dp.lin     = (uint32_t)v["linux"].integer();
+                out.playtime.perDevice[dev] = dp;
+            }
+        } else {
+            // Back-compat: a pre-per-device blob carried only platform totals. Shim
+            // each into a synthetic legacy bucket so sums survive and new writes
+            // accumulate.
+            if (out.playtime.playtimeWindows)
+                out.playtime.perDevice["__legacy_windows"].windows = out.playtime.playtimeWindows;
+            if (out.playtime.playtimeMac)
+                out.playtime.perDevice["__legacy_mac"].mac = out.playtime.playtimeMac;
+            if (out.playtime.playtimeLinux)
+                out.playtime.perDevice["__legacy_linux"].lin = out.playtime.playtimeLinux;
+        }
+        RecomputePlaytimeTotals(out.playtime);
     }
 
     return true;
@@ -584,20 +611,124 @@ static std::string BuildAppStatsJson(const AppStats& stats) {
     pt.objVal["windows"] = Json::Number(stats.playtime.playtimeWindows);
     pt.objVal["mac"] = Json::Number(stats.playtime.playtimeMac);
     pt.objVal["linux"] = Json::Number(stats.playtime.playtimeLinux);
+    // Authoritative per-device sub-totals (the merge source of truth).
+    Json::Value perDev = Json::Object();
+    for (const auto& [dev, dp] : stats.playtime.perDevice) {
+        Json::Value d = Json::Object();
+        d.objVal["windows"] = Json::Number(dp.windows);
+        d.objVal["mac"] = Json::Number(dp.mac);
+        d.objVal["linux"] = Json::Number(dp.lin);
+        perDev.objVal[dev] = std::move(d);
+    }
+    pt.objVal["per_device"] = std::move(perDev);
     root.objVal["playtime"] = std::move(pt);
 
     return Json::Stringify(root);
 }
 
-// Max-merge each platform's forever field (the total is their sum), so a stale
-// local or older cloud blob can't regress another device's time.
+// Stable per-device key. Hostname is what Steam itself uses for machine_names;
+// distinct devices effectively never collide, and it's stable across restarts.
+static const std::string& ThisDeviceId() {
+    static const std::string id = [] {
+#ifdef _WIN32
+        char buf[256]; DWORD len = sizeof(buf);
+        if (GetComputerNameA(buf, &len) && len > 0) return std::string(buf, len);
+#else
+        char buf[256];
+        if (gethostname(buf, sizeof(buf)) == 0) return std::string(buf);
+#endif
+        return std::string("UNKNOWN");
+    }();
+    return id;
+}
+
+// Recompute the derived totals from the authoritative per-device sub-totals.
+static void RecomputePlaytimeTotals(PlaytimeData& pt) {
+    uint64_t win = 0, mac = 0, lin = 0;
+    for (const auto& [dev, dp] : pt.perDevice) {
+        win += dp.windows; mac += dp.mac; lin += dp.lin;
+    }
+    auto clamp32 = [](uint64_t v) -> uint32_t {
+        return v > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)v;
+    };
+    pt.playtimeWindows = clamp32(win);
+    pt.playtimeMac     = clamp32(mac);
+    pt.playtimeLinux   = clamp32(lin);
+    pt.minutesForever  = clamp32(win + mac + lin);
+}
+
+// Accrue minutes onto THIS device's own per-device sub-total for this platform.
+static void AccrueLocalPlaytime(PlaytimeData& pt, uint32_t minutes) {
+    DevicePlaytime& mine = pt.perDevice[ThisDeviceId()];
+#ifdef _WIN32
+    mine.windows += minutes;
+#elif defined(__APPLE__)
+    mine.mac += minutes;
+#else
+    mine.lin += minutes;
+#endif
+    RecomputePlaytimeTotals(pt);
+}
+
+static bool IsLegacyDeviceKey(const std::string& key) {
+    return key.rfind("__legacy_", 0) == 0;
+}
+
+// Merge a cloud playtime snapshot into the local one (cloud-pull path): union of
+// device entries, max per (device, platform). Each device owns its key, so this
+// neither clobbers another device's minutes nor double-counts our own, despite
+// the cloud stats.json being last-writer-wins.
+//
+// Legacy reconciliation: an OLD client's blob carries only platform totals
+// (shimmed into __legacy_* buckets) that may already include minutes we attribute
+// to real device keys -> stacking would double-count permanently. So when src is
+// legacy-ONLY, discount its legacy buckets by the sum of known real-device minutes
+// before max-merging. Mixed blobs are disjoint -> no discount.
 static void MergePlaytime(PlaytimeData& dst, const PlaytimeData& src) {
-    dst.playtimeWindows = (std::max)(dst.playtimeWindows, src.playtimeWindows);
-    dst.playtimeMac     = (std::max)(dst.playtimeMac,     src.playtimeMac);
-    dst.playtimeLinux   = (std::max)(dst.playtimeLinux,   src.playtimeLinux);
+    bool srcHasRealKeys = false;
+    for (const auto& [dev, sdp] : src.perDevice) {
+        if (!IsLegacyDeviceKey(dev)) { srcHasRealKeys = true; break; }
+    }
+    bool srcLegacyOnly = !src.perDevice.empty() && !srcHasRealKeys;
+
+    // Union real device keys first (so the discount below sees all of them).
+    for (const auto& [dev, sdp] : src.perDevice) {
+        if (IsLegacyDeviceKey(dev)) continue;
+        DevicePlaytime& ddp = dst.perDevice[dev];
+        ddp.windows = (std::max)(ddp.windows, sdp.windows);
+        ddp.mac     = (std::max)(ddp.mac,     sdp.mac);
+        ddp.lin     = (std::max)(ddp.lin,     sdp.lin);
+    }
+
+    // Per-platform sums of real (attributed) minutes, for the legacy discount.
+    uint64_t realWin = 0, realMac = 0, realLin = 0;
+    if (srcLegacyOnly) {
+        for (const auto& [dev, ddp] : dst.perDevice) {
+            if (IsLegacyDeviceKey(dev)) continue;
+            realWin += ddp.windows; realMac += ddp.mac; realLin += ddp.lin;
+        }
+    }
+    auto discounted = [](uint32_t legacyVal, uint64_t realSum) -> uint32_t {
+        return legacyVal > realSum ? (uint32_t)(legacyVal - realSum) : 0u;
+    };
+
+    for (const auto& [dev, sdp] : src.perDevice) {
+        if (!IsLegacyDeviceKey(dev)) continue;
+        DevicePlaytime eff = sdp;
+        if (srcLegacyOnly) {
+            eff.windows = discounted(sdp.windows, realWin);
+            eff.mac     = discounted(sdp.mac,     realMac);
+            eff.lin     = discounted(sdp.lin,     realLin);
+        }
+        DevicePlaytime& ddp = dst.perDevice[dev];
+        ddp.windows = (std::max)(ddp.windows, eff.windows);
+        ddp.mac     = (std::max)(ddp.mac,     eff.mac);
+        ddp.lin     = (std::max)(ddp.lin,     eff.lin);
+    }
+
     dst.minutesLastTwoWeeks = (std::max)(dst.minutesLastTwoWeeks, src.minutesLastTwoWeeks);
-    dst.lastPlayedTime  = (std::max)(dst.lastPlayedTime,  src.lastPlayedTime);
-    dst.minutesForever  = dst.playtimeWindows + dst.playtimeMac + dst.playtimeLinux;
+    dst.lastPlayedTime = (std::max)(dst.lastPlayedTime, src.lastPlayedTime);
+    RecomputePlaytimeTotals(dst);
 }
 
 // Union-merge achievements: an unlock is monotonic, so a bit stays unlocked if
@@ -648,6 +779,31 @@ static bool MergeStatValues(std::vector<StatEntry>& dst,
     return changed;
 }
 
+// Disk-only load (stats json + schema sidecar), NO network. Safe to call while
+// holding g_mutex. Returns true if local data existed.
+static bool LoadAppStatsLocalOnly(uint32_t appId, AppStats& out) {
+    std::string path = StatsPath(appId);
+    bool haveLocal = false;
+
+    std::ifstream f(path);
+    if (f.good()) {
+        std::string local((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+        f.close();
+        if (!local.empty() && ParseAppStatsJson(local, out))
+            haveLocal = true;
+    }
+    if (haveLocal) {
+        std::string schemaPath = SchemaPath(appId);
+        std::ifstream sf(schemaPath, std::ios::binary);
+        if (sf.good()) {
+            out.schema.assign(std::istreambuf_iterator<char>(sf),
+                              std::istreambuf_iterator<char>());
+        }
+    }
+    return haveLocal;
+}
+
 bool LoadAppStats(uint32_t appId, AppStats& out) {
     std::string path = StatsPath(appId);
     bool haveLocal = false;
@@ -672,11 +828,12 @@ bool LoadAppStats(uint32_t appId, AppStats& out) {
                 haveLocal = true;
             } else {
                 MergePlaytime(out.playtime, cloudStats.playtime);
-                // Adopt cloud achievements/stats/schema when we hold none.
-                if (out.stats.empty() && !cloudStats.stats.empty())
-                    out.stats = std::move(cloudStats.stats);
-                if (out.achievements.empty() && !cloudStats.achievements.empty())
-                    out.achievements = std::move(cloudStats.achievements);
+                // Union-merge achievements (unlocks are monotonic -- never let a
+                // local copy hide another device's unlock) and stat values, so
+                // cloud progress is preserved instead of clobbered on next push.
+                MergeAchievements(out.achievements, cloudStats.achievements);
+                MergeStatValues(out.stats, cloudStats.stats);
+                // Schema is descriptive; adopt cloud's only when we hold none.
                 if (out.schema.empty() && !cloudStats.schema.empty())
                     out.schema = std::move(cloudStats.schema);
             }
@@ -788,8 +945,8 @@ void CaptureNativeUnlocks(uint32_t appId) {
     }
 }
 
-AppStats& GetOrCreate(uint32_t appId) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+// Core seed/lookup. Caller MUST hold g_mutex. Returns a live cache reference.
+static AppStats& GetOrCreateLocked(uint32_t appId) {
     auto it = g_cache.find(appId);
     if (it != g_cache.end()) {
         // Cache hit, but a reconcile/session path may have created an empty
@@ -807,6 +964,31 @@ AppStats& GetOrCreate(uint32_t appId) {
     }
     EnsureNativeImportLocked(appId, stats);
     return stats;
+}
+
+AppStats& GetOrCreate(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return GetOrCreateLocked(appId);
+}
+
+// Thread-safe by-value snapshot: seed + copy entirely under the lock so the
+// returned data can't be mutated out from under a read handler by a background
+// thread (cloud poller / native-unlock capture).
+AppStats Snapshot(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return GetOrCreateLocked(appId);
+}
+
+// Thread-safe explicit reset: clears stats/achievements only (playtime/schema
+// survive, matching native explicit_reset). Seeds first so a cache miss can't
+// flush an empty record (see RefreshFromCloud for the same operator[] hazard).
+void ResetStats(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    AppStats& stats = GetOrCreateLocked(appId);
+    stats.stats.clear();
+    stats.achievements.clear();
+    stats.crcStats = 0;
+    g_dirty[appId] = true;
 }
 
 void SeedApps(const std::vector<uint32_t>& appIds) {
@@ -827,18 +1009,38 @@ std::vector<uint32_t> RefreshFromCloud(const std::vector<uint32_t>& appIds) {
         if (!ParseAppStatsJson(cloud, cloudStats)) continue;
 
         std::lock_guard<std::mutex> lock(g_mutex);
-        AppStats& cur = g_cache[appId];
+        // Hydrate from disk on a cache miss BEFORE merging: operator[] would
+        // otherwise default-construct an EMPTY record, and WriteAppStats would
+        // then truncate a populated local <appId>.json (stats/achievements wiped,
+        // crc=0), propagating the loss to the cloud on the next push.
+        auto cacheIt = g_cache.find(appId);
+        if (cacheIt == g_cache.end()) {
+            // Hydrate from DISK only -- the cloud blob is already in `cloudStats`
+            // and is merged below. LoadAppStats would do a second network pull
+            // while holding g_mutex, stalling game-facing store calls.
+            AppStats fresh;
+            LoadAppStatsLocalOnly(appId, fresh);
+            cacheIt = g_cache.emplace(appId, std::move(fresh)).first;
+        }
+        AppStats& cur = cacheIt->second;
+
         PlaytimeData before = cur.playtime;
         MergePlaytime(cur.playtime, cloudStats.playtime);
-        // Another device advanced this app's playtime -> persist locally and report.
-        if (cur.playtime.minutesForever != before.minutesForever ||
-            cur.playtime.lastPlayedTime != before.lastPlayedTime) {
+        // Achievements/stats are monotonic across devices -- union-merge them too,
+        // not just playtime, or a cloud unlock is dropped and the next local push
+        // overwrites it on the cloud.
+        bool achChanged = MergeAchievements(cur.achievements, cloudStats.achievements);
+        bool statChanged = MergeStatValues(cur.stats, cloudStats.stats);
+        bool playtimeChanged = (cur.playtime.minutesForever != before.minutesForever ||
+                                cur.playtime.lastPlayedTime != before.lastPlayedTime);
+        // Another device advanced this app -> persist locally and report.
+        if (playtimeChanged || achChanged || statChanged) {
             WriteAppStats(appId, cur, false);
             changed.push_back(appId);
-            LOG("[Stats] Cloud advanced app %u: forever %u -> %u (win=%u mac=%u linux=%u)",
+            LOG("[Stats] Cloud advanced app %u: forever %u -> %u (win=%u mac=%u linux=%u) ach=%d stat=%d",
                 appId, before.minutesForever, cur.playtime.minutesForever,
                 cur.playtime.playtimeWindows, cur.playtime.playtimeMac,
-                cur.playtime.playtimeLinux);
+                cur.playtime.playtimeLinux, achChanged ? 1 : 0, statChanged ? 1 : 0);
         }
     }
     return changed;
@@ -998,17 +1200,10 @@ void EndSession(uint32_t appId) {
     g_activeSessions.erase(it);
 
     auto& stats = g_cache[appId];
-    // Accrue only this platform's field; a session here can't overwrite another
-    // device's cloud playtime.
-#ifdef _WIN32
-    stats.playtime.playtimeWindows += minutes;
-#elif defined(__APPLE__)
-    stats.playtime.playtimeMac += minutes;
-#else
-    stats.playtime.playtimeLinux += minutes;
-#endif
-    stats.playtime.minutesForever = stats.playtime.playtimeWindows
-        + stats.playtime.playtimeMac + stats.playtime.playtimeLinux;
+    // Accrue onto THIS device's own per-device sub-total (keyed by device id), so
+    // a session here can never overwrite another device's contribution -- even a
+    // same-platform device's -- under the last-writer-wins cloud blob.
+    AccrueLocalPlaytime(stats.playtime, minutes);
     stats.playtime.minutesLastTwoWeeks += minutes;
     stats.playtime.lastPlayedTime = now;
 

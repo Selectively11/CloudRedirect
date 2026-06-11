@@ -29,6 +29,8 @@
 #include <thread>
 #include <vector>
 #include <unistd.h>
+#include <chrono>
+#include <condition_variable>
 
 // 32-bit Linux cdecl: all args on stack
 using BYieldingSend_t     = int(*)(void* pThis, const char* method, void* req, void* resp, int* flags);
@@ -42,6 +44,16 @@ static std::atomic<SyncSend2_t>          g_origSyncSend2{nullptr};
 static std::atomic<bool> g_initialized{false};
 static std::atomic<bool> g_shuttingDown{false};
 static std::atomic<int>  g_hookRefCount{0};
+
+// Cloud playtime poller. Tracked (not detached) so shutdown joins it before the
+// .so's statics are torn down -- a detached thread blocked in RefreshFromCloud's
+// curl would run freed code on Steam exit. Poller sets g_pollerExited + notifies
+// the CV as its LAST action; BeginShutdown waits bounded, then join()s (instant)
+// or detach()es if wedged in the network.
+static std::thread g_cloudPollerThread;
+static std::mutex g_pollerExitMtx;
+static std::condition_variable g_pollerExitCv;
+static std::atomic<bool> g_pollerExited{false};
 
 struct HookGuard {
     HookGuard() { g_hookRefCount.fetch_add(1, std::memory_order_acquire); }
@@ -238,30 +250,15 @@ void CloudHooks::InstallGamesPlayedObserver(uintptr_t steamclientBase, size_t st
         return;
     }
 
-    const bool playtime = MetadataSync::syncPlaytime.load(std::memory_order_relaxed);
-    const bool achievements = MetadataSync::syncAchievements.load(std::memory_order_relaxed);
+    // Always install -- runs before config sets the toggles; per-message paths
+    // already check the live toggle (matches Windows).
+    GamesPlayedHook::SetSerializer(&SerializeBodyTL);
+    GamesPlayedHook::Install(steamclientBase, steamclientSize);
 
-    // Install only the detours a feature needs (a disabled one adds no trampoline).
-    // The CCMInterface::Send observer is shared (GamesPlayed 5410 = playtime;
-    // StoreUserStats2/GetUserStats 5466/818 = achievements), so install it if either
-    // wants it.
-    if (playtime || achievements) {
-        GamesPlayedHook::SetSerializer(&SerializeBodyTL);
-        GamesPlayedHook::Install(steamclientBase, steamclientSize);
-    } else {
-        LOG("[Stats] playtime + achievement sync off -- CCMInterface::Send observer not installed");
-    }
+    if (LivePlaytime::Resolve(steamclientBase, steamclientSize, g_parseFromArray))
+        LivePlaytime::InstallUserCapture();
 
-    // CUser-capture detour serves live playtime only; skip when playtime is off.
-    if (playtime) {
-        if (LivePlaytime::Resolve(steamclientBase, steamclientSize, g_parseFromArray))
-            LivePlaytime::InstallUserCapture();
-    }
-
-    // Resolve (no detour, just function pointers) the packet-wrap + job-routing
-    // used to serve the legacy 818 achievement fetch with a 819 response.
-    if (achievements)
-        AchievementInject::Resolve(steamclientBase, steamclientSize, &SerializeBodyTL);
+    AchievementInject::Resolve(steamclientBase, steamclientSize, &SerializeBodyTL);
 }
 
 static std::optional<CloudIntercept::RpcResult> DispatchCloudRpc(
@@ -385,17 +382,21 @@ static void EnsureInitialized() {
         StatsHandlers::Init();
         // Seed managed apps so playtime/achievements are available before the
         // user launches anything: pulls each app's cloud stats blob and imports
-        // Steam's native data.
-        StatsStore::SeedApps(CloudIntercept::GetNamespaceApps());
+        // Steam's native data. SeedApps also uploads imported stats, so only run it
+        // when a stats feature is enabled (both off = inert).
+        if (MetadataSync::syncAchievements.load(std::memory_order_relaxed) ||
+            MetadataSync::syncPlaytime.load(std::memory_order_relaxed))
+            StatsStore::SeedApps(CloudIntercept::GetNamespaceApps());
 
         // Re-pull the cloud every 60s for another device's playtime advances.
         // RefreshFromCloud merges to disk; advanced apps are queued for a live
         // update applied on the network thread (LivePlaytime::DrainOnNetThread).
-        std::thread([] {
+        // Tracked thread (joined at shutdown), NOT detached -- see g_cloudPollerThread.
+        g_cloudPollerThread = std::thread([] {
             for (;;) {
                 for (int i = 0; i < 60 && !g_shuttingDown.load(std::memory_order_acquire); ++i)
                     sleep(1);
-                if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                if (g_shuttingDown.load(std::memory_order_acquire)) break;
                 // Pure playtime feature: skip the cloud pull + live push when off.
                 if (!MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) continue;
                 auto changed = StatsStore::RefreshFromCloud(CloudIntercept::GetNamespaceApps());
@@ -405,7 +406,13 @@ static void EnsureInitialized() {
                         LivePlaytime::Queue(body.Data());
                 }
             }
-        }).detach();
+            // LAST action: signal shutdown that a join is now instantaneous.
+            {
+                std::lock_guard<std::mutex> lk(g_pollerExitMtx);
+                g_pollerExited.store(true, std::memory_order_release);
+            }
+            g_pollerExitCv.notify_all();
+        });
         StatsHooks::SetProtobufHelpers(
             [](void* msg) { return SerializeMessage(msg); },
             [](void* msg, const uint8_t* data, size_t len) {
@@ -764,4 +771,21 @@ void CloudHooks::BeginShutdown() {
     LivePlaytime::RemoveUserCapture();
     for (int i = 0; i < 300 && g_hookRefCount.load(std::memory_order_acquire) > 0; ++i)
         usleep(10000); // 10ms, up to 3s total
+
+    // Join the poller before statics are destroyed. Wait bounded on its exit
+    // signal: join() if it reached its end (instant), else detach if wedged in
+    // curl rather than hang Steam's shutdown. See g_cloudPollerThread.
+    if (g_cloudPollerThread.joinable()) {
+        {
+            std::unique_lock<std::mutex> lk(g_pollerExitMtx);
+            g_pollerExitCv.wait_for(lk, std::chrono::seconds(5),
+                [] { return g_pollerExited.load(std::memory_order_acquire); });
+        }
+        if (g_pollerExited.load(std::memory_order_acquire)) {
+            g_cloudPollerThread.join();
+        } else {
+            LOG("[CloudHooks] poller wedged in network call -- detaching");
+            g_cloudPollerThread.detach();
+        }
+    }
 }

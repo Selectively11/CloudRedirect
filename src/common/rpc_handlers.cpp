@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
 #include <cstring>
 #include <ctime>
@@ -165,71 +166,41 @@ void FlushPendingSyncStates() {}
 static constexpr uint64_t kFallbackQuotaBytes = 1073741824ULL; // 1 GB
 static constexpr uint32_t kFallbackMaxFiles   = 10000;
 
-// Steam's AC-exit disk walk (CAutoCloudManager::YldOnAppExit) counts each save
-// file once PER RULE that matches it -- the native per-rule dedup is dead on the
-// exit path (sub_1384D1DA0 @ 0x1384d221a is seeded with a null "previous path"
-// there; it is only live on the staging/save path). So when two effective-platform
-// rules resolve to the SAME physical directory (via rootoverrides), every file
-// there is counted twice against maxnumfiles, tripping a false "over quota" that
-// deletes all cloud files (e.g. app 1583520: 5 files x 2 colliding rules = 10 >
-// maxnumfiles=5 -> wipe).
-//
-// We size the live maxnumfiles to the EXACT instance count that exit walk charges,
-// computed by GetFileList (ScanResult.countedInstances) which mirrors the native
-// per-rule, pre-dedup counting -- including siblings and macOS/Linux-only rules
-// that simply never resolve to a dir on this OS and therefore add nothing. Unlike
-// the old fileCount*ruleCount estimate this is collision-aware: an app whose rules
-// resolve to DISTINCT paths reports maxCollisionFactor==1 and we no-op (no wipe
-// risk), and an app with partial collisions (e.g. 3 rules, 2 colliding) gets x2,
-// not x3.
-//
-// All inputs are immutable on-disk facts we never write, so the target can NEVER
-// compound across sessions (a prior fix scaled the LIVE maxnumfiles and read its
-// own previous bump back, running away 5->31->109->343). We only RAISE the budget.
-static void EnsureQuotaSurvivesRuleMultiplier(uint32_t accountId, uint32_t appId,
-                                              uint64_t liveQuota,
-                                              uint32_t liveFiles) {
+// Number of savefiles rules declared for this app. 2+ rules resolving to the same
+// dir trigger native's multi-root collision (see ApplyNativeOverQuotaEviction).
+static uint32_t CountSaveFilesRules(uint32_t accountId, uint32_t appId) {
     std::string steamPath = CloudIntercept::GetSteamPath();
-    if (steamPath.empty()) return;
-
-    AutoCloudScan::ScanResult scan;
+    if (steamPath.empty()) return 0;
     try {
-        scan = AutoCloudScan::GetFileList(steamPath, accountId, appId);
-    } catch (...) { return; }
+        auto rules = AutoCloudScan::GetRules(steamPath, appId, accountId);
+        return static_cast<uint32_t>(rules.size());
+    } catch (...) {
+        return 0;
+    }
+}
 
-    // A collision factor <= 1 means every effective rule resolves to a distinct
-    // physical directory: the native exit walk counts each file once, exactly like
-    // the dedup-protected staging path, so there is no over-quota risk to cover.
-    if (scan.maxCollisionFactor <= 1) return;
-    if (scan.countedInstances == 0) return;
+// Fixed, idempotent per-root budget: generous enough that any real save game stays
+// under it, and not derived from the live value (deriving from the current cap
+// compounds: 20->80->320...).
+static constexpr uint32_t kCollisionFilesPerRoot = 256;
+static constexpr uint64_t kCollisionBytesPerRoot = 64ull * 1024 * 1024; // 64 MB
 
-    // neededFiles = exact instances the exit walk charges + derived slack. The
-    // slack replaces the old magic +16: YldOnAppExit's loop also consumes
-    // (1 + siblingCount) budget per colliding rule pass, captured per worst dir as
-    // collisionSiblingHeadroom. Keep a small floor so we are never under by 1-2.
-    size_t derivedHeadroom = scan.collisionSiblingHeadroom;
-    if (derivedHeadroom < scan.maxCollisionFactor) derivedHeadroom = scan.maxCollisionFactor;
-    uint64_t needed = static_cast<uint64_t>(scan.countedInstances) + derivedHeadroom;
-
-    // Guard against pathological inputs producing an implausible budget.
-    constexpr uint64_t kMaxPlausibleFiles = 1000000ULL;
-    if (needed > kMaxPlausibleFiles) needed = kMaxPlausibleFiles;
-    uint32_t neededFiles = static_cast<uint32_t>(needed);
-    if (neededFiles <= liveFiles) return; // current budget already covers it
-
-    // Raise quota bytes proportionally too (rough: keep per-file budget constant).
-    uint64_t neededQuota = liveFiles > 0
-        ? liveQuota * neededFiles / liveFiles
-        : liveQuota;
-    if (neededQuota < liveQuota) neededQuota = liveQuota;
-
-    SteamKvInjector::SetAppQuota(appId, neededQuota, neededFiles);
-    LOG("[NS] EnsureQuotaSurvivesRuleMultiplier app=%u: %zu unique files, "
-        "%zu counted instances x%zu collision (+%zu headroom) -> "
-        "raise maxnumfiles %u->%u quota %llu->%llu",
-        appId, scan.files.size(), scan.countedInstances, scan.maxCollisionFactor,
-        derivedHeadroom, liveFiles, neededFiles,
-        (unsigned long long)liveQuota, (unsigned long long)neededQuota);
+// The effective maxnumfiles native sees at exit: the developer's PICS value, raised
+// to ruleCount x kCollisionFilesPerRoot on a multi-root collision (2+ rules -> same
+// dir). Used by both the floor injection (EnsureAppQuotaInjected) and eviction
+// prediction (ApplyNativeOverQuotaEviction) so CR's manifest tracks native. Returns
+// the input unchanged when no collision applies.
+static void EffectiveQuotaForCollision(uint32_t accountId, uint32_t appId,
+                                       uint32_t picsFiles, uint64_t picsBytes,
+                                       uint32_t& outFiles, uint64_t& outBytes) {
+    outFiles = picsFiles;
+    outBytes = picsBytes;
+    uint32_t ruleCount = CountSaveFilesRules(accountId, appId);
+    if (ruleCount < 2) return;
+    uint32_t floorFiles = ruleCount * kCollisionFilesPerRoot;
+    uint64_t floorBytes = (uint64_t)ruleCount * kCollisionBytesPerRoot;
+    if (floorFiles > outFiles) outFiles = floorFiles;
+    if (floorBytes > outBytes) outBytes = floorBytes;
 }
 
 static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
@@ -238,6 +209,12 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
         LOG("[NS] EnsureAppQuotaInjected app=%u: KV injector not ready", appId);
         return false;
     }
+
+    // Native evicts over-quota files at app exit (counting files x matching-roots
+    // against maxnumfiles). Single-rule apps: leave the developer value alone; CR
+    // mirrors any real eviction at CompleteBatch. Multi-root collision apps (2+
+    // rules -> same dir): native double-counts and wrongly evicts, so we raise a
+    // maxnumfiles floor below. See ApplyNativeOverQuotaEviction for the mechanism.
 
     uint64_t existingQuota = 0;
     uint32_t existingFiles = 0;
@@ -257,7 +234,25 @@ static bool EnsureAppQuotaInjected(uint32_t accountId, uint32_t appId,
         }
         LOG("[NS] EnsureAppQuotaInjected app=%u: Steam has quota=%llu files=%u",
             appId, (unsigned long long)existingQuota, existingFiles);
-        EnsureQuotaSurvivesRuleMultiplier(accountId, appId, existingQuota, existingFiles);
+
+        // Multi-root collision floor: raise the live maxnumfiles to the effective
+        // floor so native's exit-walk keeps all files. EffectiveQuotaForCollision
+        // computes the same value ApplyNativeOverQuotaEviction uses, keeping CR's
+        // manifest in sync.
+        {
+            uint32_t effFiles; uint64_t effBytes;
+            EffectiveQuotaForCollision(accountId, appId, existingFiles, existingQuota,
+                                       effFiles, effBytes);
+            if (effFiles > existingFiles) {
+                LOG("[NS] EnsureAppQuotaInjected app=%u: multi-root collision -- "
+                    "raising maxnumfiles %u -> %u, quota -> %llu",
+                    appId, existingFiles, effFiles, (unsigned long long)effBytes);
+                SteamKvInjector::EnsureMaxNumFilesFloor(appId, effFiles, effBytes);
+                // Do NOT write the inflated floor into cloudState->quota: that value
+                // propagates cross-machine and must stay the real developer PICS
+                // value (already cached above).
+            }
+        }
         return true;
     }
 
@@ -903,6 +898,82 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
     std::vector<RemotecacheCandidate> remotecacheCandidates;
     remotecacheCandidates.reserve(files.size());
 
+    // Multi-root serving (mirror native). Native lists each file once per matching
+    // root, so a file under colliding rules appears under BOTH roots. That cross-root
+    // duplicate makes native's per-instance over-quota eviction lossless: if one
+    // root's copy is evicted, the file survives under the other. Serving under one
+    // root (old behavior) turned a harmless eviction into data loss. We store one
+    // blob but emit one wire entry per matching root.
+    //
+    // A file's roots = every savefiles rule (path-prefix, pattern, recursive) it
+    // matches, expressed as that rule's %RootName% token.
+    struct RuleRoot {
+        std::string token;      // %WinAppDataLocal%
+        std::string cloudPath;  // rule path, normalized, no leading/trailing slash
+        std::string pattern;    // * etc.
+        bool recursive = false;
+    };
+    std::vector<RuleRoot> ruleRoots;
+    {
+        std::string steamPath = CloudIntercept::GetSteamPath();
+        if (!steamPath.empty()) {
+            auto rules = AutoCloudScan::GetRules(steamPath, appId, accountId);
+            for (const auto& r : rules) {
+                // Use the RAW rule root (cloudRoot), not the override-resolved
+                // rule.root. Native keys cloud storage by the raw savefiles root
+                // even when rootoverride resolves two rules to the same on-disk dir;
+                // collapsing to the resolved root would lose the cross-root duplicate
+                // that keeps over-quota eviction lossless.
+                const std::string& rawRoot =
+                    !r.cloudRoot.empty() ? r.cloudRoot : r.root;
+                if (rawRoot.empty()) continue;
+                RuleRoot rr;
+                rr.token = "%" + rawRoot + "%";
+                std::string p = r.path;  // cloud path uses the rule's (untransformed) path
+                for (auto& c : p) if (c == '\\') c = '/';
+                while (!p.empty() && p.front() == '/') p.erase(0, 1);
+                while (!p.empty() && p.back() == '/') p.pop_back();
+                rr.cloudPath = p;
+                rr.pattern = r.pattern.empty() ? "*" : r.pattern;
+                rr.recursive = r.recursive;
+                ruleRoots.push_back(std::move(rr));
+            }
+        }
+    }
+
+    // Return the set of root tokens a file's cloud path belongs to, native-faithful.
+    // Falls back to the file's recorded token (or default) when rules are
+    // unavailable, preserving prior single-root behavior for non-collision apps.
+    auto rootsForFile = [&](const std::string& filename) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        for (const auto& rr : ruleRoots) {
+            // file must live under the rule's cloud path prefix
+            std::string rel;
+            if (rr.cloudPath.empty()) {
+                rel = filename;
+            } else {
+                std::string pfx = rr.cloudPath + "/";
+                if (filename.size() <= pfx.size() ||
+                    AutoCloudUtil::ToLowerAscii(filename.substr(0, pfx.size())) !=
+                        AutoCloudUtil::ToLowerAscii(pfx))
+                    continue;
+                rel = filename.substr(pfx.size());
+            }
+            // non-recursive rules only match files directly in the dir
+            if (!rr.recursive && rel.find('/') != std::string::npos) continue;
+            // match pattern against the leaf (patterns here are leaf globs like *.sav)
+            std::string leafName = rel;
+            size_t s = leafName.rfind('/');
+            if (s != std::string::npos) leafName = leafName.substr(s + 1);
+            const std::string& matchTarget =
+                rr.pattern.find('/') == std::string::npos ? leafName : rel;
+            if (!AutoCloudUtil::WildcardMatchInsensitive(rr.pattern, matchTarget)) continue;
+            if (std::find(out.begin(), out.end(), rr.token) == out.end())
+                out.push_back(rr.token);
+        }
+        return out;
+    };
+
     SetRpcCrashContext("GetChangelist:prepare-files", "Cloud.GetAppFileChangelist#1", appId);
     for (auto& fe : files) {
         // split filename into directory prefix + leaf
@@ -915,33 +986,52 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
             leaf = fe.filename;
         }
 
-        std::string fileToken;
-        auto ftIt = fileTokenSnapshot.find(fe.filename);
-        bool hasRecordedFileToken = ftIt != fileTokenSnapshot.end();
-        if (hasRecordedFileToken) fileToken = ftIt->second;
-        if (!hasRecordedFileToken) {
-            fileToken = defaultToken;
-            LOG("[NS-CL]   file: %s has no recorded token, using default '%s'",
-                fe.filename.c_str(), fileToken.c_str());
+        // Determine the roots this file is served under. Prefer native-faithful
+        // rule matching; fall back to recorded/default single token.
+        std::vector<std::string> fileRoots = rootsForFile(fe.filename);
+        if (fileRoots.empty()) {
+            std::string fileToken;
+            auto ftIt = fileTokenSnapshot.find(fe.filename);
+            if (ftIt != fileTokenSnapshot.end()) fileToken = ftIt->second;
+            else {
+                fileToken = defaultToken;
+                LOG("[NS-CL]   file: %s has no recorded token, using default '%s'",
+                    fe.filename.c_str(), fileToken.c_str());
+            }
+            fileRoots.push_back(fileToken);
         }
 
-        std::string fullPrefix = fileToken + dirPrefix;
-
-        uint32_t prefixIdx;
-        auto it = prefixMap.find(fullPrefix);
-        if (it != prefixMap.end()) {
-            prefixIdx = it->second;
-        } else {
-            prefixIdx = (uint32_t)prefixList.size();
-            prefixMap[fullPrefix] = prefixIdx;
-            prefixList.push_back(fullPrefix);
+        // The recorded/primary token is used for the remotecache candidate (one
+        // physical entry per file). Prefer it if present, else first root.
+        std::string primaryToken = fileRoots.front();
+        {
+            auto ftIt = fileTokenSnapshot.find(fe.filename);
+            if (ftIt != fileTokenSnapshot.end() &&
+                std::find(fileRoots.begin(), fileRoots.end(), ftIt->second) != fileRoots.end())
+                primaryToken = ftIt->second;
         }
 
-        prepared.push_back({leaf, prefixIdx, &fe});
+        // Emit one wire entry per matching root (native mirrors this exactly).
+        for (const auto& fileToken : fileRoots) {
+            std::string fullPrefix = fileToken + dirPrefix;
+            uint32_t prefixIdx;
+            auto it = prefixMap.find(fullPrefix);
+            if (it != prefixMap.end()) {
+                prefixIdx = it->second;
+            } else {
+                prefixIdx = (uint32_t)prefixList.size();
+                prefixMap[fullPrefix] = prefixIdx;
+                prefixList.push_back(fullPrefix);
+            }
+            prepared.push_back({leaf, prefixIdx, &fe});
+            LOG("[NS-CL]   file: %s (prefix[%u]=%s, size=%llu, ts=%llu)%s",
+                fe.filename.c_str(), prefixIdx, fullPrefix.c_str(), fe.rawSize, fe.timestamp,
+                fileRoots.size() > 1 ? " [multi-root]" : "");
+        }
+
+        // One physical blob per file -> one remotecache candidate (primary root).
         remotecacheCandidates.push_back(
-            { fe.filename, fileToken, fe.sha, fe.timestamp, fe.rawSize });
-        LOG("[NS-CL]   file: %s (prefix[%u]=%s, size=%llu, ts=%llu)",
-            fe.filename.c_str(), prefixIdx, fullPrefix.c_str(), fe.rawSize, fe.timestamp);
+            { fe.filename, primaryToken, fe.sha, fe.timestamp, fe.rawSize });
     }
 
     // Don't pre-seed remotecache.vdf; let Steam manage it via GetChangelist diffs.
@@ -1054,6 +1144,9 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
         if (f.fieldNum == 5 && f.wireType == PB::Varint) currentSession.osType = static_cast<uint32_t>(f.varintVal);
         if (f.fieldNum == 6 && f.wireType == PB::Varint) currentSession.deviceType = static_cast<uint32_t>(f.varintVal);
     }
+    // This id came from OUR Steam client's request -- report it so the serve
+    // cache can tell our session apart from a foreign machine's.
+    CloudStorage::NoteOwnClientId(currentSession.clientId);
 
     // Cloud session management -- reuse stateResult from above (already fetched).
     PB::Writer body;
@@ -1166,6 +1259,7 @@ RpcResult HandleSuspendSession(uint32_t appId, const std::vector<PB::Field>& req
         }
         if (f.fieldNum == 4 && f.wireType == PB::Varint) cloudSyncCompleted = f.varintVal != 0;
     }
+    CloudStorage::NoteOwnClientId(session.clientId);
 
     PendingOpsJournal::RecordSuspendState(accountId, appId, session, cloudSyncCompleted);
     return PB::Writer();
@@ -1185,6 +1279,7 @@ RpcResult HandleResumeSession(uint32_t appId, const std::vector<PB::Field>& reqB
             clientId = f.varintVal;
         }
     }
+    CloudStorage::NoteOwnClientId(clientId);
 
     PendingOpsJournal::RecordResumeState(accountId, appId, clientId);
     return PB::Writer();
@@ -1471,6 +1566,174 @@ RpcResult HandleCommitFileUpload(uint32_t appId, const std::vector<PB::Field>& r
     return body;
 }
 
+// Mirror native Steam's over-quota eviction (CAutoCloudManager::YldOnAppExit).
+// Native, at app exit, walks the file list in a fixed sort order keeping a
+// running budget; once cumulative INSTANCES exceed maxnumfiles (or bytes exceed
+// quota), every file past that point is logged "File %s is over quota. Removing
+// from cloud" and dropped from the cloud set.
+//
+// Budget is charged per rule-instance -- a file matching N savefiles rules costs
+// N against the budget. Measured against native Steam (CR removed): app 1583520
+// has two rules (%WinAppDataLocal% and %LinuxXdgConfigHome%) that both resolve to
+// the same Proton dir, so native finds 5 files x 2 rules = 10 instances. On Linux
+// (real PICS maxnumfiles=5) native counts 10 > 5 and evicts 3; on Windows (=17) it
+// counts 10 <= 17 and keeps all 5. Native does not dedup by cloud path.
+//
+// To mirror native EXACTLY, CR must (a) count per-instance and (b) use the SAME
+// maxnumfiles native sees at exit -- i.e. the EFFECTIVE value after CR's
+// multi-root collision floor (EnsureAppQuotaInjected). The caller passes that
+// effective value so CR's published manifest always equals native's on-disk
+// result, even if the floor failed to apply (then both use raw PICS and evict
+// the same files).
+//
+// Sort order: ascending root index, then case-insensitive path -- matches
+// native's eviction ORDER. PICS reserves (apireservefiles/bytes) are subtracted
+// from the budget exactly as native does.
+//
+// `files` is mutated in place: evicted entries are erased. Returns evicted names.
+// maxNumFiles is the LIVE cap native's exit-walk will actually use -- read back
+// from the KV by the caller (ReadAppQuota), so it reflects whether the collision
+// floor actually applied. If the floor took, this is the raised value (keep all);
+// if it silently failed, this is the raw PICS value (evict what native evicts).
+// 0 means "unknown" -> never evict.
+static std::vector<std::string> ApplyNativeOverQuotaEviction(
+        uint32_t accountId, uint32_t appId,
+        std::unordered_map<std::string, CloudStorage::FileEntry>& files,
+        uint64_t quotaBytes, uint32_t maxNumFiles) {
+    std::vector<std::string> evicted;
+    if (files.empty()) return evicted;
+
+    // No authoritative developer file cap -> don't evict (matches native when the
+    // dev set no ufs limit; also the only safe choice when CR can't read PICS,
+    // e.g. Linux KvInjector cache-null and no quota propagated via cloud state).
+    if (maxNumFiles == 0) {
+        LOG("[NS] over-quota eviction app=%u: no authoritative maxnumfiles, skipping", appId);
+        return evicted;
+    }
+    // native also subtracts apireservefiles/apireservebytes; these are 0 for the
+    // namespace apps we handle (not present in PICS ufs), so treat as 0. If a
+    // future app sets them, add a SteamKvInjector::ReadAppReserves and subtract.
+    const uint64_t apiReserveBytes = 0; const uint32_t apiReserveFiles = 0;
+
+    // Determine each file's root set (instances) using the SAME rule matching the
+    // changelist uses, so serving and eviction agree.
+    std::string steamPath = CloudIntercept::GetSteamPath();
+    std::vector<AutoCloudUtil::AutoCloudRuleNative> rules;
+    if (!steamPath.empty()) {
+        try { rules = AutoCloudScan::GetRules(steamPath, appId, accountId); }
+        catch (...) {}
+    }
+    // Build the ordered, lowercased distinct root list (root index = native's
+    // sort key field). Order is the rule order, which is how native indexes roots.
+    std::vector<std::string> rootOrder;
+    auto rootIndexOf = [&](const std::string& tok) -> int {
+        for (size_t i = 0; i < rootOrder.size(); ++i)
+            if (rootOrder[i] == tok) return (int)i;
+        rootOrder.push_back(tok);
+        return (int)rootOrder.size() - 1;
+    };
+
+    struct RuleRoot { std::string token, cloudPath, pattern; bool recursive; };
+    std::vector<RuleRoot> ruleRoots;
+    for (const auto& r : rules) {
+        const std::string& raw = !r.cloudRoot.empty() ? r.cloudRoot : r.root;
+        if (raw.empty()) continue;
+        RuleRoot rr;
+        rr.token = "%" + raw + "%";
+        std::string p = r.path; for (auto& c : p) if (c == '\\') c = '/';
+        while (!p.empty() && p.front() == '/') p.erase(0, 1);
+        while (!p.empty() && p.back() == '/') p.pop_back();
+        rr.cloudPath = p;
+        rr.pattern = r.pattern.empty() ? "*" : r.pattern;
+        rr.recursive = r.recursive;
+        ruleRoots.push_back(std::move(rr));
+        rootIndexOf(AutoCloudUtil::ToLowerAscii(raw));
+    }
+
+    auto rootsForFile = [&](const std::string& filename) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        for (const auto& rr : ruleRoots) {
+            std::string rel;
+            if (rr.cloudPath.empty()) rel = filename;
+            else {
+                std::string pfx = rr.cloudPath + "/";
+                if (filename.size() <= pfx.size() ||
+                    AutoCloudUtil::ToLowerAscii(filename.substr(0, pfx.size())) !=
+                        AutoCloudUtil::ToLowerAscii(pfx)) continue;
+                rel = filename.substr(pfx.size());
+            }
+            if (!rr.recursive && rel.find('/') != std::string::npos) continue;
+            std::string leaf = rel; size_t s = leaf.rfind('/');
+            if (s != std::string::npos) leaf = leaf.substr(s + 1);
+            const std::string& target =
+                rr.pattern.find('/') == std::string::npos ? leaf : rel;
+            if (!AutoCloudUtil::WildcardMatchInsensitive(rr.pattern, target)) continue;
+            if (std::find(out.begin(), out.end(), rr.token) == out.end())
+                out.push_back(rr.token);
+        }
+        return out;
+    };
+
+    // Build the per-file descriptor and sort like native: ascending primary root
+    // index, then case-insensitive path. `instances` = number of savefiles rules
+    // the file matches (its cross-root siblings); native charges this many against
+    // the budget. `files` is keyed by cloud-relative path so each entry is one
+    // unique file, but a file matched by 2 rules costs 2 -- this is exactly what
+    // pure native Steam does (see function header).
+    struct FileInst {
+        std::string name;
+        int firstRootIdx;     // smallest matching root index (native's sort key)
+        uint32_t instances;   // = number of matching rule roots
+        uint64_t size;
+    };
+    std::vector<FileInst> ordered;
+    ordered.reserve(files.size());
+    for (const auto& [name, fe] : files) {
+        std::vector<std::string> roots = rootsForFile(name);
+        uint32_t inst = roots.empty() ? 1u : (uint32_t)roots.size();
+        int firstIdx = INT_MAX;
+        for (const auto& tok : roots) {
+            std::string lower = AutoCloudUtil::ToLowerAscii(
+                tok.substr(1, tok.size() >= 2 ? tok.size() - 2 : 0)); // strip %%
+            for (size_t i = 0; i < rootOrder.size(); ++i)
+                if (rootOrder[i] == lower) { firstIdx = (std::min)(firstIdx, (int)i); break; }
+        }
+        if (firstIdx == INT_MAX) firstIdx = 0;
+        ordered.push_back({name, firstIdx, inst, fe.size});
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const FileInst& a, const FileInst& b) {
+        if (a.firstRootIdx != b.firstRootIdx) return a.firstRootIdx < b.firstRootIdx;
+        return AutoCloudUtil::ToLowerAscii(a.name) < AutoCloudUtil::ToLowerAscii(b.name);
+    });
+
+    // Budget walk: native decrements the file budget by `instances` and the byte
+    // budget by size*instances per file; the first file to push either below zero,
+    // and all after it, are evicted.
+    int64_t fileBudget = (int64_t)maxNumFiles - (int64_t)apiReserveFiles;
+    // Clamp to INT64_MAX so a pathological (e.g. cloud-propagated) quota can't
+    // wrap the signed cast into a negative budget and evict everything.
+    uint64_t rawByteBudget = (quotaBytes > apiReserveBytes)
+        ? (quotaBytes - apiReserveBytes) : 0;
+    int64_t byteBudget = (rawByteBudget > (uint64_t)INT64_MAX)
+        ? INT64_MAX : (int64_t)rawByteBudget;
+    bool evicting = false;
+    for (const auto& fi : ordered) {
+        if (!evicting) {
+            byteBudget -= (int64_t)(fi.size * (uint64_t)fi.instances);
+            fileBudget -= (int64_t)fi.instances;
+            if (byteBudget < 0 || fileBudget < 0) evicting = true;
+        }
+        if (evicting) {
+            LOG("[NS] over-quota eviction app=%u: removing '%s' from cloud (instances=%u, size=%llu, maxnumfiles=%u)",
+                appId, fi.name.c_str(), fi.instances,
+                (unsigned long long)fi.size, maxNumFiles);
+            files.erase(fi.name);
+            evicted.push_back(fi.name);
+        }
+    }
+    return evicted;
+}
+
 // CompleteAppUploadBatchBlocking
 RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqBody) {
     auto completeInfo = CloudRpcUtils::ParseCompleteBatchRequest(reqBody);
@@ -1573,6 +1836,60 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
             fe.platformsToSync = (ptIt != batch.filePlatforms.end())
                 ? ptIt->second : 0xFFFFFFFFu;
             state.files[filename] = std::move(fe);
+        }
+
+        // Capture the DEVELOPER's PICS quota into cloud state so it propagates to
+        // machines that can't read PICS (Linux KvInjector cache-null). Source of
+        // truth, in order: existing cloud-state value (sticky once known) -> a
+        // CLEAN live PICS read on this box (ignoring CR's own injected fallback).
+        // The quota floor is gone, so live reads are no longer self-inflated; a
+        // value already in cloud state is never overwritten by a (possibly stale/
+        // polluted) live read.
+        {
+            uint64_t q = 0; uint32_t f = 0;
+            if (state.quota.maxNumFiles == 0 &&
+                SteamKvInjector::ReadAppQuota(appId, q, f) && f > 0 && q > 0 &&
+                f != kFallbackMaxFiles) {
+                state.quota.quotaBytes = q;
+                state.quota.maxNumFiles = f;
+                state.quota.fetchedAtUnix = static_cast<uint64_t>(time(nullptr));
+                state.quota.lastSeenBuildId = state.appBuildId;
+                LOG("[NS] CompleteBatch app=%u: captured PICS quota=%llu files=%u into cloud state",
+                    appId, (unsigned long long)q, f);
+            }
+        }
+
+        // Mirror native over-quota eviction so the published manifest matches what
+        // native keeps (no phantom entries -> no 404/conflict). Read the LIVE KV cap
+        // back rather than assuming the floor applied: if it took we keep all files,
+        // if it silently failed (Linux cache-null, injector down) we evict exactly
+        // what native will. Fall back to cloud-state PICS only if the live read fails
+        // entirely.
+        uint64_t evictBytes = state.quota.quotaBytes;
+        uint32_t evictFiles = state.quota.maxNumFiles;
+        {
+            uint64_t liveBytes = 0; uint32_t liveFiles = 0;
+            if (SteamKvInjector::ReadAppQuota(appId, liveBytes, liveFiles) &&
+                liveFiles > 0) {
+                evictBytes = liveBytes;
+                evictFiles = liveFiles;
+                LOG("[NS] CompleteBatch app=%u: eviction uses live KV cap "
+                    "maxnumfiles=%u quota=%llu (what native's exit-walk sees)",
+                    appId, evictFiles, (unsigned long long)evictBytes);
+            } else {
+                LOG("[NS] CompleteBatch app=%u: live KV cap unreadable; eviction "
+                    "falls back to cloud-state PICS maxnumfiles=%u",
+                    appId, evictFiles);
+            }
+        }
+        auto evicted = ApplyNativeOverQuotaEviction(accountId, appId, state.files,
+                                                    evictBytes, evictFiles);
+        if (!evicted.empty()) {
+            LOG("[NS] CompleteBatch app=%u: evicted %zu over-quota file(s) from cloud set",
+                appId, evicted.size());
+            // Remove their local manifest entries too (their blobs become GC-eligible).
+            for (const auto& name : evicted)
+                CloudStorage::DeleteBlobStaged(accountId, appId, name);
         }
 
         state.cn = newCN;
@@ -1699,8 +2016,26 @@ RpcResult HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqBo
             timestamp = entry->timestamp;
             sha = entry->sha;
         } else {
-            // Last resort: check blob size on disk
-            fileSize = HttpServer::GetBlobSize(accountId, appId, cleanName);
+            // The local manifest is only a CACHE -- empty on a fresh machine (new
+            // install, post-wipe, 2nd device). The download response MUST carry the
+            // SHA/size or Steam rejects the downloaded file ("Download Failure"
+            // after a successful HTTP transfer). Resolve from the authoritative
+            // cloud state, same as RetrieveBlob does. Without this, multi-device /
+            // fresh-install downloads fail. Serve path -> cache-aware accessor.
+            auto cloud = CloudStorage::FetchCloudStateForServe(accountId, appId);
+            if (cloud.status == CloudStorage::StateFetchStatus::Ok) {
+                auto cit = cloud.state.files.find(cleanName);
+                if (cit != cloud.state.files.end() && !cit->second.sha.empty()) {
+                    fileSize = cit->second.size;
+                    timestamp = cit->second.timestamp;
+                    sha = cit->second.sha;
+                    LOG("[NS-DL] FileDownload app=%u: resolved SHA/size from cloud state for %s (local manifest miss)",
+                        appId, cleanName.c_str());
+                }
+            }
+            // Last resort: blob size on disk (no SHA available).
+            if (sha.empty())
+                fileSize = HttpServer::GetBlobSize(accountId, appId, cleanName);
         }
     }
 

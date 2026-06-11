@@ -95,12 +95,12 @@ static constexpr uint32_t GP_FIELD_OWNER_ID        = 12;  // uint32
 //   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
-static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC910;
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC9B0;
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
 
 // CProtoBufMsg::BAsyncSend(uint32_t connectionHandle)
 // Hooks this to inject game_extra_info into CMsgClientGamesPlayed before serialization.
-static constexpr uintptr_t SC_RVA_BASYNC_SEND = 0xCF0DF0;
+static constexpr uintptr_t SC_RVA_BASYNC_SEND = 0xCF2440;
 static constexpr size_t SC_BAS_STOLEN_BYTES = 15;   // 5+5+1+4 bytes of prologue
 // CProtoBufMsg layout offsets
 static constexpr uint32_t CPROTOBUFMSG_OFF_DESC   = 0x08;  // typed-body descriptor vtable*
@@ -110,7 +110,7 @@ static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x30;  // protobuf body obje
 
 // g_pJobCur (qword_1397DC0C0): the CJob coroutine currently running; its CJobID
 // is at CJob+32 (GetJobID, asserted at userremotestorage.cpp:3920).
-static constexpr uintptr_t SC_RVA_JOBCUR_GLOBAL = 0x17DC0C0;
+static constexpr uintptr_t SC_RVA_JOBCUR_GLOBAL = 0x17E02C0;
 static constexpr uint32_t  JOB_OFF_JOBID        = 32;
 
 // Schema-fetch injection: build a CMsgClientGetUserStats (EMsg 818) and send it
@@ -118,38 +118,43 @@ static constexpr uint32_t  JOB_OFF_JOBID        = 32;
 // (schema_local_version=-1) on behalf of an owning SteamID (steam_id_for_user).
 // The server's 819 response is handled by Steam itself, which writes
 // appcache\stats\UserGameStatsSchema_<appid>.bin -- we just trigger the request.
-// (IDA-verified against steamclient64: ctor sub_138CF07F0, finalize sub_138CF3390,
-//  cleanup sub_138CF0AA0, body descriptor off_1396E4460 @ RVA 0x16E4460.)
-static constexpr uintptr_t SC_RVA_PBMSG_CTOR      = 0xCF07F0;   // CProtoBufMsgBase::ctor(this, emsg, 0)
-static constexpr uintptr_t SC_RVA_PBMSG_FINALIZE  = 0xCF3390;   // allocate typed body
-static constexpr uintptr_t SC_RVA_PBMSG_CLEANUP   = 0xCF0AA0;   // destroy msg
-static constexpr uintptr_t SC_RVA_GETUSERSTATS_DESC = 0x16E4460; // CMsgClientGetUserStats body descriptor
+// (IDA-verified against steamclient64 1781041600: ctor sub_138CF1E40, finalize
+//  sub_138CF49E0, cleanup sub_138CF20F0, body descriptor off_1396E84E0 @ RVA
+//  0x16E84E0 -- all read from CAPIJobRequestUserStats sub_138A45010.)
+static constexpr uintptr_t SC_RVA_PBMSG_CTOR      = 0xCF1E40;   // CProtoBufMsgBase::ctor(this, emsg, 0)
+static constexpr uintptr_t SC_RVA_PBMSG_FINALIZE  = 0xCF49E0;   // allocate typed body
+static constexpr uintptr_t SC_RVA_PBMSG_CLEANUP   = 0xCF20F0;   // destroy msg
+static constexpr uintptr_t SC_RVA_GETUSERSTATS_DESC = 0x16E84E0; // CMsgClientGetUserStats body descriptor
 // Typed vtable for CProtoBufMsg<CMsgClientGetUserStats> (??_7?$CProtoBufMsg@VCMsgClientGetUserStats@@@@6B@).
 // MUST be installed at msg[0] after the base ctor: BAsyncSend dispatches GetSize
 // (vtbl+24) and Serialize (vtbl+32) through it. Leaving the base vftable there
 // serializes the message wrong -> pipes.cpp:881 BWrite failed -> client crash.
-static constexpr uintptr_t SC_RVA_GETUSERSTATS_VFTABLE = 0x13368C8;
+static constexpr uintptr_t SC_RVA_GETUSERSTATS_VFTABLE = 0x1338EB8;
 static constexpr uint32_t EMSG_CLIENT_GET_USER_STATS = 818;
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
 // qword_1397A70E8 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17BEC08;
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17C2D08;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x126A220;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x126C518;
 // sub_138D199E0 = CNetPacket->CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCF6310;
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCF7960;
 // sub_138D263B0 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD02320;
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD03970;
 // sub_1380EB760 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EBF70;
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC010;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1247A70;
-// sub_138BE7630 = protobuf ParseFromArray (fills body from raw bytes)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC42F0;
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1249C10;
+// protobuf ParseFromArray, 3-arg (msgObj, data, int size)
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC5940;
 // sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC4700;
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC5D50;
+// CUser playtime state helpers
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BB3C0;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CB870;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9CE6A0;
 // Live playtime update -- the write half of CUser's playtime refresh
 // (sub_1389DA1D0), driven from a synthesized response instead of a CM RPC.
 //   sub_1389C7930  = the writer: iterates the parsed Game array, updates
@@ -161,20 +166,21 @@ static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC4700;
 //   off_1396C1360  = CPlayer_GetLastPlayedTimes_Response type descriptor
 //   ??_7CProtoBufMsg<...Response> = typed wrapper vtable
 //   off_1396D3F48  = "Software\\Valve\\Steam\\LastPlayedTimesSyncTime" registry key
-static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9C7930;
-static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCF07F0;
-static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xCF3390;
-static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCF0AA0;
-static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16C1360;
-static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x1323380;
-// off_1396D3F48: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
-static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16D3F48;
+// 2.2.x-only playtime RVAs. Values below are stale June-1st offsets; re-resolve
+// for 1781041600 before the playtime-writer path works.
+static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9C79D0;
+static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCF1E40;
+static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xCF49E0;
+static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCF20F0;
+static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16C5360;
+static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x1325920;
+// off_1396D7F48: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
+static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16D7F48;
 // CUser member offsets used by the writer path
 static constexpr uint32_t USER_OFF_REGISTRY          = 3272;   // CUser+0xCC8: registry obj (sync-time write)
 // Inner CPlayer_GetLastPlayedTimes_Response message offsets
 static constexpr uint32_t RESP_OFF_GAMES_COUNT       = 24;     // repeated games: element count
 static constexpr uint32_t RESP_OFF_GAMES_ARRAY       = 32;     // repeated games: array base ptr
-
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -187,6 +193,10 @@ static constexpr uint32_t CCM_OFF_CONN_CONTEXT       = 1688;  // connection cont
 // Each entry: { DWORD handle, DWORD pad, QWORD CUser* }
 // CBaseUser layout
 static constexpr uint32_t USER_OFF_CCMINTERFACE     = 72;     // CCMInterface embedded at CBaseUser+0x48
+// Logged-in account id (uint32) in the CUser object. IDA-verified against the
+// native blob writer sub_138A44400 (accountid = *(v10+572) -> UserGameStats_%u path)
+// and a live scan. Read as a fallback when no RPC header has been scraped yet.
+static constexpr uint32_t USER_OFF_ACCOUNTID        = 572;
 
 // Function pointer types for BRouteMsgToJob bypass (Approach D - legacy)
 // sub_138D02530: wraps CNetPacket into CProtoBufNetPacket (parses protobuf header)
@@ -259,11 +269,11 @@ static_assert(offsetof(JobRouteInfo, flags) == 20, "");
 // This function takes rcx = pointer-to-pointer, reads *rcx to get a pointer,
 // then does InterlockedIncrement64 on that second pointer.
 // RecvPkt calls this with &unk_139797BD8 before calling BRouteMsgToJob.
-static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDBA980;
+static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDBBFD0;
 // Global that holds the pointer-to-counter for the refcount helper
-static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17AE918;
+static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17B2A18;
 // sub_138D28CD0 = CUtlSortedVector::Find (looks up a CJob by jobId)
-static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD04DC0;
+static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD06410;
 
 // SEH exception filter for crash diagnostics
 static thread_local uintptr_t s_crashFaultAddr = 0;
@@ -604,6 +614,19 @@ static uintptr_t FindCurrentUser() {
     return userPtr;
 }
 
+// Read the logged-in account id straight from steamclient's CUser object. Used
+// when no RPC header has been scraped into g_steamId yet (e.g. a fast restart with
+// a game already running): without it the first sync runs account-less and Steam
+// evicts cloud saves as over-quota. SEH-isolated (raw cross-module reads).
+static uint32_t ReadAccountIdFromUser() {
+    uintptr_t user = FindCurrentUser();
+    if (!user) return 0;
+    uint32_t acct = 0;
+    __try { acct = *(uint32_t*)(user + USER_OFF_ACCOUNTID); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return acct;
+}
+
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
 
@@ -611,6 +634,10 @@ static uintptr_t FindCurrentUser() {
 // SteamID extracted from first packet header
 static std::atomic<uint64_t> g_steamId{0};
 static std::atomic<int32_t> g_sessionId{0};
+// Set once g_steamId came from an authoritative packet header. The CUser fallback
+// seeds g_steamId early, but keep scraping until a real header arrives: it carries
+// the session id and corrects a bad fallback read on a new build.
+static std::atomic<bool> g_steamIdFromHeader{false};
 
 void SetAccountId(uint32_t accountId) {
     // SteamID: universe=1, type=1, instance=1
@@ -903,7 +930,7 @@ static void DrainSchemaQueueOnNetThread() {
 #if !SCHEMA_FETCH_ENABLED
     return;
 #endif
-    if (!MetadataSync::schemaFetch.load(std::memory_order_relaxed)) return;
+    if (!MetadataSync::SchemaFetchEnabled()) return;
     if (t_drainingSchemaQueue) return;          // prevent reentrancy via BAsyncSend
     if (g_shuttingDown.load(std::memory_order_acquire)) return;
     // Need the captured session header (steamid/sessionid) before any send, or
@@ -1324,7 +1351,20 @@ static void ApplyLastPlayedUpdate(const std::vector<uint8_t>& respBody) {
 }
 
 uint32_t GetAccountId() {
-    return (uint32_t)(g_steamId.load() & 0xFFFFFFFF);
+    uint64_t sid = g_steamId.load();
+    if (sid != 0) return (uint32_t)(sid & 0xFFFFFFFF);
+
+    // No RPC header scraped yet -- read the account id from steamclient's CUser and
+    // seed g_steamId so the rest of the pipeline (RequireAccountId, quota inject)
+    // has it. SteamID64 reconstructed as individual/desktop (universe/type/instance=1).
+    uint32_t acct = ReadAccountIdFromUser();
+    if (acct != 0) {
+        uint64_t full = (uint64_t)acct | (1ULL << 32) | (1ULL << 52) | (1ULL << 56);
+        uint64_t expected = 0;
+        if (g_steamId.compare_exchange_strong(expected, full))
+            LOG("[NS] Account id %u read from CUser (no packet scraped yet)", acct);
+    }
+    return acct;
 }
 
 const std::string& GetSteamPath() {
@@ -1519,7 +1559,7 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     // Gated by sync_achievements: when off, do not interfere -- pass straight
     // through to Steam's real server.
     if (strcmp(methodName, StatsHandlers::RPC_GET_USER_STATS) == 0
-        && MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
+        && MetadataSync::AchievementsEnabled()) {
         if (requestBody && responseBody && g_serializeToArray) {
             auto reqBytes = SerializeBodyToBytes(requestBody);
             auto reqFields = PB::Parse(reqBytes.data(), reqBytes.size());
@@ -1627,6 +1667,57 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
     return true;
 }
 
+// ── Native Cloud spy ──────────────────────────────────────────────────────
+// CR_SPY_APPID: log the native request + Valve's response for this non-namespace
+// app's passthrough cloud RPCs, to inspect real Steam Cloud's per-root changelist
+// encoding. Read-only.
+static uint32_t g_spyAppId = []() -> uint32_t {
+    char buf[32] = {0};
+    DWORD n = GetEnvironmentVariableA("CR_SPY_APPID", buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return 0;
+    return (uint32_t)strtoul(buf, nullptr, 10);
+}();
+
+// Decode + log a Cloud.GetAppFileChangelist response: per-file path_prefix_index
+// plus the path_prefixes table, which together reveal native's per-root entries.
+static void SpyLogChangelistResponse(const char* tag, uint32_t appId,
+                                     const uint8_t* data, size_t len) {
+    auto fields = PB::Parse(data, len);
+    uint64_t cn = 0; uint32_t isDelta = 0;
+    std::vector<std::string> prefixes;
+    struct SpyFile { std::string leaf; uint32_t prefixIdx; uint32_t persist; uint32_t platforms; uint64_t size; };
+    std::vector<SpyFile> files;
+    for (const auto& f : fields) {
+        if (f.fieldNum == 1 && f.wireType == PB::Varint) cn = f.varintVal;
+        else if (f.fieldNum == 3 && f.wireType == PB::Varint) isDelta = (uint32_t)f.varintVal;
+        else if (f.fieldNum == 4 && f.wireType == PB::LengthDelimited)
+            prefixes.emplace_back((const char*)f.data, f.dataLen);
+        else if (f.fieldNum == 2 && f.wireType == PB::LengthDelimited) {
+            auto sub = PB::Parse(f.data, f.dataLen);
+            SpyFile sf{};
+            for (const auto& g : sub) {
+                if (g.fieldNum == 1 && g.wireType == PB::LengthDelimited)
+                    sf.leaf.assign((const char*)g.data, g.dataLen);
+                else if (g.fieldNum == 4 && g.wireType == PB::Varint) sf.size = g.varintVal;
+                else if (g.fieldNum == 5 && g.wireType == PB::Varint) sf.persist = (uint32_t)g.varintVal;
+                else if (g.fieldNum == 6 && g.wireType == PB::Varint) sf.platforms = (uint32_t)g.varintVal;
+                else if (g.fieldNum == 7 && g.wireType == PB::Varint) sf.prefixIdx = (uint32_t)g.varintVal;
+            }
+            files.push_back(std::move(sf));
+        }
+    }
+    LOG("[SPY-CL] %s app=%u CN=%llu is_delta=%u nfiles=%zu nprefixes=%zu",
+        tag, appId, (unsigned long long)cn, isDelta, files.size(), prefixes.size());
+    for (size_t i = 0; i < prefixes.size(); ++i)
+        LOG("[SPY-CL]   prefix[%zu] = '%s'", i, prefixes[i].c_str());
+    for (const auto& sf : files) {
+        const char* pfx = sf.prefixIdx < prefixes.size() ? prefixes[sf.prefixIdx].c_str() : "<oob>";
+        LOG("[SPY-CL]   file leaf='%s' prefixIdx=%u prefix='%s' persist=%u platforms=0x%X size=%llu",
+            sf.leaf.c_str(), sf.prefixIdx, pfx, sf.persist, sf.platforms,
+            (unsigned long long)sf.size);
+    }
+}
+
 // The actual vtable hook function - replaces CClientUnifiedServiceTransport::vtable[5]
 static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                                            void* request, void* response, int64_t* flags) {
@@ -1670,7 +1761,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     // then APPEND our namespace apps' playtime so Steam shows it. Real owned games
     // keep their server playtime (the client merges per-appid). See IDA notes.
     if (strcmp(methodName, StatsHandlers::RPC_GET_USER_STATS) == 0
-        && MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
+        && MetadataSync::AchievementsEnabled()) {
         if (request && response) {
             void* reqBody = *(void**)((uintptr_t)request + 48);
             if (reqBody) {
@@ -1701,7 +1792,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     }
 
     if (strcmp(methodName, StatsHandlers::RPC_GET_LAST_PLAYED) == 0
-        && MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) {
+        && MetadataSync::PlaytimeEnabled()) {
         bool result = g_originalSlot5(thisptr, methodName, request, response, flags);
         LOG("[Stats] slot5 GetLastPlayedTimes seen: serverResult=%d", result ? 1 : 0);
         if (result && response) {
@@ -1813,6 +1904,29 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         // Suppress log for high-frequency non-namespace apps (e.g. 2371090 = Steam Game Notes)
         if (appId != 2371090)
             LOG("[VtHook] %s app=%u: not namespace, passing through", methodName, appId);
+
+        // Native Cloud spy (see g_spyAppId): capture native request + response.
+        // Read-only.
+        if (g_spyAppId != 0 && appId == g_spyAppId) {
+            LOG("[SPY] %s app=%u native request (%zu bytes):", methodName, appId, reqBytes.size());
+            SpyLogFields("[SPY-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
+            bool spyResult = g_originalSlot5(thisptr, methodName, request, response, flags);
+            // Inspect the response body only on success: a failed call may leave the
+            // body slot without a constructed message.
+            void* spyRespBody = spyResult ? *(void**)((uintptr_t)response + 48) : nullptr;
+            if (spyRespBody) {
+                auto respBytes = SerializeBodyToBytes(spyRespBody);
+                LOG("[SPY] %s app=%u native response (%zu bytes, result=%d):",
+                    methodName, appId, respBytes.size(), spyResult ? 1 : 0);
+                if (strcmp(methodName, RPC_GET_CHANGELIST) == 0)
+                    SpyLogChangelistResponse("native-response", appId,
+                                             respBytes.data(), respBytes.size());
+                else
+                    SpyLogFields("[SPY-RESP]", respBytes.data(), (uint32_t)respBytes.size());
+            }
+            return spyResult;
+        }
+
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
 
@@ -1822,8 +1936,11 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     SpyLogFields("[VtHook-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
 #endif
 
-    // Capture SteamID from request header if not yet captured
-    if (g_steamId.load() == 0) {
+    // Capture SteamID from the request header. Gate on the steamid one-shot ONLY
+    // (not session id): in-process ServiceMethod headers may never carry
+    // client_sessionid, so waiting on it would re-serialize+parse on every Cloud
+    // RPC. SendPkt owns session-id capture. See g_steamIdFromHeader.
+    if (!g_steamIdFromHeader.load()) {
         void* reqHeader = *(void**)((uintptr_t)request + 40);
         if (reqHeader) {
             // CMsgProtoBufHeader: serialize-and-parse to extract steamid.
@@ -1831,8 +1948,8 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
             if (!hdrBytes.empty()) {
                 auto hdrFields = PB::Parse(hdrBytes.data(), hdrBytes.size());
                 auto* sidField = PB::FindField(hdrFields, HDR_STEAMID);
-                if (sidField) {
-                    g_steamId.store(sidField->varintVal);
+                if (sidField && !g_steamIdFromHeader.exchange(true)) {
+                    g_steamId.store(sidField->varintVal); // authoritative: overwrites fallback
                     LOG("[VtHook] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
                     HttpServer::SetAccountId(GetAccountId());
                     ScheduleStartupMetadataSync();
@@ -3279,7 +3396,7 @@ static void UploadLuaOnShutdown() {
 }
 
 // Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1780352834ULL, 1779918128ULL, 1779486452ULL, 1778281814ULL };
+static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1781041600ULL, 1780352834ULL, 1779918128ULL, 1779486452ULL, 1778281814ULL };
 
 static bool IsSupportedSteamVersion(uint64_t v) {
     for (uint64_t s : SUPPORTED_STEAM_VERSIONS)
@@ -4196,10 +4313,18 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
         // Experimental: proactive schema fetch (opt-in, default off).
         if (cfg["experimental_schema_fetch"].type == Json::Type::Bool)
             MetadataSync::schemaFetch = cfg["experimental_schema_fetch"].boolean();
-        LOG("[Stats] Sync gates: achievements=%d, playtime=%d, schemaFetch=%d",
+        // UNSUPPORTED WIP OVERRIDE NON-ST CLIENT GATE (default off). Lets a non-ST
+        // client run the metadata features that are otherwise hard-gated to ST.
+        if (cfg["override_non_st_client_gate"].type == Json::Type::Bool)
+            MetadataSync::overrideNonStGate = cfg["override_non_st_client_gate"].boolean();
+        LOG("[Stats] Sync gates: achievements=%d, playtime=%d, schemaFetch=%d, "
+            "steamTools=%d, overrideNonStGate=%d, stGateOpen=%d",
             MetadataSync::syncAchievements.load() ? 1 : 0,
             MetadataSync::syncPlaytime.load() ? 1 : 0,
-            MetadataSync::schemaFetch.load() ? 1 : 0);
+            MetadataSync::schemaFetch.load() ? 1 : 0,
+            MetadataSync::steamToolsPresent.load() ? 1 : 0,
+            MetadataSync::overrideNonStGate.load() ? 1 : 0,
+            MetadataSync::StGateOpen() ? 1 : 0);
         if (!cloudSaveOnly) {
             if (cfg["parental_bypass_playtime"].type == Json::Type::Bool)
                 g_parentalBypassPlaytime = cfg["parental_bypass_playtime"].boolean();
@@ -4270,7 +4395,11 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     });
     StatsStore::Init(cloudRoot, g_steamPath);
     StatsHandlers::Init();
-    StatsStore::SeedApps(GetNamespaceApps());
+    // Only seed when a stats feature is enabled: SeedApps also uploads imported
+    // stats, so with both off it must stay inert (no cloud reads or writes).
+    if (MetadataSync::AchievementsEnabled() ||
+        MetadataSync::PlaytimeEnabled())
+        StatsStore::SeedApps(GetNamespaceApps());
 
     // Background: poll the cloud for another device's playtime advances and push the
     // new totals into the running client's tracking map + library UI -- mirroring
@@ -4284,7 +4413,7 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 if (g_shuttingDown.load()) return;
                 // Pure playtime feature: skip the cloud pull + live push when off.
-                if (!MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) continue;
+                if (!MetadataSync::PlaytimeEnabled()) continue;
                 auto changed = StatsStore::RefreshFromCloud(GetNamespaceApps());
                 if (changed.empty()) continue;
                 PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(changed);
@@ -4483,7 +4612,7 @@ static void SweepNamespaceSchemas();  // fwd decl
 static std::atomic<bool> g_schemaSweepScheduled{false};
 static void MaybeScheduleSchemaSweep() {
     // Experimental opt-in: only fetch schemas when the user enabled it.
-    if (!MetadataSync::schemaFetch.load(std::memory_order_relaxed)) return;
+    if (!MetadataSync::SchemaFetchEnabled()) return;
     if (g_schemaSweepScheduled.exchange(true)) return;   // once per session
     std::thread([] {
         constexpr int kStartupSettleMs = 90000;          // wait for startup to finish
@@ -4551,7 +4680,7 @@ static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
                 // it starts/ends StatsStore sessions by appid.
                 // Playtime session tracking is gated by sync_playtime: when
                 // off, we do not observe games-played at all.
-                if (MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) {
+                if (MetadataSync::PlaytimeEnabled()) {
                     auto observeBytes = SerializeBodyToBytes(bodyObj);
                     if (!observeBytes.empty()) {
                         LOG("[Stats] GamesPlayed observed (emsg=%u, %zu bytes) -> session tracking",
@@ -4559,12 +4688,16 @@ static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
                         StatsHandlers::ObserveGamesPlayed(observeBytes.data(), observeBytes.size());
                     }
                 }
-                if (g_showNonSteamGame.load(std::memory_order_relaxed))
+                // Friends "Playing non-Steam game" spoof is a metadata feature:
+                // hard-gated to ST clients (UNSUPPORTED WIP OVERRIDE NON-ST CLIENT
+                // GATE lifts it).
+                if (g_showNonSteamGame.load(std::memory_order_relaxed) &&
+                    MetadataSync::StGateOpen())
                     RewriteGamesPlayedBody(bodyObj);
             }
         }
         else if (emsg == EMSG_CLIENT_STORE_USER_STATS2 &&
-                 MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
+                 MetadataSync::AchievementsEnabled()) {
             // The client sends this when a game unlocks an achievement / sets a
             // stat. The body has no unlock timestamps, but Steam writes the native
             // blob with fresh AchievementTimes in the same store job, so we re-read
@@ -4580,7 +4713,7 @@ static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
             }
         }
         else if (emsg == EMSG_CLIENT_GET_USER_STATS &&
-                 MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
+                 MetadataSync::AchievementsEnabled()) {
             // Namespace apps fetch stats over the legacy 818 path (appid below the
             // service-method threshold; see CAPIJobRequestUserStats_BYieldingRun),
             // so serve a 819 from the store. The job MERGES our stats into its
@@ -4816,7 +4949,7 @@ void RequestSchemaForApp(uint32_t appId) {
 #if !SCHEMA_FETCH_ENABLED
     (void)appId; return;                              // kill-switch: see SCHEMA_FETCH_ENABLED
 #endif
-    if (!MetadataSync::schemaFetch.load(std::memory_order_relaxed)) return;
+    if (!MetadataSync::SchemaFetchEnabled()) return;
     if (appId == 0) return;
     if (g_liveConnHandle.load(std::memory_order_relaxed) == 0) return; // no conn yet
 
@@ -5136,11 +5269,14 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 
     uint64_t jobSrc = GetJobIdSource(pkt.header);
 
-    // capture SteamID and SessionID from first packet
-    if (g_steamId.load() == 0) {
+    // Capture SteamID and SessionID from the first authoritative packet header.
+    // Gate must NOT be g_steamId==0: the CUser fallback in GetAccountId() may
+    // have pre-seeded it, and we still need the session id + the header's
+    // authoritative steamid (corrects a bad fallback read).
+    if (!g_steamIdFromHeader.load() || g_sessionId.load() == 0) {
         auto* sidField = PB::FindField(pkt.header, HDR_STEAMID);
-        if (sidField) {
-            g_steamId.store(sidField->varintVal);
+        if (sidField && !g_steamIdFromHeader.exchange(true)) {
+            g_steamId.store(sidField->varintVal); // authoritative: overwrites fallback
             LOG("[NS] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
             HttpServer::SetAccountId(GetAccountId());
             ScheduleStartupMetadataSync();

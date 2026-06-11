@@ -15,18 +15,14 @@ bool IsReady();
 // Read current ufs.quota/maxnumfiles from KV. False if injector not ready.
 bool ReadAppQuota(uint32_t appId, uint64_t& outQuotaBytes, uint32_t& outMaxNumFiles);
 
-// Trigger PICS fetch and poll for results. False on timeout.
-bool TriggerPicsAndWait(uint32_t appId,
-                        uint64_t& outQuotaBytes,
-                        uint32_t& outMaxNumFiles,
-                        int timeoutMs = 500);
-
 // Write quota/maxnumfiles into KV. Won't clobber existing non-zero values.
 bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles);
 
-// Idempotently SET the live ufs quota/maxnumfiles (capped to plausible maxima).
-// Used by the mixed-root rule-multiplier guard; safe to call repeatedly.
-bool SetAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles);
+// Raise live ufs maxnumfiles/quota to at least the given floor (only if below it).
+// Idempotent and non-compounding: callers pass a floor derived from immutable facts,
+// so repeated calls converge. Gives native's per-instance over-quota eviction enough
+// budget to keep multi-root collision apps' files.
+bool EnsureMaxNumFilesFloor(uint32_t appId, uint32_t floorFiles, uint64_t floorBytes);
 
 // A single AutoCloud save-file rule for KV injection.
 struct SaveFileRule {

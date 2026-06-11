@@ -1693,7 +1693,7 @@ Are you sure?</value>
     <value>Quality of Life Placeholder</value>
   </data>
   <data name="Settings_ExtraHint" xml:space="preserve">
-    <value>Optional extras that aren't part of cloud sync. Changes take effect on next game launch.</value>
+    <value>Optional extras that aren't part of cloud sync.</value>
   </data>
   <data name="Settings_ShowNonSteamGame" xml:space="preserve">
     <value>Show Lua Game in Status</value>

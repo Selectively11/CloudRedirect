@@ -35,7 +35,7 @@ static bool QuotaValueLooksValid(uint64_t quota, uint64_t files) {
 
 // Global CSteamEngine* pointer. Same global already used by cloud_intercept.
 // (SC_RVA_GLOBAL_ENGINE = 0x17A70E8 in that module.)
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17BEC08;
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17C2D08;
 
 // Offset from *qword_1397A70E8 to the CAppInfoCache instance.
 // Pattern observed in many callers:
@@ -45,14 +45,14 @@ static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17BEC08;
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 0xE68;
 
 // CAppInfoCache::GetAppInfo(appId) -> appInfo*
-static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x49D920;
+static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x49D9C0;
 
 // CAppInfoCache::GetSection(appInfo, sectionId) -> KeyValues*
 // sectionId 10 = "ufs"
-static constexpr uintptr_t SC_RVA_GET_SECTION = 0x49FC50;
+static constexpr uintptr_t SC_RVA_GET_SECTION = 0x49FCF0;
 
 // CAppInfoCache::ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
-static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49E990;
+static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49EA30;
 
 // BlockOnInit -- calls CThread::Join off-engine-thread, crashes/deadlocks. Do not call.
 // Cache is already loaded before our RPC handlers run.
@@ -60,22 +60,22 @@ static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49E990;
 
 // KeyValues::FindKey(parent, name, bCreate, out)
 // When bCreate=1 creates the key if not present.
-static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xCF91A0;
+static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xCFA7F0;
 
 // KeyValues::GetUint64(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xCFA4F0;
+static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xCFBB40;
 
 // KeyValues::GetInt(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xCFA0A0;
+static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xCFB6F0;
 
 // KeyValues::SetUint64(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xCFA760;
+static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xCFBDB0;
 
 // KeyValues::SetInt(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xCFA7A0;
+static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xCFBDF0;
 
 // KeyValues::SetString(kv, value) -- sets string value on a KV leaf node
-static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xCFA7E0;
+static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xCFBE30;
 
 // CAppInfoUpdater::RequestAppInfoUpdate -- not yet wired (offset unconfirmed).
 // Steam's background PICS populates KV on its own schedule; cached values suffice.
@@ -190,29 +190,6 @@ bool ReadAppQuota(uint32_t appId, uint64_t& outQuotaBytes, uint32_t& outMaxNumFi
     return true;
 }
 
-bool TriggerPicsAndWait(uint32_t appId,
-                        uint64_t& outQuotaBytes,
-                        uint32_t& outMaxNumFiles,
-                        int timeoutMs) {
-    if (!g_ready.load(std::memory_order_acquire)) return false;
-
-    // No PICS trigger wired yet -- just poll. Returns false so caller uses cached values.
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeoutMs);
-    uint64_t q = 0;
-    uint32_t f = 0;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (ReadAppQuota(appId, q, f) && q > 0 && f > 0) {
-            outQuotaBytes = q;
-            outMaxNumFiles = f;
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return false;
-}
-
 bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
     if (quotaBytes == 0 || maxNumFiles == 0) {
@@ -285,12 +262,10 @@ bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     return true;
 }
 
-// Idempotently SET (not multiply) the live ufs quota/maxnumfiles to the given
-// values, capped to plausible maxima. Used by the mixed-root rule-multiplier
-// guard. Safe to call repeatedly with the same target.
-bool SetAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
+bool EnsureMaxNumFilesFloor(uint32_t appId, uint32_t floorFiles, uint64_t floorBytes) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
-    if (quotaBytes == 0 || maxNumFiles == 0) return false;
+    if (floorFiles == 0) return false;
+    if (floorFiles > kMaxPlausibleMaxFiles) return false;  // guard pathological input
 
     void* cache = GetCachePtr();
     if (!cache) return false;
@@ -299,17 +274,33 @@ bool SetAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     void* ufs = g_r.getSection(appInfo, kSectionUfs);
     if (!ufs) return false;
 
-    uint64_t newQuota = quotaBytes;
-    uint64_t newFiles = maxNumFiles;
-    if (newQuota > kMaxPlausibleQuotaBytes) newQuota = kMaxPlausibleQuotaBytes;
-    if (newFiles > kMaxPlausibleMaxFiles)   newFiles = kMaxPlausibleMaxFiles;
+    uint64_t curFiles = g_r.readConfigU64(cache, appId, kSectionUfs, "maxnumfiles", 0);
+    uint64_t curQuota = g_r.readConfigU64(cache, appId, kSectionUfs, "quota", 0);
 
-    bool ok = false;
-    void* filesKv = g_r.kvFindKey(ufs, "maxnumfiles", 1, nullptr);
-    if (filesKv) { g_r.kvSetInt(filesKv, static_cast<int>(newFiles)); ok = true; }
-    void* quotaKv = g_r.kvFindKey(ufs, "quota", 1, nullptr);
-    if (quotaKv) { g_r.kvSetUint64(quotaKv, newQuota); ok = true; }
-    return ok;
+    bool wrote = false;
+    if (curFiles < floorFiles) {
+        void* filesKv = g_r.kvFindKey(ufs, "maxnumfiles", 1, nullptr);
+        if (filesKv) {
+            g_r.kvSetInt(filesKv, static_cast<int>(floorFiles));
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised maxnumfiles %llu -> %u",
+                appId, (unsigned long long)curFiles, floorFiles);
+        }
+    }
+    // Cap (not skip): floorBytes derives from real PICS facts; silently dropping
+    // the quota raise while still raising maxnumfiles would reopen byte-quota
+    // eviction in exactly the multi-root scenario the floor protects.
+    if (floorBytes > kMaxPlausibleQuotaBytes) floorBytes = kMaxPlausibleQuotaBytes;
+    if (floorBytes > 0 && curQuota < floorBytes) {
+        void* quotaKv = g_r.kvFindKey(ufs, "quota", 1, nullptr);
+        if (quotaKv) {
+            g_r.kvSetUint64(quotaKv, floorBytes);
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised quota %llu -> %llu",
+                appId, (unsigned long long)curQuota, (unsigned long long)floorBytes);
+        }
+    }
+    return wrote;
 }
 
 bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
@@ -553,13 +544,49 @@ static uintptr_t FindGlobalEnginePtr(uintptr_t textStart, uintptr_t textEnd,
         if (i < 8) continue;
         if (mem[i - 8] != 0x8D || mem[i - 7] != 0x83) continue;
 
-        // Found lea eax, [ebx + disp32] -- GOT-relative global address.
+        // Found lea eax, [ebx + disp32] -- ebx-relative global address.
+        // In 32-bit PIC, ebx = _GLOBAL_OFFSET_TABLE_ set by the function's thunk
+        // (call __x86.get_pc_thunk.bx; add ebx, imm32). The lea computes the
+        // absolute address of the engine-global variable (.bss), which is the
+        // `void**` we need. Decode it for real instead of using a hardcoded fallback
+        // RVA -- the fallback is build-specific and silently wrong on other builds.
+        int32_t leaDisp;
+        memcpy(&leaDisp, &mem[i - 6], 4);            // disp32 of lea eax,[ebx+disp]
 
-        LOG("[KvInjector] SigScan: found 'add reg, 0xB88' at 0x%lx (base+0x%lx)",
-            (unsigned long)addAddr, (unsigned long)(addAddr - soBase));
+        LOG("[KvInjector] SigScan: found 'add reg, 0xB88' at 0x%lx (base+0x%lx), "
+            "lea disp=0x%lx",
+            (unsigned long)addAddr, (unsigned long)(addAddr - soBase),
+            (unsigned long)(uint32_t)leaDisp);
 
-        // GOT-relative decode is fragile without section headers; use fallback RVA.
-        return soBase + FALLBACK_RVA_GLOBAL_ENGINE;
+        // Resolve ebx (GOT base) from the enclosing function's PIC thunk. Scan back
+        // up to 4KB for "add ebx, imm32" (81 C3 xx xx xx xx); get_pc_thunk.bx loads
+        // ebx = return address = the instruction right after the `call`, which is
+        // this very `add ebx` instruction. So ebx = addr(add ebx) + imm32.
+        uintptr_t leaAddr = textStart + (i - 8);
+        uintptr_t scanBack = (leaAddr > 0x1000) ? leaAddr - 0x1000 : textStart;
+        const uint8_t* sb = reinterpret_cast<const uint8_t*>(scanBack);
+        size_t sbLen = leaAddr - scanBack;
+        uintptr_t gotBase = 0;
+        for (size_t k = sbLen; k-- > 0;) {
+            if (sb[k] == 0x81 && sb[k + 1] == 0xC3) {
+                int32_t imm;
+                memcpy(&imm, &sb[k + 2], 4);
+                uintptr_t addEbxAddr = scanBack + k;
+                gotBase = addEbxAddr + (uint32_t)imm;   // ebx after thunk
+                break;
+            }
+        }
+        if (!gotBase) {
+            LOG("[KvInjector] SigScan: could not resolve GOT base (ebx) for engine "
+                "global; falling back to RVA 0x%lx",
+                (unsigned long)FALLBACK_RVA_GLOBAL_ENGINE);
+            return soBase + FALLBACK_RVA_GLOBAL_ENGINE;
+        }
+
+        uintptr_t engineVar = gotBase + (uint32_t)leaDisp;
+        LOG("[KvInjector] SigScan: decoded engine-global var at 0x%lx (base+0x%lx)",
+            (unsigned long)engineVar, (unsigned long)(engineVar - soBase));
+        return engineVar;
     }
     return 0;
 }
@@ -809,27 +836,6 @@ bool ReadAppQuota(uint32_t appId, uint64_t& outQuotaBytes, uint32_t& outMaxNumFi
     return true;
 }
 
-bool TriggerPicsAndWait(uint32_t appId,
-                        uint64_t& outQuotaBytes,
-                        uint32_t& outMaxNumFiles,
-                        int timeoutMs) {
-    if (!g_ready.load(std::memory_order_acquire)) return false;
-    // No active PICS-trigger plumbing yet on Linux; poll only.
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeoutMs);
-    uint64_t q = 0;
-    uint32_t f = 0;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (ReadAppQuota(appId, q, f) && q > 0 && f > 0) {
-            outQuotaBytes = q;
-            outMaxNumFiles = f;
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return false;
-}
-
 // Inline BST walk: manager+76=rootIndex, manager+96=nodes (24-byte stride).
 // node+16=appId, node+20=appInfo. Returns null if appId not in cache.
 static void* ResolveAppInfo(void* cache, uint32_t appId) {
@@ -927,12 +933,10 @@ bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     return true;
 }
 
-// Idempotently SET (not multiply) the live ufs quota/maxnumfiles to the given
-// values, capped to plausible maxima. Used by the mixed-root rule-multiplier
-// guard. Safe to call repeatedly with the same target.
-bool SetAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
+bool EnsureMaxNumFilesFloor(uint32_t appId, uint32_t floorFiles, uint64_t floorBytes) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
-    if (quotaBytes == 0 || maxNumFiles == 0) return false;
+    if (floorFiles == 0) return false;
+    if (floorFiles > kMaxPlausibleMaxFiles) return false;
 
     void* cache = GetCachePtr();
     if (!cache) return false;
@@ -941,22 +945,34 @@ bool SetAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     void* ufs = g_r.getSection(appInfo, kSectionUfs);
     if (!ufs) return false;
 
-    uint64_t newQuota = quotaBytes;
-    uint64_t newFiles = maxNumFiles;
-    if (newQuota > kMaxPlausibleQuotaBytes) newQuota = kMaxPlausibleQuotaBytes;
-    if (newFiles > kMaxPlausibleMaxFiles)   newFiles = kMaxPlausibleMaxFiles;
+    uint64_t curFiles = g_r.readConfigU64(cache, appId, kSectionUfs, "maxnumfiles", 0);
+    uint64_t curQuota = g_r.readConfigU64(cache, appId, kSectionUfs, "quota", 0);
 
-    bool ok = false;
-    void* filesKv = g_r.kvFindKey(ufs, "maxnumfiles", 1, nullptr);
-    if (filesKv) { g_r.kvSetInt32(filesKv, static_cast<int32_t>(newFiles)); ok = true; }
-    void* quotaKv = g_r.kvFindKey(ufs, "quota", 1, nullptr);
-    if (quotaKv) {
-        g_r.kvSetUint64(quotaKv,
-                        static_cast<uint32_t>(newQuota & 0xFFFFFFFFu),
-                        static_cast<uint32_t>((newQuota >> 32) & 0xFFFFFFFFu));
-        ok = true;
+    bool wrote = false;
+    if (curFiles < floorFiles) {
+        void* filesKv = g_r.kvFindKey(ufs, "maxnumfiles", 1, nullptr);
+        if (filesKv) {
+            g_r.kvSetInt32(filesKv, static_cast<int32_t>(floorFiles));
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised maxnumfiles %llu -> %u",
+                appId, (unsigned long long)curFiles, floorFiles);
+        }
     }
-    return ok;
+    // Cap (not skip): see Windows impl -- dropping the quota raise while raising
+    // maxnumfiles would reopen byte-quota eviction for multi-root apps.
+    if (floorBytes > kMaxPlausibleQuotaBytes) floorBytes = kMaxPlausibleQuotaBytes;
+    if (floorBytes > 0 && curQuota < floorBytes) {
+        void* quotaKv = g_r.kvFindKey(ufs, "quota", 1, nullptr);
+        if (quotaKv) {
+            uint32_t lo = static_cast<uint32_t>(floorBytes & 0xFFFFFFFFu);
+            uint32_t hi = static_cast<uint32_t>((floorBytes >> 32) & 0xFFFFFFFFu);
+            g_r.kvSetUint64(quotaKv, lo, hi);
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised quota %llu -> %llu",
+                appId, (unsigned long long)curQuota, (unsigned long long)floorBytes);
+        }
+    }
+    return wrote;
 }
 
 bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {

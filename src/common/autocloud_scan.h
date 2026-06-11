@@ -30,30 +30,11 @@ struct ScanResult {
     bool hasRules = false;          // true if app has AutoCloud rules in appinfo.vdf
     bool hasRootCollision = false;  // true if two rules resolved to same path under different roots
 
-    // Per-rule double-count accounting for the mixed-root quota multiplier.
-    //
-    // Steam's CAutoCloudManager::YldOnAppExit walks the savefiles rules and counts
-    // each matching file once PER RULE -- the native per-rule dedup (sub_1384D1DA0
-    // @ 0x1384d221a) is dead on the exit path because YldOnAppExit seeds it with a
-    // null "previous path" (it is only live on the staging/save path). So when two
-    // effective-platform rules resolve to the same directory (via rootoverrides),
-    // every file there is counted twice against maxnumfiles -> false over-quota ->
-    // cloud wipe. `files` below is the UNIQUE set (cross-rule deduped at scan time);
-    // these two fields capture what the native exit loop actually counts so the
-    // multiplier can size the budget to the real worst case rather than a blunt
-    // fileCount*ruleCount.
-
-    // Total file-claims summed across all effective rules (counts a file once for
-    // each rule, including siblings, whose resolved scan dir + pattern match it).
-    // This equals the instance count YldOnAppExit charges against maxnumfiles.
-    size_t countedInstances = 0;
-    // Largest number of effective rules that resolve to (and claim files in) the
-    // same physical directory. 1 = no collision (native dedup irrelevant, no wipe
-    // risk); >1 = the per-file multiplication factor on the exit path.
-    size_t maxCollisionFactor = 0;
-    // Sum of (1 + siblingCount) over rules that participate in a collision; mirrors
-    // the extra budget YldOnAppExit's loop consumes per file beyond the raw count.
-    size_t collisionSiblingHeadroom = 0;
+    // `files` is the unique set, cross-rule deduped by cloud-relative path. Steam's
+    // exit walk logs "Persisting" per matching rule but dedups by cloud path at the
+    // remotecache layer ("Skipping un-modified file"), so this is one entry per
+    // distinct cloud path. (Note: native's over-quota eviction does count per rule-
+    // instance against maxnumfiles -- see ApplyNativeOverQuotaEviction.)
 };
 
 // Scan AutoCloud rules for an app and return matching files from disk.
