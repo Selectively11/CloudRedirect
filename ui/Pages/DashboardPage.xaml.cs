@@ -153,9 +153,12 @@ public partial class DashboardPage : Page
         var logPath = Services.SteamDetector.GetLogPath();
         if (logPath != null && File.Exists(logPath))
         {
+            // Open the containing folder with the log file highlighted, rather than
+            // opening the (large) log in a text editor. /select takes the file path.
             Process.Start(new ProcessStartInfo
             {
-                FileName = logPath,
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{logPath}\"",
                 UseShellExecute = true
             })?.Dispose();
         }

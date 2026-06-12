@@ -205,6 +205,18 @@ std::optional<std::vector<uint8_t>> HandleLegacyGetUserStats(
 
     StatsStore::AppStats stats = StatsStore::Snapshot(appId);
 
+    // Count unlocked bits for diagnostics: schema present but zero unlocks is the
+    // "served 0 achievements despite cloud data" signature.
+    size_t unlockedBits = 0;
+    for (const auto& a : stats.achievements)
+        for (int i = 0; i < 32; i++)
+            if (a.unlockTimes[i]) unlockedBits++;
+    LOG("[Stats]   Serve snapshot app=%u: schema=%zuB ach_blocks=%zu unlocked_bits=%zu "
+        "stats=%zu crc=%u(client=%u)%s", appId, stats.schema.size(),
+        stats.achievements.size(), unlockedBits, stats.stats.size(),
+        stats.crcStats, clientCrc,
+        stats.achievements.empty() ? " [WARN: no achievement data in store]" : "");
+
     // If client has no schema (version=-1) and we don't have one either,
     // pass through to let the real server provide the schema.
     if (schemaVersion == -1 && stats.schema.empty()) {
@@ -218,8 +230,10 @@ std::optional<std::vector<uint8_t>> HandleLegacyGetUserStats(
     resp.WriteVarint(3, stats.crcStats);    // crc_stats
 
     // schema (field 4) - send if client CRC differs
+    bool sentSchema = false;
     if (clientCrc != stats.crcStats && !stats.schema.empty()) {
         resp.WriteBytes(4, stats.schema.data(), stats.schema.size());
+        sentSchema = true;
     }
 
     // stats (field 5, repeated submessage): stat_id(1), stat_value(2)
@@ -240,7 +254,10 @@ std::optional<std::vector<uint8_t>> HandleLegacyGetUserStats(
         resp.WriteSubmessage(6, achMsg);
     }
 
-    return resp.Data();
+    auto out = resp.Data();
+    LOG("[Stats]   819 built app=%u: %zuB (schema_sent=%d ach_blocks=%zu stats=%zu)",
+        appId, out.size(), sentSchema ? 1 : 0, stats.achievements.size(), stats.stats.size());
+    return out;
 }
 
 // Legacy EMsg 820: CMsgClientStoreUserStats2

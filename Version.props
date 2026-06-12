@@ -5,7 +5,7 @@
 
     <!-- Optional pre-release suffix (e.g. -TEST1, -beta). Empty for stable releases.
          Appended to the user-facing version shown in Settings; AssemblyVersion stays numeric. -->
-    <ReleasePrerelease>-TEST1</ReleasePrerelease>
+    <ReleasePrerelease>-TEST2</ReleasePrerelease>
     
     <!-- Sync engine generation - increment on breaking protocol changes -->
     <CoreGeneration>1.0</CoreGeneration>

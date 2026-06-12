@@ -376,6 +376,12 @@ static void EnsureInitialized() {
             // pushAll: RMW-merge our snapshot onto the live blob (don't clobber
             // another device) and upload once; skip if nothing changed.
             [](const std::unordered_map<uint32_t, std::string>& all) {
+                // Detached worker: register with the in-flight drain so
+                // CloudStorage::Shutdown waits for the provider read below before
+                // tearing g_provider down (UAF guard).
+                CloudStorage::InflightSyncScope guard;
+                if (!guard.entered) return;
+
                 uint32_t accountId = CloudIntercept::GetAccountId();
                 if (accountId == 0) return;
 
@@ -394,10 +400,7 @@ static void EnsureInitialized() {
                     if (appId == 0) continue;
                     std::string key = std::to_string(appId);
                     Json::Value appVal = Json::Parse(json);
-                    std::string existing = root.has(key)
-                        ? Json::Stringify(root.objVal[key]) : std::string();
-                    std::string updated = Json::Stringify(appVal);
-                    if (existing != updated) {
+                    if (!root.has(key) || !Json::DeepEqual(root.objVal[key], appVal)) {
                         root.objVal[key] = std::move(appVal);
                         changed = true;
                     }
@@ -407,6 +410,29 @@ static void EnsureInitialized() {
                 std::string merged = Json::Stringify(root);
                 CloudStorage::UploadCloudMetadataTextAsync(
                     accountId, CloudIntercept::kAccountScopeAppId, "stats.json", merged);
+            },
+            // pullLegacy: read one app's old per-app blob for migration into the account blob.
+            [](uint32_t appId) -> std::string {
+                CloudStorage::InflightSyncScope guard;
+                if (!guard.entered) return std::string();
+                uint32_t accountId = CloudIntercept::GetAccountId();
+                if (accountId == 0) return std::string();
+                std::vector<uint8_t> data;
+                if (CloudStorage::DownloadCloudMetadataWithLegacyFallback(
+                        accountId, appId, "stats.json", nullptr, data) && !data.empty())
+                    return std::string(reinterpret_cast<const char*>(data.data()), data.size());
+                return std::string();
+            },
+            // pullLegacyPlaytime: read one app's first-format Playtime/<appId>.bin from cloud.
+            [](uint32_t appId) -> std::string {
+                CloudStorage::InflightSyncScope guard;
+                if (!guard.entered) return std::string();
+                uint32_t accountId = CloudIntercept::GetAccountId();
+                if (accountId == 0) return std::string();
+                std::vector<uint8_t> data;
+                if (CloudStorage::DownloadLegacyPlaytimeBlob(accountId, appId, data))
+                    return std::string(reinterpret_cast<const char*>(data.data()), data.size());
+                return std::string();
             });
         // Track playtime/stats for namespace (lua) apps only -- real owned games
         // must never have their playtime recorded or synced.

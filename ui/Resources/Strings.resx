@@ -579,7 +579,7 @@ If you skip this, saves will be stored locally in your Steam folder.</value>
     <value>Quick Actions</value>
   </data>
   <data name="Dashboard_OpenLogFile" xml:space="preserve">
-    <value>Open Log File</value>
+    <value>Show Log in Folder</value>
   </data>
   <data name="Dashboard_RestartSteam" xml:space="preserve">
     <value>Restart Steam</value>

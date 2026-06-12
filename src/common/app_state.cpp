@@ -7,10 +7,15 @@
 #include "log.h"
 #include "manifest_store.h"
 
+#include <atomic>
 #include <chrono>
 #include <ctime>
+#include <future>
+#include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 using CloudIntercept::IsReservedBlobFilename;
 
@@ -34,8 +39,12 @@ struct ServeCacheEntry {
     StateFetchResult result;
 };
 
-std::mutex g_serveCacheMtx;
-std::unordered_map<uint64_t, ServeCacheEntry> g_serveCache; // key = (acct<<32)|app
+// Leaked, never-destructed: a detached bounded-fetch worker can still touch these
+// during static destruction at exit, so heap-backing them (no destructor) avoids a
+// UAF on a destroyed mutex/map.
+std::mutex& g_serveCacheMtx = *new std::mutex();
+std::unordered_map<uint64_t, ServeCacheEntry>& g_serveCache =
+    *new std::unordered_map<uint64_t, ServeCacheEntry>(); // key = (acct<<32)|app
 
 // This client's id (set by NoteOwnClientId). Used to tell our own session from a
 // foreign one: only a foreign session is contention. Counting ours would disable
@@ -67,14 +76,23 @@ static void InvalidateServeCache(uint32_t accountId, uint32_t appId) {
     g_serveCache.erase(ServeCacheKey(accountId, appId));
 }
 
-// Record a live fetch for the serve path to reuse. Latest good parse wins, even
-// with a LOWER cn: that's a legitimate rewind (state wiped/recreated), not a
-// partial read -- partial reads fail parse upstream and never reach here.
+// Record a live fetch for the serve path. Latest good parse normally wins (even a
+// lower cn -- a legitimate rewind), but concurrent bounded fetches can finish out of
+// order, so reject a lower-cn write while the existing entry is still fresh; a real
+// rewind re-asserts once the duplicates quiesce.
+static constexpr int64_t kConcurrentFetchWindowMs = 10000;
 static void RefreshServeCache(uint32_t accountId, uint32_t appId,
                               const StateFetchResult& result) {
     if (result.status != StateFetchStatus::Ok) return; // only cache good reads
     std::lock_guard<std::mutex> lk(g_serveCacheMtx);
     uint64_t key = ServeCacheKey(accountId, appId);
+    auto existing = g_serveCache.find(key);
+    if (existing != g_serveCache.end() &&
+        existing->second.result.status == StateFetchStatus::Ok &&
+        result.state.cn < existing->second.cn &&
+        (NowMs() - existing->second.fetchedAtMs) < kConcurrentFetchWindowMs) {
+        return;  // older out-of-order completion -- keep the fresher higher-CN entry
+    }
     ServeCacheEntry e;
     e.cn = result.state.cn;
     e.fetchedAtMs = NowMs();
@@ -372,6 +390,80 @@ StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
     StateFetchResult result = FetchCloudStateLive(accountId, appId);
     RefreshServeCache(accountId, appId, result);
     return result;
+}
+
+// Bounded-fetch coordination. The changelist RPC runs sequentially per app on the
+// main-loop thread, so N timeouts would sum past the 15s watchdog -- the circuit
+// breaker serves local immediately after the first timeout. Per-app dedup + a worker
+// cap bound the thread count.
+// Leaked, never-destructed (same reason as g_serveCache*): the detached worker
+// re-locks g_boundedMtx on completion, possibly during static destruction.
+static std::mutex& g_boundedMtx = *new std::mutex();
+static std::unordered_set<uint64_t>& g_boundedInflightKeys =
+    *new std::unordered_set<uint64_t>();                     // apps with a live worker
+static std::atomic<int> g_boundedWorkerCount{0};
+static std::atomic<int64_t> g_providerSlowUntilMs{0};       // circuit-breaker deadline
+static constexpr int kMaxBoundedWorkers = 4;
+static constexpr int kCircuitCooldownMs = 30000;            // serve-local window after a timeout
+
+StateFetchResult FetchCloudStateBounded(uint32_t accountId, uint32_t appId,
+                                        int deadlineMs) {
+    uint64_t key = ((uint64_t)accountId << 32) | appId;
+    bool spawn = true;
+    // Circuit open: provider recently timed out -> don't wait, serve local now.
+    if (NowMs() < g_providerSlowUntilMs.load(std::memory_order_relaxed)) {
+        return { StateFetchStatus::Timeout, {} };
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_boundedMtx);
+        // Coalesce duplicate fetches and cap total workers; either way, don't block.
+        if (g_boundedInflightKeys.count(key) ||
+            g_boundedWorkerCount.load(std::memory_order_relaxed) >= kMaxBoundedWorkers) {
+            spawn = false;
+        } else {
+            g_boundedInflightKeys.insert(key);
+            g_boundedWorkerCount.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (!spawn) return { StateFetchStatus::Timeout, {} };
+
+    // Run the blocking live fetch on a detached worker; wait up to deadlineMs. The
+    // shared state outlives this call so a late completion still warms the serve
+    // cache for the next changelist -- it just doesn't hold Steam's thread.
+    auto promise = std::make_shared<std::promise<StateFetchResult>>();
+    auto future = promise->get_future();
+    std::thread([accountId, appId, key, promise]() {
+            // RAII so the inflight slot is always released even if the fetch throws
+            // (e.g. bad_alloc): otherwise the key/count leak wedges the worker cap, and
+            // an exception escaping a std::thread entry calls std::terminate.
+        struct SlotGuard {
+            uint64_t key;
+            ~SlotGuard() {
+                std::lock_guard<std::mutex> lk(g_boundedMtx);
+                g_boundedInflightKeys.erase(key);
+                g_boundedWorkerCount.fetch_sub(1, std::memory_order_relaxed);
+            }
+        } slotGuard{key};
+        try {
+            StateFetchResult r = FetchCloudStateLive(accountId, appId);
+            RefreshServeCache(accountId, appId, r);   // warm cache regardless of timeout
+            promise->set_value(std::move(r));         // ignored if caller abandoned
+        } catch (...) {
+            try { promise->set_value({ StateFetchStatus::FetchFailed, {} }); } catch (...) {}
+        }
+    }).detach();
+
+    if (future.wait_for(std::chrono::milliseconds(deadlineMs)) ==
+        std::future_status::ready) {
+        return future.get();
+    }
+    // Timed out: open the circuit so the rest of this changelist burst serves local
+    // immediately instead of each waiting another full deadline.
+    g_providerSlowUntilMs.store(NowMs() + kCircuitCooldownMs, std::memory_order_relaxed);
+    LOG("[AppState] FetchCloudStateBounded app %u: provider exceeded %dms -- serving "
+        "local, circuit open %dms, background fetch continues",
+        appId, deadlineMs, kCircuitCooldownMs);
+    return { StateFetchStatus::Timeout, {} };
 }
 
 // Serve-path accessor: reuse a recent snapshot when provably safe, else live.

@@ -7,6 +7,9 @@
 #include <chrono>
 #include <random>
 #include <fstream>
+#include <atomic>
+#include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #include <bcrypt.h>
@@ -916,19 +919,79 @@ bool GoogleDriveProvider::Upload(const std::string& path,
 }
 
 bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
-    // Google Drive batch API does not support file upload (multipart/related)
-    // requests -- only metadata-only operations. Use individual Upload() calls.
-    std::vector<std::string> uploadedPaths;
-    for (const auto& item : items) {
-        if (!Upload(item.path, item.data.data(), item.data.size())) {
-            LOG("[GDriveProvider] UploadBatch: failed to upload '%s', rolling back %zu prior upload(s)",
-                item.path.c_str(), uploadedPaths.size());
-            for (const auto& path : uploadedPaths) Remove(path);
-            return false;
+    // Drive's batch API doesn't cover uploads, so each blob is an individual Upload().
+    // Native uploads in parallel (convars @nClientCloudMaxNumParallelUploads=10,
+    // @nClientCloudMaxMBParallelUploads=64MB); mirror that. Concurrent uploads are
+    // safe: per-call request handles, distinct CAS paths, m_folderMtx-guarded folders.
+    if (items.empty()) return true;
+
+    static constexpr size_t kMaxParallel = 10;                 // native @nClientCloudMaxNumParallelUploads
+    static constexpr uint64_t kMaxBytesInFlight = 64ull << 20; // native @nClientCloudMaxMBParallelUploads (64 MB)
+
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::mutex doneMtx;
+    std::vector<std::string> uploadedPaths;   // for rollback, guarded by doneMtx
+
+    // Worker: claim items by index until exhausted or a failure is seen.
+    auto worker = [&]() {
+        for (;;) {
+            if (failed.load(std::memory_order_relaxed)) return;
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= items.size()) return;
+            const UploadItem& item = items[i];
+            // An exception escaping a std::thread entry calls std::terminate, so catch
+            // here (bad_alloc is likelier with up to 10 buffers in flight).
+            bool ok = false;
+            try {
+                ok = Upload(item.path, item.data.data(), item.data.size());
+            } catch (const std::exception& e) {
+                LOG("[GDriveProvider] UploadBatch: worker threw on '%s': %s",
+                    item.path.c_str(), e.what());
+            } catch (...) {
+                LOG("[GDriveProvider] UploadBatch: worker threw (unknown) on '%s'",
+                    item.path.c_str());
+            }
+            if (!ok) {
+                failed.store(true, std::memory_order_relaxed);
+                LOG("[GDriveProvider] UploadBatch: failed to upload '%s'", item.path.c_str());
+                return;
+            }
+            std::lock_guard<std::mutex> lk(doneMtx);
+            uploadedPaths.push_back(item.path);
         }
-        uploadedPaths.push_back(item.path);
+    };
+
+    // Worker count = min(kMaxParallel, items), capped further by avg size so total
+    // bytes in flight stay roughly under kMaxBytesInFlight.
+    uint64_t totalBytes = 0;
+    for (const auto& it : items) totalBytes += it.data.size();
+    size_t byCount = (std::min)(kMaxParallel, items.size());
+    size_t byBytes = byCount;
+    if (totalBytes > kMaxBytesInFlight && items.size() > 1) {
+        // Keep concurrent bytes roughly under the cap (avg item size based).
+        uint64_t avg = totalBytes / items.size();
+        if (avg > 0) {
+            size_t cap = (size_t)(kMaxBytesInFlight / avg);
+            byBytes = (cap < 1) ? 1 : cap;
+        }
     }
-    LOG("[GDriveProvider] UploadBatch: uploaded %zu files individually", items.size());
+    size_t workerCount = (std::min)(byCount, byBytes);
+    if (workerCount < 1) workerCount = 1;
+
+    std::vector<std::thread> pool;
+    pool.reserve(workerCount);
+    for (size_t t = 0; t < workerCount; ++t) pool.emplace_back(worker);
+    for (auto& th : pool) th.join();
+
+    if (failed.load(std::memory_order_relaxed)) {
+        LOG("[GDriveProvider] UploadBatch: a parallel upload failed; rolling back %zu uploaded blob(s)",
+            uploadedPaths.size());
+        for (const auto& path : uploadedPaths) Remove(path);
+        return false;
+    }
+    LOG("[GDriveProvider] UploadBatch: uploaded %zu file(s) with %zu parallel worker(s)",
+        items.size(), workerCount);
     return true;
 }
 

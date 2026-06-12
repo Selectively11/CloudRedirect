@@ -108,6 +108,10 @@ std::string CloudMetadataPath(uint32_t accountId, uint32_t appId, const std::str
 bool DownloadCloudMetadataWithLegacyFallback(uint32_t accountId, uint32_t appId,
     const char* canonicalName, const char* legacyName,
     std::vector<uint8_t>& outData, bool* outUsedLegacy = nullptr);
+// Download the first-format per-app playtime blob (account-scope
+// <acct>/0/blobs/Playtime/<appId>.bin). False if absent/unavailable. Migration-only.
+bool DownloadLegacyPlaytimeBlob(uint32_t accountId, uint32_t appId,
+    std::vector<uint8_t>& outData);
 bool UploadCloudMetadataText(uint32_t accountId, uint32_t appId,
     const char* name, const std::string& content);
 // Queued (thread-safe) variant: serializes on the cloud work queue.

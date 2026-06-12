@@ -579,6 +579,15 @@ bool DownloadCloudMetadataWithLegacyFallback(uint32_t accountId, uint32_t appId,
     return true;
 }
 
+bool DownloadLegacyPlaytimeBlob(uint32_t accountId, uint32_t appId,
+                                std::vector<uint8_t>& outData) {
+    outData.clear();
+    if (!g_provider || !g_provider->IsAuthenticated()) return false;
+    std::string path = CloudBlobPath(accountId, CloudIntercept::kAccountScopeAppId,
+                                     CloudIntercept::AccountPlaytimeFilename(appId));
+    return g_provider->Download(path, outData) && !outData.empty();
+}
+
 static void EnqueueCloudDelete(const std::string& cloudPath) {
     CloudWorkQueue::WorkItem wi;
     wi.type = CloudWorkQueue::WorkItem::Delete;
@@ -1502,8 +1511,29 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
             if (!shaHex.empty()) {
                 auto cachedSha = ShaToHex(FileUtil::SHA1(cached.data(), cached.size()));
                 if (cachedSha == shaHex) {
-                    LOG("[CloudStorage] RetrieveBlob: cloud unavailable, cache SHA valid: %s (%zu bytes)",
-                        filename.c_str(), cached.size());
+                    // The download failed but our cache matches the manifest SHA.
+                    // Native, on a download 404 with a local copy present, flags the
+                    // file to UPLOAD (heal). Mirror that only when the blob is
+                    // genuinely absent (confirmed Missing) -- not on a transient
+                    // provider error, where the blob still exists and re-uploading
+                    // would be wasteful. CheckExists is one extra round-trip, but we
+                    // are already on the degraded path (every Download above failed).
+                    std::string casPath =
+                        CloudBlobPathByNameAndSHA(accountId, appId, filename, shaHex);
+                    if (g_provider->CheckExists(casPath) ==
+                            ICloudProvider::ExistsStatus::Missing) {
+                        LOG("[CloudStorage] RetrieveBlob: cloud blob missing, healing from cache "
+                            "(re-upload) and serving: %s (%zu bytes)", filename.c_str(), cached.size());
+                        CloudWorkQueue::WorkItem heal;
+                        heal.type = CloudWorkQueue::WorkItem::Upload;
+                        heal.cloudPath = std::move(casPath);
+                        heal.data = cached;
+                        heal.bestEffort = true;
+                        CloudWorkQueue::EnqueueWork(std::move(heal));
+                    } else {
+                        LOG("[CloudStorage] RetrieveBlob: cloud unavailable (transient), serving cache: "
+                            "%s (%zu bytes)", filename.c_str(), cached.size());
+                    }
                     if (found) *found = true;
                     return cached;
                 }

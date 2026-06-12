@@ -45,7 +45,7 @@ modules:
     no-debuginfo: true
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
-      - -DCR_RELEASE_VERSION=2.2.0-TEST1
+      - -DCR_RELEASE_VERSION=2.2.0-TEST2
     sources:
       - type: dir
         path: ../ui-linux

@@ -20,7 +20,17 @@ using CloudPullAllFn =
     std::function<bool(std::unordered_map<uint32_t, std::string>& out)>;
 using CloudPushAllFn =
     std::function<void(const std::unordered_map<uint32_t, std::string>& all)>;
-void SetCloudProvider(CloudPullAllFn pullAll, CloudPushAllFn pushAll);
+// Read one app's LEGACY per-app stats blob (<accountId>/<appId>/stats.json) from
+// the older layout that predates the consolidated account blob. Returns the JSON,
+// or empty if absent. Used once to migrate stranded playtime into the account blob.
+using CloudPullLegacyFn = std::function<std::string(uint32_t appId)>;
+// Read one app's first-format playtime blob (account-scope Playtime/<appId>.bin,
+// {"LastPlayed","Playtime","Playtime2wks"}). Returns the JSON or empty. Lets the
+// playtime migration recover from the cloud when the .bin isn't in the local cache.
+using CloudPullLegacyPlaytimeFn = std::function<std::string(uint32_t appId)>;
+void SetCloudProvider(CloudPullAllFn pullAll, CloudPushAllFn pushAll,
+                      CloudPullLegacyFn pullLegacy = nullptr,
+                      CloudPullLegacyPlaytimeFn pullLegacyPlaytime = nullptr);
 
 struct StatEntry {
     uint32_t statId;
@@ -135,9 +145,6 @@ uint32_t SetAchievement(uint32_t appId, uint32_t statId, uint32_t bit, uint32_t 
 // Store/retrieve the schema blob for an app.
 void SetSchema(uint32_t appId, const uint8_t* data, size_t len);
 const std::vector<uint8_t>& GetSchema(uint32_t appId);
-
-// Compute CRC32 over current stat values for an app.
-uint32_t ComputeCrc(uint32_t appId);
 
 // Re-read Steam's native blob for an app and merge any newly unlocked
 // achievements / updated stat values into the store, then push to the cloud if

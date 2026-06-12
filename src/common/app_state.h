@@ -60,6 +60,8 @@ enum class StateFetchStatus {
     NotFound,       // State file does not exist on provider (new app or pre-migration)
     FetchFailed,
     ParseFailed,
+    Timeout,        // Bounded fetch exceeded its deadline (provider slow); caller should
+                    // serve local/last-known state and let the background fetch finish.
 };
 
 struct StateFetchResult {
@@ -75,6 +77,13 @@ void AppState_Shutdown();
 // that precedes a PublishCloudState) must use this, not the cached serve
 // accessor, to avoid clobbering a concurrent cross-machine update with a stale base.
 StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId);
+
+// Time-bounded live fetch for the serve path (runs on Steam's main-loop thread,
+// where a slow download stalls BMainLoop). Runs the fetch on a worker, waits up to
+// deadlineMs, and on timeout returns Timeout -- the still-running fetch warms the
+// serve cache for next time, matching native's non-blocking yielding job.
+StateFetchResult FetchCloudStateBounded(uint32_t accountId, uint32_t appId,
+                                        int deadlineMs);
 
 // Cache-aware accessor for the serve path only. Returns a recently-fetched state
 // without re-hitting the provider, only when provably safe:
