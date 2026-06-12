@@ -384,16 +384,16 @@ bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
 
 #else // !_WIN32 -- Linux 32-bit steamclient.so
 
-// Linux steamclient.so -- runtime signature scanning; falls back to hardcoded RVAs (May 2026 build)
+// Linux steamclient.so -- runtime signature scanning; falls back to hardcoded RVAs (build 1781043450)
 
-// Fallback RVAs (June 2026 steamclient.so, IDA image base 0x0).
-static constexpr uintptr_t FALLBACK_RVA_GLOBAL_ENGINE   = 0x2ECD9C0;
-static constexpr uintptr_t FALLBACK_RVA_READ_CONFIG_U64 = 0xF76960;
-static constexpr uintptr_t FALLBACK_RVA_GET_SECTION     = 0xF75BD0;
-static constexpr uintptr_t FALLBACK_RVA_KV_FIND_KEY     = 0x2513320;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_UINT64   = 0x250E070;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_INT32    = 0x250E040;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x250DEE0;
+// Fallback RVAs (steamclient.so build 1781043450, IDA image base 0x0).
+static constexpr uintptr_t FALLBACK_RVA_GLOBAL_ENGINE   = 0x2ED1BC0;
+static constexpr uintptr_t FALLBACK_RVA_READ_CONFIG_U64 = 0xF77960;
+static constexpr uintptr_t FALLBACK_RVA_GET_SECTION     = 0xF74EC0;
+static constexpr uintptr_t FALLBACK_RVA_KV_FIND_KEY     = 0x2517320;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_UINT64   = 0x2512070;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_INT32    = 0x2512040;
+static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x2511EE0;
 
 // Offset from CSteamEngine* to CAppInfoCache instance.
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 2952; // 0xB88
@@ -436,6 +436,7 @@ struct FindSteamCtx {
     uintptr_t base = 0;
     uintptr_t textStart = 0;
     uintptr_t textEnd = 0;
+    uintptr_t moduleEnd = 0; // highest mapped VA across all PT_LOAD segments
 };
 
 static int FindSteamPhdrCb(struct dl_phdr_info* info, size_t, void* data) {
@@ -448,16 +449,17 @@ static int FindSteamPhdrCb(struct dl_phdr_info* info, size_t, void* data) {
     auto* ctx = static_cast<FindSteamCtx*>(data);
     ctx->base = info->dlpi_addr;
 
-    // Find the largest PF_X (executable) segment as the .text region.
+    // Largest PF_X segment is .text; track the highest mapped VA for bounds checks.
     for (int i = 0; i < info->dlpi_phnum; ++i) {
         const auto& ph = info->dlpi_phdr[i];
-        if (ph.p_type == PT_LOAD && (ph.p_flags & PF_X)) {
-            uintptr_t segStart = info->dlpi_addr + ph.p_vaddr;
-            uintptr_t segEnd = segStart + ph.p_memsz;
-            if ((segEnd - segStart) > (ctx->textEnd - ctx->textStart)) {
-                ctx->textStart = segStart;
-                ctx->textEnd = segEnd;
-            }
+        if (ph.p_type != PT_LOAD) continue;
+        uintptr_t segStart = info->dlpi_addr + ph.p_vaddr;
+        uintptr_t segEnd = segStart + ph.p_memsz;
+        if (segEnd > ctx->moduleEnd) ctx->moduleEnd = segEnd;
+        if ((ph.p_flags & PF_X) &&
+            (segEnd - segStart) > (ctx->textEnd - ctx->textStart)) {
+            ctx->textStart = segStart;
+            ctx->textEnd = segEnd;
         }
     }
     return 1;
@@ -493,46 +495,66 @@ static uintptr_t DecodeRelCall(uintptr_t addr) {
     return addr + 5 + rel;
 }
 
-// Search for "add reg, 0xB88" (81 C0-C7 88 0B 00 00) in a range, then
-// back-trace to find the GOT-relative lea that loads the global engine ptr.
-// Returns the absolute address of the global (the dereferenced GOT entry).
+static bool IsLeaEbxDisp32(const uint8_t* p, uint8_t& outReg) {
+    if (p[0] != 0x8D || (p[1] & 0xC7) != 0x83) return false;
+    outReg = (p[1] >> 3) & 7;
+    return true;
+}
+
+// Resolve &g_engine at runtime by decoding the GOTOFF address-of idiom:
+//   lea reg2,[ebx+leaDisp]; mov reg,[reg2]; add reg,0xB88
+// where ebx is the GOT base from this function's "add ebx,imm32" prologue.
+// Build-independent, unlike a hardcoded RVA.
 static uintptr_t FindGlobalEnginePtr(uintptr_t textStart, uintptr_t textEnd,
-                                     uintptr_t soBase) {
-    // Pattern: 81 Cx 88 0B 00 00 where x is C0-C7 (add eax..edi, 0xB88)
+                                     uintptr_t soBase, uintptr_t soEnd) {
     const uint8_t* mem = reinterpret_cast<const uint8_t*>(textStart);
     size_t len = textEnd - textStart;
 
-    for (size_t i = 0; i + 6 <= len; ++i) {
+    for (size_t i = 8; i + 6 <= len; ++i) {
+        // add reg, 0xB88
         if (mem[i] != 0x81) continue;
-        uint8_t modrm = mem[i + 1];
-        if (modrm < 0xC0 || modrm > 0xC7) continue;
+        if (mem[i + 1] < 0xC0 || mem[i + 1] > 0xC7) continue;
         if (mem[i + 2] != 0x88 || mem[i + 3] != 0x0B ||
             mem[i + 4] != 0x00 || mem[i + 5] != 0x00) continue;
 
-        // Found add reg, 0xB88. Back-trace: expect "mov reg, [eax]" (2 bytes)
-        // and before that "lea eax, [ebx + offset]" (6 bytes: 8D 83 xx xx xx xx).
-        // The lea loads the address of the global from GOT-relative addressing.
         uintptr_t addAddr = textStart + i;
 
-        // Check the 2 bytes before: should be "mov reg, [eax]" (8B xx)
-        if (i < 2) continue;
+        // mov reg, [reg2]
         if (mem[i - 2] != 0x8B) continue;
-        // The modrm byte for "mov reg, [eax]" is (reg<<3)|0x00 with mod=00,rm=000
         uint8_t movModrm = mem[i - 1];
-        if ((movModrm & 0xC7) != 0x00 && (movModrm & 0xC7) != 0x28) continue;
-        // Could be mov ebp,[eax] (8B 28) or mov eax,[eax] (8B 00) etc.
+        if ((movModrm >> 6) != 0) continue;
+        uint8_t movBase = movModrm & 7;
+        if (movBase == 4 || movBase == 5) continue;
 
-        // Check 6 bytes before that: "lea eax, [ebx + disp32]" = 8D 83 xx xx xx xx
-        if (i < 8) continue;
-        if (mem[i - 8] != 0x8D || mem[i - 7] != 0x83) continue;
+        // lea reg2, [ebx + leaDisp], feeding the mov above
+        uint8_t leaReg = 0;
+        if (!IsLeaEbxDisp32(&mem[i - 8], leaReg)) continue;
+        if (leaReg != movBase) continue;
 
-        // Found lea eax, [ebx + disp32] -- GOT-relative global address.
+        int32_t leaDisp;
+        memcpy(&leaDisp, &mem[i - 8 + 2], 4);
 
-        LOG("[KvInjector] SigScan: found 'add reg, 0xB88' at 0x%lx (base+0x%lx)",
-            (unsigned long)addAddr, (unsigned long)(addAddr - soBase));
+        // get_pc_thunk.bx returns the address of the "add ebx,imm32" itself, so
+        // the runtime GOT base is addr_of_add + imm32 (not the add's end).
+        uintptr_t gotBase = 0;
+        size_t maxBack = (i < 512) ? i : 512;
+        for (size_t back = 9; back <= maxBack; ++back) {
+            size_t k = i - back;
+            if (mem[k] == 0x81 && mem[k + 1] == 0xC3) {
+                int32_t gotDisp;
+                memcpy(&gotDisp, &mem[k + 2], 4);
+                gotBase = (textStart + k) + static_cast<uintptr_t>(static_cast<intptr_t>(gotDisp));
+                break;
+            }
+        }
+        if (!gotBase) continue;
 
-        // GOT-relative decode is fragile without section headers; use fallback RVA.
-        return soBase + FALLBACK_RVA_GLOBAL_ENGINE;
+        uintptr_t engineGlobal = gotBase + static_cast<uintptr_t>(static_cast<intptr_t>(leaDisp));
+        if (engineGlobal <= soBase || engineGlobal >= soEnd) continue;
+
+        LOG("[KvInjector] SigScan: engine global &g_engine = 0x%lx (base+0x%lx)",
+            (unsigned long)engineGlobal, (unsigned long)(engineGlobal - soBase));
+        return engineGlobal;
     }
     return 0;
 }
@@ -679,7 +701,8 @@ bool Init() {
                 (unsigned long)kvSetI32, (unsigned long)(kvSetI32 - base));
         }
 
-        uintptr_t globalEng = FindGlobalEnginePtr(ctx.textStart, ctx.textEnd, base);
+        uintptr_t globalEng = FindGlobalEnginePtr(ctx.textStart, ctx.textEnd, base,
+                                                  ctx.moduleEnd);
         if (globalEng) {
             LOG("[KvInjector] SigScan: globalEnginePtr at 0x%lx (base+0x%lx)",
                 (unsigned long)globalEng, (unsigned long)(globalEng - base));
@@ -739,8 +762,10 @@ bool Init() {
             g_r.kvSetInt32      = reinterpret_cast<KvSetInt32Fn>(kvSetI32 ? kvSetI32 : (base + FALLBACK_RVA_KV_SET_INT32));
             g_r.kvSetString     = reinterpret_cast<KvSetStringFn>(kvSetStr ? kvSetStr : (base + FALLBACK_RVA_KV_SET_STRING));
 
-            // If critical functions couldn't be sig-scanned, don't trust fallback RVAs
-            if (!globalEng || !getSect || !kvFind) {
+            // Don't trust fallback RVAs if criticals couldn't be sig-scanned.
+            // readConfigU64 is included: a stale fallback there crashes in
+            // steamclient's BST walk on the first GetChangelist RPC.
+            if (!globalEng || !getSect || !kvFind || !readCfg) {
                 LOG("[KvInjector] Critical functions unresolved -- KV injector DISABLED (prevents crash on stale RVAs)");
                 return;
             }

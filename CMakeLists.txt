@@ -15,28 +15,33 @@ if(NOT CR_RELEASE_VERSION)
 endif()
 
 # ── Generate version string with git SHA ────────────────────────────────
-execute_process(
-    COMMAND git rev-parse --short=7 HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_SHA
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-    RESULT_VARIABLE GIT_RESULT
-)
-if(NOT GIT_RESULT EQUAL 0)
-    set(GIT_SHA "unknown")
-endif()
+# Release builds may pass -DCR_GIT_SHA to pin the build id (e.g. when the build
+# runs in a sandbox whose worktree shows spurious eol-only diffs).
+if(NOT DEFINED CR_GIT_SHA)
+    execute_process(
+        COMMAND git rev-parse --short=7 HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE GIT_RESULT
+    )
+    if(NOT GIT_RESULT EQUAL 0)
+        set(GIT_SHA "unknown")
+    endif()
 
-# Check for dirty working tree
-execute_process(
-    COMMAND git status --porcelain
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_STATUS
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-if(GIT_STATUS)
-    set(GIT_SHA "${GIT_SHA}-dirty")
+    execute_process(
+        COMMAND git status --porcelain
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(GIT_STATUS)
+        set(GIT_SHA "${GIT_SHA}-dirty")
+    endif()
+else()
+    set(GIT_SHA "${CR_GIT_SHA}")
 endif()
 
 set(CR_SO_VERSION "${CR_RELEASE_VERSION}+${GIT_SHA}")
@@ -231,12 +236,14 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
     target_include_directories(remotecache_repair_tests PRIVATE src/common)
     add_test(NAME remotecache_repair_tests COMMAND remotecache_repair_tests)
 
-    add_executable(bkv_stats_tests
-        tests/bkv_stats_tests.cpp
-        src/common/bkv_stats.cpp
-    )
-    target_include_directories(bkv_stats_tests PRIVATE src/common)
-    add_test(NAME bkv_stats_tests COMMAND bkv_stats_tests)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/tests/bkv_stats_tests.cpp)
+        add_executable(bkv_stats_tests
+            tests/bkv_stats_tests.cpp
+            src/common/bkv_stats.cpp
+        )
+        target_include_directories(bkv_stats_tests PRIVATE src/common)
+        add_test(NAME bkv_stats_tests COMMAND bkv_stats_tests)
+    endif()
 
     add_executable(rpc_handlers_tests
         tests/rpc_handlers_tests.cpp
