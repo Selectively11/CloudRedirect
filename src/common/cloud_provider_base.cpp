@@ -100,6 +100,16 @@ bool CloudProviderBase::TokenValid() const {
     return !m_tok.access.empty() && (int64_t)time(nullptr) < m_tok.expiresAt - 60;
 }
 
+std::string CloudProviderBase::ParseRefreshAccessToken(const std::string& body) const {
+    return Json::Parse(body)["access_token"].str();
+}
+std::string CloudProviderBase::ParseRefreshRefreshToken(const std::string& body) const {
+    return Json::Parse(body)["refresh_token"].str();
+}
+int64_t CloudProviderBase::ParseRefreshExpiresIn(const std::string& body) const {
+    return Json::Parse(body)["expires_in"].integer();
+}
+
 bool CloudProviderBase::RefreshAccessToken() {
     std::string refreshTok;
     {
@@ -108,8 +118,10 @@ bool CloudProviderBase::RefreshAccessToken() {
     }
 
     std::string body = BuildRefreshBody(refreshTok);
-    auto r = Request("POST", TokenEndpointHost(), TokenEndpointPath(), body,
-                     {"Content-Type: application/x-www-form-urlencoded"});
+    std::vector<std::string> hdrs;
+    hdrs.push_back(std::string("Content-Type: ") + RefreshContentType());
+    for (const auto& h : ExtraRefreshHeaders()) hdrs.push_back(h);
+    auto r = Request("POST", TokenEndpointHost(), TokenEndpointPath(), body, hdrs);
     if (r.status != 200) {
         LOG("%s Token refresh failed: HTTP %d", LogTag(), r.status);
         {
@@ -119,10 +131,9 @@ bool CloudProviderBase::RefreshAccessToken() {
         if (m_authFailureCb) m_authFailureCb(AuthFailureName());
         return false;
     }
-    auto j = Json::Parse(r.body);
-    std::string newAccess = j["access_token"].str();
+    std::string newAccess = ParseRefreshAccessToken(r.body);
     if (newAccess.empty()) {
-        LOG("%s Token refresh response missing access_token", LogTag());
+        LOG("%s Token refresh response missing access token", LogTag());
         {
             std::lock_guard<std::mutex> lock(m_mtx);
             m_lastRefreshFailTime = (int64_t)time(nullptr);
@@ -130,8 +141,8 @@ bool CloudProviderBase::RefreshAccessToken() {
         if (m_authFailureCb) m_authFailureCb(AuthFailureName());
         return false;
     }
-    int64_t expiresIn = j["expires_in"].integer();
-    auto newRefresh = j["refresh_token"].str();
+    int64_t expiresIn = ParseRefreshExpiresIn(r.body);
+    auto newRefresh = ParseRefreshRefreshToken(r.body);
 
     std::lock_guard<std::mutex> lock(m_mtx);
     m_tok.access = std::move(newAccess);
@@ -234,6 +245,7 @@ HttpResp CloudProviderBase::ApiRequest(const char* method, const std::string& pa
         std::vector<std::string> hdrs = {"Authorization: Bearer " + token};
         if (!contentType.empty())
             hdrs.push_back("Content-Type: " + contentType);
+        for (const auto& h : ExtraApiHeaders()) hdrs.push_back(h);
         lastResp = Request(method, ApiHost(), path, body, hdrs);
         if (!IsRateLimited(lastResp.status, lastResp.body)) return lastResp;
         LOG("%s Rate limited (%s attempt %d, HTTP %d), retrying",

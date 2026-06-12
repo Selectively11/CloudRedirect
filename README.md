@@ -39,6 +39,7 @@ Same rough idea on Linux, but involving a flatpak application and a library that
 
 - **Google Drive**
 - **OneDrive**
+- **Proton Drive** (end-to-end encrypted; uses Proton SRP auth, not OAuth)
 - **Local folder / mapped drive** -- by request of literally one user.
 
 With more to come over time. 

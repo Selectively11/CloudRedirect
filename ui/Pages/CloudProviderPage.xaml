@@ -29,6 +29,7 @@
                       SelectionChanged="ProviderCombo_SelectionChanged">
                 <ComboBoxItem Content="{res:Loc CloudProvider_GoogleDrive}" Tag="gdrive" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_OneDrive}" Tag="onedrive" />
+                <ComboBoxItem Content="{res:Loc CloudProvider_ProtonDrive}" Tag="protondrive" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_FolderMappedDrive}" Tag="folder" />
                 <ComboBoxItem Content="{res:Loc CloudProvider_LocalOnly}" Tag="local" />
             </ComboBox>
