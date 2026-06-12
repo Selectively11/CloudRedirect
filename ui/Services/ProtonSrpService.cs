@@ -342,44 +342,50 @@ internal static class ProtonSrpService
     private static (byte[] clientEph, byte[] proof, byte[] key) SrpCompute(
         byte[] modulus, byte[] serverEph, byte[] salt, byte[] passExpanded)
     {
-        var N = new BigInteger(modulus, isUnsigned: true, isBigEndian: true);
+        // Proton SRP uses little-endian byte representation for all big integers.
+        // modulus and serverEph arrive as LE bytes from the API.
+        int modLen = modulus.Length;
+
+        var N = new BigInteger(modulus, isUnsigned: true, isBigEndian: false);   // LE
         var g = new BigInteger(2);
 
         var a = GenerateSrpSecret(N);
         var A = BigInteger.ModPow(g, a, N);
 
-        byte[] Abytes = BigIntToBE(A, modulus.Length);
-        byte[] Bbytes = BigIntToBE(new BigInteger(serverEph, isUnsigned: true, isBigEndian: true), modulus.Length);
+        // Serialize A as LE, padded to modLen
+        byte[] A_LE = BigIntToLE(A, modLen);
 
-        byte[] uHash = SHA512.HashData([.. Abytes, .. Bbytes]);
-        var u = new BigInteger(uHash, isUnsigned: true, isBigEndian: true);
+        // B_LE: serverEph is already LE, pad to modLen
+        byte[] B_LE = serverEph.Length >= modLen
+            ? serverEph[..modLen]
+            : [.. serverEph, .. new byte[modLen - serverEph.Length]];
+        var B = new BigInteger(B_LE, isUnsigned: true, isBigEndian: false);
 
+        // u = SHA-512(A_LE || B_LE), read as LE
+        byte[] uHash = SHA512.HashData([.. A_LE, .. B_LE]);
+        var u = new BigInteger(uHash, isUnsigned: true, isBigEndian: false);
+
+        // x = SHA-512(salt || passExpanded), read as LE
         byte[] xHash = SHA512.HashData([.. salt, .. passExpanded]);
-        var x = new BigInteger(xHash, isUnsigned: true, isBigEndian: true);
+        var x = new BigInteger(xHash, isUnsigned: true, isBigEndian: false);
 
-        var B  = new BigInteger(Bbytes, isUnsigned: true, isBigEndian: true);
         var gx = BigInteger.ModPow(g, x, N);
         var S  = BigInteger.ModPow(((B - gx) % N + N) % N, a + u * x, N);
 
-        byte[] Sbytes = BigIntToBE(S, modulus.Length);
-        byte[] K = SHA512.HashData(Sbytes);
+        // S as LE
+        byte[] S_LE = BigIntToLE(S, modLen);
+        byte[] K    = SHA512.HashData(S_LE);
 
+        // Proof = SHA-512(H(N_LE) XOR H(g) || zeros64 || salt || A_LE || B_LE || K)
+        // modulus IS the LE representation of N
         byte[] hN = SHA512.HashData(modulus);
-        byte[] hG = SHA512.HashData(BigIntToBE(g, 1));
-        byte[] hXorNG = new byte[hN.Length];
-        for (int i = 0; i < hN.Length; i++) hXorNG[i] = (byte)(hN[i] ^ hG[i]);
+        byte[] hG = SHA512.HashData(new byte[] { 2 });
+        byte[] hXor = new byte[64];
+        for (int i = 0; i < 64; i++) hXor[i] = (byte)(hN[i] ^ hG[i]);
 
-        byte[] proof = SHA512.HashData(
-        [
-            .. hXorNG,
-            .. new byte[64],   // username hash placeholder (Proton omits it)
-            .. salt,
-            .. Abytes,
-            .. Bbytes,
-            .. K
-        ]);
+        byte[] proof = SHA512.HashData([.. hXor, .. new byte[64], .. salt, .. A_LE, .. B_LE, .. K]);
 
-        return (Abytes, proof, K);
+        return (A_LE, proof, K);
     }
 
     private static BigInteger GenerateSrpSecret(BigInteger N)
@@ -392,14 +398,13 @@ internal static class ProtonSrpService
         }
     }
 
-    private static byte[] BigIntToBE(BigInteger n, int minLength)
+    // Serialize BigInteger as little-endian bytes padded/trimmed to exactly `len` bytes.
+    private static byte[] BigIntToLE(BigInteger n, int len)
     {
         byte[] le = n.ToByteArray(isUnsigned: true, isBigEndian: false);
-        Array.Reverse(le);
-        if (le.Length >= minLength) return le;
-        byte[] padded = new byte[minLength];
-        Array.Copy(le, 0, padded, minLength - le.Length, le.Length);
-        return padded;
+        if (le.Length == len) return le;
+        if (le.Length > len)  return le[..len];
+        return [.. le, .. new byte[len - le.Length]];
     }
 
     // ── Argon2id ───────────────────────────────────────────────────────────────
@@ -541,15 +546,17 @@ internal static class ProtonSrpService
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     // The Modulus field in /auth/v4/info is a PGP-signed message; extract the hex body.
+    // The hex may be line-wrapped — strip all whitespace.
     private static string ParseSrpModulus(string pgpSigned)
     {
         int blank = pgpSigned.IndexOf("\n\n", StringComparison.Ordinal);
         if (blank < 0) return pgpSigned;
         int bodyStart = blank + 2;
         int sigStart  = pgpSigned.IndexOf("\n-----BEGIN PGP", bodyStart, StringComparison.Ordinal);
-        return (sigStart >= 0
+        string body = (sigStart >= 0
             ? pgpSigned.Substring(bodyStart, sigStart - bodyStart)
             : pgpSigned.Substring(bodyStart)).Trim();
+        return body.Replace("\n", "").Replace("\r", "").Replace(" ", "");
     }
 
     private static string ToB64(byte[] b)  => Convert.ToBase64String(b);
