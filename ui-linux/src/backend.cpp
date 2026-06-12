@@ -291,7 +291,7 @@ void Backend::loadConfig()
         m_notificationsEnabled ? "true" : "false");
 
     m_providerAuthenticated = false;
-    if (m_providerName == "gdrive" || m_providerName == "onedrive") {
+    if (m_providerName == "gdrive" || m_providerName == "onedrive" || m_providerName == "proton") {
         QString tokenPath = defaultTokenPath(m_providerName);
         if (QFile::exists(tokenPath)) {
             m_providerAuthenticated = true;

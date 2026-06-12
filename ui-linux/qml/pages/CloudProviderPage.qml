@@ -10,18 +10,21 @@ Page {
         { value: "local", name: "Local Storage", desc: "Saves stored in Steam directory only. No cloud sync." },
         { value: "folder", name: "Custom Folder", desc: "Sync to a network share or other local path." },
         { value: "gdrive", name: "Google Drive", desc: "Sync saves to your Google Drive account." },
-        { value: "onedrive", name: "OneDrive", desc: "Sync saves to your Microsoft OneDrive account." }
+        { value: "onedrive", name: "OneDrive", desc: "Sync saves to your Microsoft OneDrive account." },
+        { value: "proton", name: "Proton Drive", desc: "Sync saves to your Proton Drive account (end-to-end encrypted)." }
     ]
 
     property bool comboReady: false
-    
+
     // Track auth state locally so bindings update when settingsChanged fires
     property bool gdriveAuth: backend ? backend.isProviderAuthenticated("gdrive") : false
     property bool onedriveAuth: backend ? backend.isProviderAuthenticated("onedrive") : false
-    
+    property bool protonAuth: backend ? backend.isProviderAuthenticated("proton") : false
+
     function refreshAuthState() {
         gdriveAuth = backend ? backend.isProviderAuthenticated("gdrive") : false
         onedriveAuth = backend ? backend.isProviderAuthenticated("onedrive") : false
+        protonAuth = backend ? backend.isProviderAuthenticated("proton") : false
     }
 
     function currentProviderIndex() {
@@ -37,6 +40,52 @@ Page {
         var idx = providerCombo.currentIndex
         if (idx >= 0 && idx < providers.length) return providers[idx]
         return providers[0]  // fallback to local
+    }
+
+    Dialog {
+        id: protonLoginDialog
+        title: "Sign in to Proton Drive"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 380
+        standardButtons: Dialog.Ok | Dialog.Cancel
+
+        onAccepted: {
+            if (backend && oauth) {
+                let tokenPath = backend.defaultTokenPath("proton")
+                oauth.startProtonAuth(protonEmailField.text, protonPasswordField.text, tokenPath)
+            }
+            protonPasswordField.text = ""
+        }
+        onRejected: {
+            protonEmailField.text = ""
+            protonPasswordField.text = ""
+        }
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            Label {
+                text: "Email"
+            }
+            TextField {
+                id: protonEmailField
+                Layout.fillWidth: true
+                placeholderText: "user@proton.me"
+                inputMethodHints: Qt.ImhEmailCharactersOnly
+            }
+
+            Label {
+                text: "Password"
+            }
+            TextField {
+                id: protonPasswordField
+                Layout.fillWidth: true
+                placeholderText: "Password"
+                echoMode: TextInput.Password
+            }
+        }
     }
 
     FolderDialog {
@@ -168,6 +217,7 @@ Page {
                             }
                             if (provider.value === "gdrive" && gdriveAuth) return "Authenticated"
                             if (provider.value === "onedrive" && onedriveAuth) return "Authenticated"
+                            if (provider.value === "proton" && protonAuth) return "Authenticated"
                             return "Not authenticated"
                         }
                         opacity: 0.7
@@ -244,6 +294,14 @@ Page {
                         oauth.startAuth("onedrive", tokenPath)
                     }
                 }
+            }
+
+            Button {
+                visible: currentProvider().value === "proton"
+                Layout.leftMargin: 20
+                text: protonAuth ? "Re-authenticate" : "Sign in with Proton"
+                highlighted: !protonAuth
+                onClicked: protonLoginDialog.open()
             }
 
             Label {

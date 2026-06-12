@@ -1,4 +1,5 @@
 #include "oauthservice.h"
+#include "proton_auth.h"
 #include <QTcpSocket>
 #include <QDesktopServices>
 #include <QUrl>
@@ -467,6 +468,22 @@ void OAuthService::exchangeCodeForTokens(const QString &code, int retryCount)
         emit authSucceeded(m_provider);
         cancel(); // stop listener
     });
+}
+
+void OAuthService::startProtonAuth(const QString &email, const QString &password,
+                                    const QString &tokenPath)
+{
+    auto *svc = new ProtonAuthService(this);
+    connect(svc, &ProtonAuthService::statusMessage, this, &OAuthService::statusMessage);
+    connect(svc, &ProtonAuthService::succeeded, this, [this, svc]() {
+        emit authSucceeded("proton");
+        svc->deleteLater();
+    });
+    connect(svc, &ProtonAuthService::failed, this, [this, svc](const QString &err) {
+        emit authFailed("proton", err);
+        svc->deleteLater();
+    });
+    svc->start(email, password, tokenPath);
 }
 
 void OAuthService::cancel()

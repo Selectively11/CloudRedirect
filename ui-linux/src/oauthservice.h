@@ -14,6 +14,7 @@ public:
     ~OAuthService();
 
     Q_INVOKABLE void startAuth(const QString &provider, const QString &tokenPath);
+    Q_INVOKABLE void startProtonAuth(const QString &email, const QString &password, const QString &tokenPath);
     Q_INVOKABLE void cancel();
 
 signals:

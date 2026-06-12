@@ -44,12 +44,15 @@ endif()
 message(STATUS "CloudRedirect UI version: ${CR_VERSION}")
 
 find_package(Qt6 REQUIRED COMPONENTS Core Quick QuickControls2 DBus Network)
+find_package(OpenSSL REQUIRED)
+find_library(ARGON2_LIB argon2 REQUIRED)
 
 qt_add_executable(cloud-redirect-ui
     src/main.cpp
     src/backend.cpp
     src/deployer.cpp
     src/oauthservice.cpp
+    src/proton_auth.cpp
 )
 
 qt_add_resources(cloud-redirect-ui "appicon"
@@ -81,6 +84,9 @@ target_link_libraries(cloud-redirect-ui PRIVATE
     Qt6::QuickControls2
     Qt6::DBus
     Qt6::Network
+    OpenSSL::Crypto
+    ${ARGON2_LIB}
+    crypt
 )
 
 install(TARGETS cloud-redirect-ui DESTINATION bin)
