@@ -57,9 +57,10 @@ private:
                  std::function<void(bool, const QByteArray &)> cb);
 
     // Crypto
-    QByteArray expandPassword(const QByteArray &pass, int srpVersion, const QByteArray &srpSalt);
-    bool computeSrp(const QByteArray &modulus, const QByteArray &serverEph,
-                    const QByteArray &srpSalt, const QByteArray &passExpanded,
+    QByteArray expandPassword(const QByteArray &pass, int srpVersion,
+                              const QByteArray &srpSalt, const QByteArray &modulus);
+    bool computeSrp(const QByteArray &modulusLE, const QByteArray &serverEphLE,
+                    const QByteArray &hashedPassword,
                     QByteArray &outClientEph, QByteArray &outProof);
     bool decryptPgpPrivateKey(const QString &armored, const QByteArray &keyPass, RsaKey &out);
     bool decryptPgpMessage(const QString &armored, const RsaKey &key, QByteArray &out);

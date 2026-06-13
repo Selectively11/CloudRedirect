@@ -68,12 +68,12 @@ internal static class ProtonSrpService
 
             // ── Step 2: Client SRP proof ──────────────────────────────────────
             log("Computing SRP proof...");
-            byte[] modBytes    = FromHex(ParseSrpModulus(modHex));
-            byte[] saltBytes   = FromB64(srpSalt);
-            byte[] serverEphB  = FromB64(serverEph);
-            byte[] passExpanded = ExpandPassword(password, srpVersion, saltBytes);
+            byte[] modBytes       = ParseSrpModulus(modHex);
+            byte[] saltBytes      = FromB64(srpSalt);
+            byte[] serverEphB     = FromB64(serverEph);
+            byte[] hashedPassword = ExpandPassword(password, srpVersion, saltBytes, modBytes);
 
-            var (clientEph, clientProof, _) = SrpCompute(modBytes, serverEphB, saltBytes, passExpanded);
+            var (clientEph, clientProof) = SrpCompute(modBytes, serverEphB, hashedPassword);
 
             // ── Step 3: Authenticate ──────────────────────────────────────────
             log("Authenticating...");
@@ -316,83 +316,147 @@ internal static class ProtonSrpService
         return JsonDocument.Parse(json).RootElement.Clone();
     }
 
-    // ── SRP ────────────────────────────────────────────────────────────────────
+    // ── SRP (go-srp compatible) ────────────────────────────────────────────────
 
-    private static byte[] ExpandPassword(string password, int version, byte[] salt)
+    // expandHash: SHA-512(data||0) || SHA-512(data||1) || SHA-512(data||2) || SHA-512(data||3) = 256 bytes
+    private static byte[] ExpandHash(byte[] data)
     {
-        byte[] passBytes = Encoding.UTF8.GetBytes(password);
-        if (version is 3 or 4)
+        byte[] result = new byte[256];
+        for (int i = 0; i < 4; i++)
         {
-            // BCrypt-expand: bcrypt(truncated_password, salt) then SHA-512 the result string.
-            // BCrypt needs exactly 16 bytes of salt.
-            byte[] bcryptSalt = new byte[16];
-            Buffer.BlockCopy(salt, 0, bcryptSalt, 0, Math.Min(salt.Length, 16));
-
-            int truncLen = Math.Min(passBytes.Length, 72);
-            char[] passChars = new char[truncLen];
-            for (int i = 0; i < truncLen; i++) passChars[i] = (char)passBytes[i];
-
-            string bcryptResult = Org.BouncyCastle.Crypto.Generators.OpenBsdBCrypt
-                .Generate("2y", passChars, bcryptSalt, 10);
-            return SHA512.HashData(Encoding.ASCII.GetBytes(bcryptResult));
+            byte[] tagged = new byte[data.Length + 1];
+            data.CopyTo(tagged, 0);
+            tagged[data.Length] = (byte)i;
+            SHA512.HashData(tagged).CopyTo(result, i * 64);
         }
-        return SHA512.HashData(passBytes);
+        return result;
     }
 
-    private static (byte[] clientEph, byte[] proof, byte[] key) SrpCompute(
-        byte[] modulus, byte[] serverEph, byte[] salt, byte[] passExpanded)
+    // BCrypt base64 alphabet: ./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+    private const string BcryptAlpha = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+    private static string BcryptBase64Encode(byte[] data)
     {
-        int modLen = modulus.Length;
-
-        var N = new BigInteger(modulus, isUnsigned: true, isBigEndian: true);
-        var g = new BigInteger(2);
-
-        var a = GenerateSrpSecret(N);
-        var A = BigInteger.ModPow(g, a, N);
-        byte[] A_BE = BigIntToBE(A, modLen);
-
-        var B = new BigInteger(serverEph, isUnsigned: true, isBigEndian: true);
-        byte[] B_BE = BigIntToBE(B, modLen);
-
-        byte[] uHash = SHA512.HashData([.. A_BE, .. B_BE]);
-        var u = new BigInteger(uHash, isUnsigned: true, isBigEndian: true);
-
-        byte[] xHash = SHA512.HashData([.. salt, .. passExpanded]);
-        var x = new BigInteger(xHash, isUnsigned: true, isBigEndian: true);
-
-        var gx = BigInteger.ModPow(g, x, N);
-        var S  = BigInteger.ModPow(((B - gx) % N + N) % N, a + u * x, N);
-
-        byte[] S_BE = BigIntToBE(S, modLen);
-        byte[] K    = SHA512.HashData(S_BE);
-
-        // Proof = SHA-512(H(N) XOR H(g) || zeros64 || salt || A || B || K)
-        byte[] hN = SHA512.HashData(modulus);
-        byte[] hG = SHA512.HashData(new byte[] { 2 });
-        byte[] hXor = new byte[64];
-        for (int i = 0; i < 64; i++) hXor[i] = (byte)(hN[i] ^ hG[i]);
-
-        byte[] proof = SHA512.HashData([.. hXor, .. new byte[64], .. salt, .. A_BE, .. B_BE, .. K]);
-
-        return (A_BE, proof, K);
-    }
-
-    private static BigInteger GenerateSrpSecret(BigInteger N)
-    {
-        while (true)
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < data.Length; )
         {
-            byte[] rand = RandomNumberGenerator.GetBytes(N.GetByteCount(isUnsigned: true));
-            var a = new BigInteger(rand, isUnsigned: true, isBigEndian: true) % N;
-            if (a > BigInteger.One) return a;
+            int b0 = data[i++];
+            int b1 = i < data.Length ? data[i++] : 0;
+            int b2 = i < data.Length ? data[i++] : 0;
+            sb.Append(BcryptAlpha[b0 >> 2]);
+            sb.Append(BcryptAlpha[((b0 & 3) << 4) | (b1 >> 4)]);
+            sb.Append(BcryptAlpha[((b1 & 15) << 2) | (b2 >> 6)]);
+            sb.Append(BcryptAlpha[b2 & 63]);
         }
+        return sb.ToString();
     }
 
-    private static byte[] BigIntToBE(BigInteger n, int len)
+    private static byte[] BcryptBase64Decode(string s)
+    {
+        var result = new System.Collections.Generic.List<byte>();
+        for (int i = 0; i + 1 < s.Length; )
+        {
+            int c0 = BcryptAlpha.IndexOf(s[i++]);
+            int c1 = i < s.Length ? BcryptAlpha.IndexOf(s[i++]) : 0;
+            int c2 = i < s.Length ? BcryptAlpha.IndexOf(s[i++]) : -1;
+            int c3 = i < s.Length ? BcryptAlpha.IndexOf(s[i++]) : -1;
+            result.Add((byte)((c0 << 2) | (c1 >> 4)));
+            if (c2 >= 0) result.Add((byte)(((c1 & 15) << 4) | (c2 >> 2)));
+            if (c3 >= 0) result.Add((byte)(((c2 & 3) << 6) | c3));
+        }
+        return result.ToArray();
+    }
+
+    // LE bytes ↔ BigInteger (go-srp uses little-endian throughout)
+    private static BigInteger LEToInt(byte[] le)
+    {
+        byte[] be = (byte[])le.Clone();
+        Array.Reverse(be);
+        return new BigInteger(be, isUnsigned: true, isBigEndian: true);
+    }
+
+    private static byte[] IntToLE(BigInteger n, int byteLen)
     {
         byte[] be = n.ToByteArray(isUnsigned: true, isBigEndian: true);
-        if (be.Length == len) return be;
-        if (be.Length > len)  return be[(be.Length - len)..];
-        return [.. new byte[len - be.Length], .. be];
+        byte[] le = new byte[byteLen];
+        int copy = Math.Min(be.Length, byteLen);
+        for (int i = 0; i < copy; i++) le[i] = be[be.Length - 1 - i];
+        return le;
+    }
+
+    // HashedPassword = expandHash(bcrypt("$2y$10$"+b64enc(salt+"proton")[:22]) || modulus_LE)
+    private static byte[] ExpandPassword(string password, int version, byte[] salt, byte[] modulus)
+    {
+        if (version is 3 or 4)
+        {
+            byte[] saltProton = [.. salt, .. "proton"u8];
+            string enc = BcryptBase64Encode(saltProton);
+            string saltStr22 = enc.Length >= 22 ? enc[..22] : enc.PadRight(22, '.');
+
+            // Decode to 16 binary bytes for BouncyCastle
+            byte[] saltBin = BcryptBase64Decode(saltStr22);
+            if (saltBin.Length > 16) Array.Resize(ref saltBin, 16);
+            while (saltBin.Length < 16) saltBin = [.. saltBin, (byte)0];
+
+            byte[] passBytes = Encoding.UTF8.GetBytes(password);
+            int tlen = Math.Min(passBytes.Length, 72);
+            char[] passChars = new char[tlen];
+            for (int i = 0; i < tlen; i++) passChars[i] = (char)passBytes[i];
+
+            string bcryptOut = Org.BouncyCastle.Crypto.Generators.OpenBsdBCrypt
+                .Generate("2y", passChars, saltBin, 10);
+
+            // BouncyCastle re-encodes salt16→22 chars which may differ by 1 char (trailing bits);
+            // force the exact 22-char salt that go-srp uses so expandHash input matches.
+            string corrected = "$2y$10$" + saltStr22 + bcryptOut[29..];
+            byte[] cryptedBytes = Encoding.ASCII.GetBytes(corrected);
+
+            return ExpandHash([.. cryptedBytes, .. modulus]);
+        }
+        return ExpandHash(SHA512.HashData(Encoding.UTF8.GetBytes(password)));
+    }
+
+    // SRP-6a, all values little-endian (matches go-srp)
+    private static (byte[] clientEph, byte[] proof) SrpCompute(
+        byte[] modulusLE, byte[] serverEphLE, byte[] hashedPassword)
+    {
+        int byteLen = modulusLE.Length;
+
+        var N     = LEToInt(modulusLE);
+        var g     = new BigInteger(2);
+        var NMin1 = N - BigInteger.One;
+
+        // k = toInt(expandHash(fromInt(bitLen, g) || fromInt(bitLen, N))) mod N
+        var k = LEToInt(ExpandHash([.. IntToLE(g, byteLen), .. modulusLE])) % N;
+
+        // Generate client secret a in (1, N-1)
+        BigInteger a;
+        do { a = LEToInt(RandomNumberGenerator.GetBytes(byteLen)); }
+        while (a <= BigInteger.One || a >= N);
+
+        var A = BigInteger.ModPow(g, a, N);
+        byte[] A_LE = IntToLE(A, byteLen);
+
+        // u = toNat(expandHash(A_LE || serverEphLE))
+        var u = LEToInt(ExpandHash([.. A_LE, .. serverEphLE]));
+
+        // x = toNat(hashedPassword)
+        var x = LEToInt(hashedPassword);
+
+        // B = toNat(serverEphLE)
+        var B = LEToInt(serverEphLE);
+
+        // S = (B - k*g^x mod N)^((u*x + a) mod N-1) mod N
+        var gx    = BigInteger.ModPow(g, x, N);
+        var base_ = ((B - k * gx % N) % N + N) % N;
+        var exp_  = (u * x + a) % NMin1;
+        var S     = BigInteger.ModPow(base_, exp_, N);
+        byte[] S_LE = IntToLE(S, byteLen);
+
+        // proof = expandHash(A_LE || serverEphLE || S_LE)
+        byte[] proof = ExpandHash([.. A_LE, .. serverEphLE, .. S_LE]);
+
+        return (A_LE, proof);
     }
 
     // ── Argon2id ───────────────────────────────────────────────────────────────
@@ -533,33 +597,23 @@ internal static class ProtonSrpService
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    // The Modulus field in /auth/v4/info is a PGP-signed message; extract the hex body.
-    private static string ParseSrpModulus(string pgpSigned)
+    // The Modulus field in /auth/v4/info is a PGP clearsign message; body is standard base64.
+    private static byte[] ParseSrpModulus(string pgpSigned)
     {
         var lines = pgpSigned.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None);
         bool inBody = false;
-        var hex = new System.Text.StringBuilder();
+        var b64 = new System.Text.StringBuilder();
         foreach (var line in lines)
         {
             if (!inBody) { if (line.Trim().Length == 0) inBody = true; continue; }
-            if (line.StartsWith("-----")) break;
-            foreach (char c in line)
-                if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
-                    hex.Append(c);
+            if (line.StartsWith("-----") || line.StartsWith("=")) break;
+            b64.Append(line.Trim());
         }
-        return hex.ToString();
+        return Convert.FromBase64String(b64.ToString());
     }
 
     private static string ToB64(byte[] b)  => Convert.ToBase64String(b);
     private static byte[] FromB64(string s) => Convert.FromBase64String(s);
-    private static byte[] FromHex(string s)
-    {
-        if (s.Length % 2 != 0) s = "0" + s;
-        byte[] r = new byte[s.Length / 2];
-        for (int i = 0; i < r.Length; i++)
-            r[i] = Convert.ToByte(s.Substring(i * 2, 2), 16);
-        return r;
-    }
 
     private static string JsonEscape(string s)
     {

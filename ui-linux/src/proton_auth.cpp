@@ -3,6 +3,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -26,6 +27,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <algorithm>
 
 static const char *kApiBase    = "https://mail.proton.me/api";
 static const char *kAppVersion = "external-drive-cloudredirect@2.1.8-stable";
@@ -34,26 +36,71 @@ static const char *kAppVersion = "external-drive-cloudredirect@2.1.8-stable";
 
 static QByteArray fromB64(const QString &s)  { return QByteArray::fromBase64(s.toUtf8()); }
 static QString    toB64(const QByteArray &b)  { return QString::fromLatin1(b.toBase64());  }
-static QByteArray fromHex(const QString &s)   { return QByteArray::fromHex(s.toUtf8());    }
 
-// The Modulus field in /auth/v4/info is a PGP-signed message; extract the hex body.
-// Handles any line-ending convention (\n, \r\n, \r).
-static QString parseSrpModulus(const QString &pgpSigned)
+// The Modulus field in /auth/v4/info is a PGP clearsign message; body is standard base64.
+static QByteArray parseSrpModulus(const QString &pgpSigned)
 {
     QStringList lines = pgpSigned.split(QRegularExpression("\r\n|\n|\r"));
     bool inBody = false;
-    QString result;
+    QString b64;
     for (const QString &line : lines) {
         if (!inBody) {
             if (line.trimmed().isEmpty()) inBody = true;
             continue;
         }
-        if (line.startsWith("-----")) break;
-        for (QChar c : line) {
-            ushort u = c.unicode();
-            if ((u >= '0' && u <= '9') || (u >= 'a' && u <= 'f') || (u >= 'A' && u <= 'F'))
-                result += c;
-        }
+        if (line.startsWith("-----") || line.startsWith('=')) break;
+        b64 += line.trimmed();
+    }
+    return QByteArray::fromBase64(b64.toLatin1());
+}
+
+// expandHash: SHA-512(data||0) || SHA-512(data||1) || SHA-512(data||2) || SHA-512(data||3) = 256 bytes
+static QByteArray expandHash(const QByteArray &data)
+{
+    QByteArray result(256, '\0');
+    for (int i = 0; i < 4; i++) {
+        QByteArray tagged = data;
+        tagged.append((char)i);
+        SHA512((const uint8_t *)tagged.constData(), tagged.size(),
+               (uint8_t *)result.data() + i * 64);
+    }
+    return result;
+}
+
+// LE bytes → BIGNUM (go-srp uses little-endian throughout; caller must BN_free result)
+static BIGNUM *leToInt(const QByteArray &le)
+{
+    QByteArray be = le;
+    std::reverse(be.begin(), be.end());
+    BIGNUM *n = BN_new();
+    BN_bin2bn((const uint8_t *)be.constData(), be.size(), n);
+    return n;
+}
+
+// BIGNUM → LE bytes, padded/truncated to byteLen
+static QByteArray intToLE(const BIGNUM *n, int byteLen)
+{
+    QByteArray be(byteLen, '\0');
+    BN_bn2binpad(n, (uint8_t *)be.data(), byteLen);
+    std::reverse(be.begin(), be.end());
+    return be;
+}
+
+// BCrypt base64 alphabet: ./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+static const char kBCryptAlpha[] = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+static QString bcryptBase64Encode(const QByteArray &data)
+{
+    QString result;
+    int len = data.size();
+    for (int i = 0; i < len; ) {
+        uint8_t b0 = (uint8_t)data[i++];
+        uint8_t b1 = (i < len) ? (uint8_t)data[i++] : 0;
+        uint8_t b2 = (i < len) ? (uint8_t)data[i++] : 0;
+        result += kBCryptAlpha[b0 >> 2];
+        result += kBCryptAlpha[((b0 & 3) << 4) | (b1 >> 4)];
+        result += kBCryptAlpha[((b1 & 15) << 2) | (b2 >> 6)];
+        result += kBCryptAlpha[b2 & 63];
     }
     return result;
 }
@@ -456,163 +503,95 @@ void ProtonAuthService::getJson(const QString &path,
     });
 }
 
-// ── SRP password expansion ────────────────────────────────────────────────────
+// ── SRP password expansion (go-srp compatible) ───────────────────────────────
 
 QByteArray ProtonAuthService::expandPassword(const QByteArray &pass, int srpVersion,
-                                              const QByteArray &srpSalt)
+                                              const QByteArray &srpSalt,
+                                              const QByteArray &modulus)
 {
     if (srpVersion == 3 || srpVersion == 4) {
-        // BCrypt v2y, cost 10, salt = first 16 bytes of SRP salt (zero-padded)
-        uint8_t salt16[16] = {};
-        int copyLen = qMin(srpSalt.size(), 16);
-        memcpy(salt16, srpSalt.constData(), copyLen);
+        // saltWithProton = srpSalt || "proton"; bcrypt-base64-encode, take first 22 chars
+        QByteArray saltWithProton = srpSalt + QByteArray("proton");
+        QString enc = bcryptBase64Encode(saltWithProton);
+        QString saltStr22 = enc.left(22);
+        while (saltStr22.size() < 22) saltStr22 += '.';
 
-        // Encode salt16 in OpenBSD base64 (22 chars)
-        static const char kB64[] = "./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        char encSalt[23] = {};
-        int e = 0;
-        for (int i = 0; i < 16; ) {
-            uint8_t c1 = salt16[i++];
-            encSalt[e++] = kB64[c1 >> 2];
-            c1 = (c1 & 0x03) << 4;
-            if (i >= 16) { encSalt[e++] = kB64[c1]; break; }
-            uint8_t c2 = salt16[i++];
-            c1 |= (c2 >> 4) & 0x0f;
-            encSalt[e++] = kB64[c1];
-            c1 = (c2 & 0x0f) << 2;
-            if (i >= 16) { encSalt[e++] = kB64[c1]; break; }
-            uint8_t c3 = salt16[i++];
-            c1 |= (c3 >> 6) & 0x03;
-            encSalt[e++] = kB64[c1];
-            encSalt[e++] = kB64[c3 & 0x3f];
-        }
-
-        char setting[32];
-        snprintf(setting, sizeof(setting), "$2y$10$%.22s", encSalt);
-
-        // Truncate password to 72 bytes (BCrypt limit)
+        QString setting = "$2y$10$" + saltStr22;
         QByteArray pw72 = pass.left(72);
 
         struct crypt_data cd = {};
-        const char *hash = crypt_r(pw72.constData(), setting, &cd);
+        const char *hash = crypt_r(pw72.constData(), setting.toLatin1().constData(), &cd);
         if (!hash) return {};
 
-        // SHA-512 of the BCrypt hash string
-        size_t hashLen = strlen(hash);
-        uint8_t sha[64];
-        SHA512((const uint8_t *)hash, hashLen, sha);
-        return QByteArray((const char *)sha, 64);
+        QByteArray cryptedBytes(hash, (int)strlen(hash));
+        return expandHash(cryptedBytes + modulus);
     }
-    // version 1/2: SHA-512 of raw password bytes
+    // version 1/2: expandHash(SHA-512(password))
     uint8_t sha[64];
     SHA512((const uint8_t *)pass.constData(), pass.size(), sha);
-    return QByteArray((const char *)sha, 64);
+    return expandHash(QByteArray((const char *)sha, 64));
 }
 
-// ── SRP computation ───────────────────────────────────────────────────────────
+// ── SRP computation (go-srp compatible, all values LE) ───────────────────────
 
-bool ProtonAuthService::computeSrp(const QByteArray &modBytes,
-                                    const QByteArray &serverEphBytes,
-                                    const QByteArray &srpSaltBytes,
-                                    const QByteArray &passExpanded,
+bool ProtonAuthService::computeSrp(const QByteArray &modulusLE,
+                                    const QByteArray &serverEphLE,
+                                    const QByteArray &hashedPassword,
                                     QByteArray &outClientEph,
                                     QByteArray &outProof)
 {
-    // Proton's go-srp reference uses standard big-endian big.Int throughout.
-    int modLen = modBytes.size();
-
+    int byteLen = modulusLE.size();
     BN_CTX *ctx = BN_CTX_new();
-    BIGNUM *N  = BN_new(), *g   = BN_new();
-    BIGNUM *a  = BN_new(), *A   = BN_new();
-    BIGNUM *B  = BN_new(), *u   = BN_new();
-    BIGNUM *x  = BN_new(), *gx  = BN_new();
-    BIGNUM *S  = BN_new(), *Bgx = BN_new(), *exp_ = BN_new(), *ux = BN_new();
-    bool ok = false;
 
-    BN_bin2bn((const uint8_t *)modBytes.constData(), modLen, N);
-    BN_set_word(g, 2);
+    BIGNUM *N    = leToInt(modulusLE);
+    BIGNUM *g    = BN_new(); BN_set_word(g, 2);
+    BIGNUM *NMin1 = BN_new(); BN_copy(NMin1, N); BN_sub_word(NMin1, 1);
 
-    // Random a in (1, N)
-    do { BN_rand_range(a, N); } while (BN_cmp(a, BN_value_one()) <= 0);
+    // k = toNat(expandHash(intToLE(byteLen, g) || modulusLE)) mod N
+    BIGNUM *k    = leToInt(expandHash(intToLE(g, byteLen) + modulusLE));
+    BN_mod(k, k, N, ctx);
+
+    // Generate client secret a in (1, N-1) as LE random bytes
+    BIGNUM *a = BN_new();
+    do {
+        QByteArray rand(byteLen, '\0');
+        RAND_bytes((uint8_t *)rand.data(), byteLen);
+        BIGNUM *tmp = leToInt(rand);
+        BN_copy(a, tmp);
+        BN_free(tmp);
+        BN_mod(a, a, N, ctx);
+    } while (BN_cmp(a, BN_value_one()) <= 0);
+
+    BIGNUM *A = BN_new();
     BN_mod_exp(A, g, a, N, ctx);
+    outClientEph = intToLE(A, byteLen);
 
-    // A padded to modLen (big-endian)
-    outClientEph.resize(modLen);
-    BN_bn2binpad(A, (uint8_t *)outClientEph.data(), modLen);
+    // u = toNat(expandHash(A_LE || serverEphLE))
+    BIGNUM *u = leToInt(expandHash(outClientEph + serverEphLE));
 
-    // B from server ephemeral bytes (big-endian), padded for hashing
-    BN_bin2bn((const uint8_t *)serverEphBytes.constData(), serverEphBytes.size(), B);
-    QByteArray Bbytes(modLen, '\0');
-    BN_bn2binpad(B, (uint8_t *)Bbytes.data(), modLen);
+    // x = toNat(hashedPassword)
+    BIGNUM *x = leToInt(hashedPassword);
 
-    // u = SHA-512(A || B)
-    {
-        uint8_t uHash[64];
-        EVP_MD_CTX *mctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex(mctx, EVP_sha512(), nullptr);
-        EVP_DigestUpdate(mctx, outClientEph.constData(), outClientEph.size());
-        EVP_DigestUpdate(mctx, Bbytes.constData(), Bbytes.size());
-        unsigned int hl = 64;
-        EVP_DigestFinal_ex(mctx, uHash, &hl);
-        EVP_MD_CTX_free(mctx);
-        BN_bin2bn(uHash, 64, u);
-    }
+    // B = toNat(serverEphLE)
+    BIGNUM *B = leToInt(serverEphLE);
 
-    // x = SHA-512(salt || passExpanded)
-    {
-        uint8_t xHash[64];
-        EVP_MD_CTX *mctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex(mctx, EVP_sha512(), nullptr);
-        EVP_DigestUpdate(mctx, srpSaltBytes.constData(), srpSaltBytes.size());
-        EVP_DigestUpdate(mctx, passExpanded.constData(), passExpanded.size());
-        unsigned int hl = 64;
-        EVP_DigestFinal_ex(mctx, xHash, &hl);
-        EVP_MD_CTX_free(mctx);
-        BN_bin2bn(xHash, 64, x);
-    }
+    // S = (B - k*g^x mod N)^((u*x + a) mod (N-1)) mod N
+    BIGNUM *gx   = BN_new(); BN_mod_exp(gx, g, x, N, ctx);
+    BIGNUM *kgx  = BN_new(); BN_mod_mul(kgx, k, gx, N, ctx);
+    BIGNUM *base = BN_new(); BN_mod_sub(base, B, kgx, N, ctx);
+    BIGNUM *ux   = BN_new(); BN_mul(ux, u, x, ctx);
+    BIGNUM *exp_ = BN_new(); BN_add(exp_, ux, a); BN_mod(exp_, exp_, NMin1, ctx);
+    BIGNUM *S    = BN_new(); BN_mod_exp(S, base, exp_, N, ctx);
+    QByteArray S_LE = intToLE(S, byteLen);
 
-    BN_mod_exp(gx, g, x, N, ctx);
-    BN_mod_sub(Bgx, B, gx, N, ctx);
-    BN_mul(ux, u, x, ctx);
-    BN_add(exp_, a, ux);
-    BN_mod_exp(S, Bgx, exp_, N, ctx);
+    // proof = expandHash(A_LE || serverEphLE || S_LE)
+    outProof = expandHash(outClientEph + serverEphLE + S_LE);
 
-    QByteArray Sbytes(modLen, '\0');
-    BN_bn2binpad(S, (uint8_t *)Sbytes.data(), modLen);
-    uint8_t K[64];
-    SHA512((const uint8_t *)Sbytes.constData(), Sbytes.size(), K);
-
-    // Proof = SHA-512(H(N) XOR H(g) || zeros64 || salt || A || B || K)
-    uint8_t hN[64], hG[64];
-    SHA512((const uint8_t *)modBytes.constData(), modLen, hN);
-    uint8_t gByte = 2;
-    SHA512(&gByte, 1, hG);
-    uint8_t hXor[64];
-    for (int i = 0; i < 64; ++i) hXor[i] = hN[i] ^ hG[i];
-
-    {
-        uint8_t proof[64];
-        EVP_MD_CTX *mctx = EVP_MD_CTX_new();
-        EVP_DigestInit_ex(mctx, EVP_sha512(), nullptr);
-        EVP_DigestUpdate(mctx, hXor, 64);
-        uint8_t zeros[64] = {};
-        EVP_DigestUpdate(mctx, zeros, 64);
-        EVP_DigestUpdate(mctx, srpSaltBytes.constData(), srpSaltBytes.size());
-        EVP_DigestUpdate(mctx, outClientEph.constData(), outClientEph.size());
-        EVP_DigestUpdate(mctx, Bbytes.constData(), Bbytes.size());
-        EVP_DigestUpdate(mctx, K, 64);
-        unsigned int hl = 64;
-        EVP_DigestFinal_ex(mctx, proof, &hl);
-        EVP_MD_CTX_free(mctx);
-        outProof = QByteArray((const char *)proof, 64);
-    }
-    ok = true;
-
-    BN_free(N); BN_free(g); BN_free(a);  BN_free(A);
-    BN_free(B); BN_free(u); BN_free(x);  BN_free(gx);
-    BN_free(S); BN_free(Bgx); BN_free(exp_); BN_free(ux);
+    BN_free(N); BN_free(g); BN_free(NMin1); BN_free(k); BN_free(a); BN_free(A);
+    BN_free(u); BN_free(x); BN_free(B); BN_free(gx); BN_free(kgx);
+    BN_free(base); BN_free(ux); BN_free(exp_); BN_free(S);
     BN_CTX_free(ctx);
-    return ok;
+    return true;
 }
 
 // ── PGP private key decryption ────────────────────────────────────────────────
@@ -752,13 +731,13 @@ void ProtonAuthService::stepAuthenticate(const QString &modHex, const QString &s
                                           int version)
 {
     emit statusMessage("Computing SRP proof...");
-    QByteArray modBytes     = fromHex(parseSrpModulus(modHex));
+    QByteArray modBytes     = parseSrpModulus(modHex);
     QByteArray saltBytes    = fromB64(srpSaltB64);
     QByteArray serverEphB   = fromB64(serverEphB64);
-    QByteArray passExpanded = expandPassword(m_password, version, saltBytes);
+    QByteArray passExpanded = expandPassword(m_password, version, saltBytes, modBytes);
 
     QByteArray clientEph, proof;
-    if (!computeSrp(modBytes, serverEphB, saltBytes, passExpanded, clientEph, proof)) {
+    if (!computeSrp(modBytes, serverEphB, passExpanded, clientEph, proof)) {
         emit failed("SRP computation failed"); return;
     }
 
