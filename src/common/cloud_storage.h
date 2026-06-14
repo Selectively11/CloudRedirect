@@ -51,8 +51,16 @@ bool PromoteStagedBatchForCommit(uint32_t accountId, uint32_t appId,
 // Verifies every file in `state` has its CAS blob durably on the provider before
 // its manifest is published; heals from the local cache or drops phantom entries.
 // Returns false only when the cloud blob listing is unavailable (don't publish).
+//
+// `confirmedDurable`, when non-null, lists filenames whose blobs were just uploaded
+// (and provider-confirmed with a 2xx) in this batch. These are durable by definition
+// -- exactly the signal native trusts (the upload EResult; see YldUploadFiles) -- so
+// they need no re-listing. If every file in `state` is confirmed, the (slow, ~20s for
+// GDrive) blob listing is skipped entirely; otherwise it lists only to verify the
+// carried-forward remainder (files from a prior CN that this batch did not re-upload).
 bool VerifyAndHealManifestForPublish(uint32_t accountId, uint32_t appId,
-                                     CloudAppState& state);
+                                     CloudAppState& state,
+                                     const std::unordered_set<std::string>* confirmedDurable = nullptr);
 
 std::vector<uint64_t> ListStagedBatchIds(uint32_t accountId, uint32_t appId);
 bool RemoveStagedBatch(uint32_t accountId, uint32_t appId, uint64_t batchId);
@@ -70,20 +78,8 @@ bool HasLocalBlob(uint32_t accountId, uint32_t appId,
 // GC: delete unreferenced blobs. Returns count deleted, or -1 on error.
 int GarbageCollectBlobs(uint32_t accountId, uint32_t appId);
 
-// Returns 0 if in sync or error; >0 = cloud CN when cloud is newer.
-uint64_t FetchCloudCN(uint32_t accountId, uint32_t appId);
-
 bool SyncFromCloud(uint32_t accountId, uint32_t appId);
 std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
-
-void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
-bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn);
-
-// Drain + sync push CN; on failure enqueues async retry + drains again.
-bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn);
-
-// Fire-and-forget CommitCNWithRetry on a detached thread.
-void CommitCNAsync(uint32_t accountId, uint32_t appId, uint64_t cn);
 
 // Pauses background uploads so foreground SyncFromCloud doesn't queue behind sweeps.
 struct ForegroundSyncScope {

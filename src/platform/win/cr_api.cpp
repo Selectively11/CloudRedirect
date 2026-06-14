@@ -1,6 +1,7 @@
 #define CR_API_EXPORTS
 #include "cr_api.h"
 #include "cloud_intercept.h"
+#include "cloud_storage.h"
 #include "rpc_handlers.h"
 #include "protobuf.h"
 #include "pending_ops_journal.h"
@@ -12,6 +13,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <thread>
 
 static std::mutex g_crInitMutex;
 static std::atomic<bool> g_crInitDone{false};
@@ -96,7 +98,11 @@ bool CR_HandleCloudRpc(const char* method, uint32_t appId,
             if (accountId != 0) {
                 PendingOpsJournal::RecordExitSyncState(accountId, appId,
                     uploadsCompleted, uploadsRequired, clientId);
-                CloudStorage::ReleaseCloudSession(accountId, appId, clientId);
+                std::thread([accountId, appId, clientId] {
+                    CloudStorage::InflightSyncScope guard;
+                    if (!guard.entered) return;
+                    CloudStorage::ReleaseCloudSession(accountId, appId, clientId);
+                }).detach();
             }
             LOG("[CR_API] ExitSyncDone app=%u", appId);
         }

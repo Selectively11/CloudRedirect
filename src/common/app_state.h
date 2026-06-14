@@ -3,9 +3,11 @@
 
 #include "cloud_provider.h"
 #include <cstdint>
+#include <future>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace CloudStorage {
@@ -102,14 +104,25 @@ void NoteOwnClientId(uint64_t clientId);
 // a stale RMW on providers with no conditional-write primitive.
 // lockOnly skips the blob verify/heal pass; use it only on the session-release
 // publish, where the manifest and CN were just committed by the upload batch.
+// `confirmedDurable` (optional) forwards to VerifyAndHealManifestForPublish: filenames
+// uploaded+provider-confirmed in this batch, so their durability needn't be re-listed.
 bool PublishCloudState(uint32_t accountId, uint32_t appId,
-                       const CloudAppState& state, bool lockOnly = false);
+                       const CloudAppState& state, bool lockOnly = false,
+                       const std::unordered_set<std::string>* confirmedDurable = nullptr);
 
 std::string SerializeState(const CloudAppState& state);
 bool DeserializeState(const std::string& json, CloudAppState& outState);
 
 // Release the session lock in the cloud state (called on ExitSyncDone).
+// Blocks until any pending async publish completes before releasing.
 void ReleaseCloudSession(uint32_t accountId, uint32_t appId, uint64_t clientId);
+
+// Pending publish barrier: CompleteBatch defers cloud publish to a background
+// thread and registers a future here. ReleaseCloudSession and BeginBatch's
+// FetchCloudStateForServe wait on it to ensure cross-machine consistency.
+void SetPendingPublish(uint32_t accountId, uint32_t appId,
+                       std::shared_future<void> fut);
+void WaitForPendingPublish(uint32_t accountId, uint32_t appId);
 
 CloudAppState MigrateFromLegacy(uint64_t cn,
                                  const std::unordered_map<std::string, FileEntry>& legacyFiles);

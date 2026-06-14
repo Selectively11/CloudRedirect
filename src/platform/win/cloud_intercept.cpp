@@ -13,6 +13,7 @@
 #include "http_util.h"
 #include "local_storage.h"
 #include "cloud_storage.h"
+#include "coop_yield.h"
 #include "cloud_provider.h"
 #include "pending_ops_journal.h"
 #include "json.h"
@@ -108,10 +109,20 @@ static constexpr uint32_t CPROTOBUFMSG_OFF_CONN   = 0x1C;  // uint32_t connectio
 static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x20;  // uint32_t EMsg | PROTO_FLAG
 static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x30;  // protobuf body object*
 
-// g_pJobCur (qword_1397DC0C0): the CJob coroutine currently running; its CJobID
-// is at CJob+32 (GetJobID, asserted at userremotestorage.cpp:3920).
+// g_pJobCur (qword_1397E02C0): the CJob coroutine currently running; its CJobID
+// is at CJob+32 (GetJobID, asserted at userremotestorage.cpp:3920). The yield
+// primitives (CJobFuncs::YieldingWaitForFuncs, CJob::BYieldIfTimeSlice) hard-assert
+// g_pJobCur != NULL, so it is only valid on the BMainLoop/job thread.
 static constexpr uintptr_t SC_RVA_JOBCUR_GLOBAL = 0x17E02C0;
 static constexpr uint32_t  JOB_OFF_JOBID        = 32;
+
+// CJob::BYieldIfTimeSlice (sub_138CE8130): cooperative yield of the current job.
+//   bool fn(CJob* this /*== g_pJobCur*/, void* ctx /*0=no debug label*/, bool* outYielded);
+// Sources the JobMgr from this->m_pJobMgr (CJob+8) itself, asserts this==g_pJobCur,
+// and only actually yields when the job has held the cooperative slice >10ms (else a
+// cheap no-op). Lets a long main-thread upload wait pump BMainLoop. Dependency is one
+// function address + g_pJobCur -- a wrong RVA crashes clean (no struct-layout ABI).
+static constexpr uintptr_t SC_RVA_YIELD_IF_TIMESLICE = 0xCE8130;
 
 // Schema-fetch injection: build a CMsgClientGetUserStats (EMsg 818) and send it
 // via BAsyncSend, asking the server for the latest achievement schema of any app
@@ -453,6 +464,29 @@ struct HookGuard {
     HookGuard& operator=(const HookGuard&) = delete;
 };
 
+// Re-entrancy probe (diagnostic, read-only): detects a slot-5 RPC firing on the
+// same OS thread while CompleteBatch is mid-dispatch (the yield fix is only
+// deadlock-safe if that never happens while g_queueMutex is held).
+//   g_reentCompleteInFlight : CompleteBatch calls currently dispatching
+//   g_reentCompleteThreadId : OS thread id of the most recent in-flight CompleteBatch
+static std::atomic<int>      g_reentCompleteInFlight{0};
+static std::atomic<uint32_t> g_reentCompleteThreadId{0};
+
+struct CompleteBatchInFlightMark {
+    bool active = false;
+    explicit CompleteBatchInFlightMark(bool on) : active(on) {
+        if (active) {
+            g_reentCompleteThreadId.store((uint32_t)GetCurrentThreadId(), std::memory_order_release);
+            g_reentCompleteInFlight.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+    ~CompleteBatchInFlightMark() {
+        if (active) g_reentCompleteInFlight.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    CompleteBatchInFlightMark(const CompleteBatchInFlightMark&) = delete;
+    CompleteBatchInFlightMark& operator=(const CompleteBatchInFlightMark&) = delete;
+};
+
 // namespace state (auto-detected from stplug-in directory)
 static std::unordered_set<uint32_t> g_namespaceApps;
 static std::mutex g_namespaceAppsMutex;
@@ -737,6 +771,49 @@ static uint64_t GetJobIdSource(const std::vector<PB::Field>& header) {
     return f ? f->varintVal : JOBID_NONE;
 }
 
+// Coroutine_IsActive(): the single predicate that decides whether yielding the
+// current job coroutine is legal. Resolved by NAME from vstdlib_s64.dll (the module
+// that actually implements the coroutine engine -- steamclient only imports it), so
+// it survives address-layout changes across Steam updates. It reads the CALLING
+// THREAD's coroutine context (active depth > 1); a yield is only safe when this is
+// true. Independent of g_pJobCur (a process global): "on-fiber=1" was necessary but
+// NOT sufficient, and the earlier yield corrupted the coroutine stack. Returns false
+// (fail-closed: never yield) if unresolved.
+typedef bool(__cdecl* CoroutineIsActiveFn)();
+static std::atomic<CoroutineIsActiveFn> g_coroutineIsActive{nullptr};
+static std::atomic<bool> g_coroutineIsActiveResolved{false};
+
+static CoroutineIsActiveFn ResolveCoroutineIsActive() {
+    if (g_coroutineIsActiveResolved.load(std::memory_order_acquire))
+        return g_coroutineIsActive.load(std::memory_order_acquire);
+    CoroutineIsActiveFn fn = nullptr;
+    HMODULE vstd = GetModuleHandleW(L"vstdlib_s64.dll");
+    if (vstd) {
+        fn = reinterpret_cast<CoroutineIsActiveFn>(
+            GetProcAddress(vstd, "Coroutine_IsActive"));
+    }
+    g_coroutineIsActive.store(fn, std::memory_order_release);
+    g_coroutineIsActiveResolved.store(true, std::memory_order_release);
+    LOG("[CoopYield] Coroutine_IsActive resolved: %p (vstdlib=%p)",
+        (void*)fn, (void*)vstd);
+    return fn;
+}
+
+// Safe wrapper: true only if the coroutine engine is resolved AND reports the
+// current thread's coroutine is active (yieldable). SEH-isolated so a bad call
+// can never escalate. Fails closed (returns false) on any uncertainty.
+static bool CoroutineActiveNow() {
+    CoroutineIsActiveFn fn = ResolveCoroutineIsActive();
+    if (!fn) return false;
+    bool active = false;
+    __try {
+        active = fn();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        active = false;
+    }
+    return active;
+}
+
 // Jobid of the running coroutine. Correlates an outbound 818 with the 819 we
 // inject back: the framework stamps the header's jobid_source only after our send
 // hook, but the sending job already holds the id. SEH-isolated against a faulting
@@ -748,6 +825,83 @@ static uint64_t ReadCurrentJobId() {
         if (jobCur) jobId = *(uint64_t*)(jobCur + JOB_OFF_JOBID);
     } __except(EXCEPTION_EXECUTE_HANDLER) { jobId = 0; }
     return jobId;
+}
+
+// Read-only probe: the raw g_pJobCur pointer (NOT the jobid). Native's fiber-yield
+// primitives (CJobFuncs::YieldingWaitForFuncs) hard-require g_pJobCur != NULL, so a
+// non-NULL value means a hook runs on the cooperative job fiber and could legally
+// yield. Pure observation; no behavior change.
+static uintptr_t ReadCurrentJobPtr() {
+    uintptr_t jobCur = 0;
+    __try {
+        jobCur = *(uintptr_t*)(g_steamClientBase + SC_RVA_JOBCUR_GLOBAL);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { jobCur = 0; }
+    return jobCur;
+}
+
+// CJob::BYieldIfTimeSlice signature (fastcall): (CJob* this, void* ctx, bool* out).
+typedef bool(__fastcall* YieldIfTimeSliceFn)(void* job, void* ctx, bool* outYielded);
+
+// Leaf SEH helper: invoke the yield primitive, returning false if it faulted.
+// SEH cannot live in a function that also needs C++ object unwinding, so this is
+// kept separate from CooperativeYieldCurrentJob (which logs / clears the hook).
+static bool InvokeYieldPrimitive(uintptr_t job) {
+    __try {
+        auto fn = (YieldIfTimeSliceFn)(g_steamClientBase + SC_RVA_YIELD_IF_TIMESLICE);
+        fn((void*)job, nullptr, nullptr);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Cooperative yield of the current Steam job, registered as CoopYield's hook so the
+// cross-platform UploadBatch wait can pump BMainLoop without freezing/crashing Steam.
+//
+// Safety: only yields when running on the BMainLoop/job thread (g_pJobCur != NULL).
+// On a worker thread g_pJobCur is NULL -> skip (the native primitive would assert).
+// A stale RVA after a Steam update fails closed (no yield, hook disabled) rather than
+// corrupting anything. The primitive sources the JobMgr from the job itself and only
+// suspends if the slice has exceeded 10ms, mirroring native cadence.
+static void CooperativeYieldCurrentJob() {
+    if (!g_steamClientBase) return;
+    uintptr_t job = ReadCurrentJobPtr();
+    if (!job) return;  // not on the job thread (e.g. a worker) -> nothing to yield
+    // LOAD-BEARING GUARD: only yield when the calling thread's coroutine is genuinely
+    // active. g_pJobCur != NULL is NOT sufficient -- yielding an inactive coroutine
+    // corrupts its stack accounting (coroutine.cpp:434/1064) and crashes Steam. This
+    // check is the difference between a faithful cooperative yield and the prior crash.
+    if (!CoroutineActiveNow()) return;  // not at a legal yield point -> skip safely
+    if (!InvokeYieldPrimitive(job)) {
+        LOG("[CoopYield] yield primitive faulted; disabling cooperative yield");
+        // DisableYieldHook (not SetYieldHook(nullptr)): this runs from inside the hook
+        // itself, so reassigning g_hook here would destroy the executing std::function.
+        CoopYield::DisableYieldHook();
+    }
+}
+
+static bool LooksLikeFunctionPrologue(const uint8_t* p);  // fwd decl (defined below)
+
+// Register CooperativeYieldCurrentJob as the CoopYield hook used by the cross-platform
+// UploadBatch wait to keep BMainLoop pumping during a large blob promote (prevents the
+// >15s frame watchdog / cross-thread pipe-stall crash on big saves). Prologue-gated so
+// a stale RVA after a Steam update simply disables the yield (falling back to the old
+// blocking wait) rather than jumping into garbage. Separate from the installer because
+// it constructs a std::function (needs C++ unwinding) and so cannot share a function
+// body with the installer's __try blocks (MSVC C2712).
+static void RegisterCooperativeYieldHook() {
+    if (!g_steamClientBase) return;
+    auto yieldFn = reinterpret_cast<const uint8_t*>(g_steamClientBase + SC_RVA_YIELD_IF_TIMESLICE);
+    if (LooksLikeFunctionPrologue(yieldFn)) {
+        CoopYield::SetYieldHook(&CooperativeYieldCurrentJob);
+        LOG("[CoopYield] cooperative job-yield registered (sc+0x%llX)",
+            (unsigned long long)SC_RVA_YIELD_IF_TIMESLICE);
+    } else {
+        CoopYield::SetYieldHook(nullptr);
+        LOG("[CoopYield] WARNING: yield primitive prologue check failed at sc+0x%llX; "
+            "cooperative yield DISABLED (uploads will use the blocking wait)",
+            (unsigned long long)SC_RVA_YIELD_IF_TIMESLICE);
+    }
 }
 
 static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header, const PB::Writer& body) {
@@ -1962,6 +2116,42 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         }
     }
 
+    // FIBER-YIELD FEASIBILITY PROBE (read-only): is this slot-5 hook running on
+    // the cooperative job fiber? If g_pJobCur is reliably non-null here, native's
+    // YieldingWaitForFuncs could legally be called to yield while a bg thread does
+    // the promote (the native-faithful CompleteBatch fix). Logged for the slow RPCs.
+    bool isCompleteBatch = (strcmp(methodName, RPC_COMPLETE_BATCH) == 0);
+    if (isCompleteBatch || strcmp(methodName, RPC_BEGIN_BATCH) == 0) {
+        uintptr_t jobPtr = ReadCurrentJobPtr();
+        // coroutine-active is the DECISIVE fact: if true at handler entry, CR can
+        // faithfully yield the job coroutine (mirroring native YieldingWaitForFuncs)
+        // while its workers upload. If false, yield is illegal here regardless of
+        // g_pJobCur and a native-faithful cooperative upload is not reachable from
+        // this hook point. Logged here to settle it empirically against real saves.
+        bool coroActive = CoroutineActiveNow();
+        LOG("[FiberProbe] %s app=%u: g_pJobCur=%p (on-fiber=%d) jobid=%llu coro-active=%d",
+            methodName, appId, (void*)jobPtr, jobPtr != 0 ? 1 : 0, ReadCurrentJobId(),
+            coroActive ? 1 : 0);
+    }
+
+    // RE-ENTRANCY PROBE (read-only): if any slot-5 cloud RPC begins dispatching
+    // while a CompleteBatch is still in-flight, record whether the re-entry is on
+    // the same OS thread (deadlock-relevant for the yield fix) or a different one.
+    {
+        int inFlight = g_reentCompleteInFlight.load(std::memory_order_acquire);
+        if (inFlight > 0) {
+            uint32_t curTid  = (uint32_t)GetCurrentThreadId();
+            uint32_t cbTid   = g_reentCompleteThreadId.load(std::memory_order_acquire);
+            LOG("[ReentProbe] %s app=%u began while %d CompleteBatch in-flight "
+                "(this-tid=%u completebatch-tid=%u same-thread=%d)",
+                methodName, appId, inFlight, curTid, cbTid, (curTid == cbTid) ? 1 : 0);
+        }
+    }
+
+    // Mark CompleteBatch as in-flight for the duration of its dispatch (the slow
+    // promote/drain wait), so concurrent slot-5 entries can detect overlap above.
+    CompleteBatchInFlightMark cbMark(isCompleteBatch);
+
     // Call the appropriate handler to build a response body
     auto dispatched = DispatchCloudRpc(methodName, realAppId, innerFields);
     if (!dispatched.has_value()) {
@@ -2128,8 +2318,15 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
         if (accountId != 0) {
             PendingOpsJournal::RecordExitSyncState(accountId, realAppId,
                 uploadsCompleted, uploadsRequired, clientId);
-            // Release cloud session lock -- server-faithful: sync done, release ownership.
-            CloudStorage::ReleaseCloudSession(accountId, realAppId, clientId);
+            // Native-faithful: ExitSyncDone is fire-and-forget (IDA slot 64,
+            // notification, no response). The client sends it and moves on; the
+            // server processes it asynchronously. Dispatch session release off
+            // Steam's thread so the UI doesn't freeze on Drive API calls.
+            std::thread([accountId, appId = realAppId, clientId] {
+                CloudStorage::InflightSyncScope guard;
+                if (!guard.entered) return;  // shutting down, skip session release
+                CloudStorage::ReleaseCloudSession(accountId, appId, clientId);
+            }).detach();
         }
         LOG("[VtHook-Notif] %s app=%u: letting Steam process internally", methodName, realAppId);
         return g_originalSlot8(thisptr, methodName, request);
@@ -2633,6 +2830,10 @@ static void InstallServiceMethodHookLocked() {
     } else {
         LOG("[VtHook] WARNING: Some hooks failed! slot4=%d slot5=%d slot7=%d slot8=%d", slot4Ok, slot5Ok, slot7Ok, slot8Ok);
     }
+
+    // Register the cooperative yield (kept in its own function: this one uses __try
+    // and so cannot also host std::function object unwinding -- MSVC C2712).
+    RegisterCooperativeYieldHook();
 }
 
 // SEH helper: read vector header (can't mix SEH with C++ object unwinding)
@@ -2858,8 +3059,7 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
 }
 
 // Lua file sync: stplug-in/*.lua via account-scope LuaArchive.zip + LuaManifest.json (appId=0).
-// Manifest entry: { "file.lua": { "mod": ts, "del": ts } }; del > mod = deleted (timestamps prevent ping-pong).
-// .sync_state: line 1 = lastSyncTime, remaining lines = files this machine knows about.
+// Union/grow-only: luas are only added or extracted, never deleted across machines.
 
 static constexpr uint32_t LUA_SYNC_APPID = 0;
 
@@ -2872,7 +3072,7 @@ static std::string GetLuaSyncStatePath() {
     return g_steamPath + "config\\stplug-in\\.sync_state";
 }
 
-static SyncState ReadSyncState() {
+[[maybe_unused]] static SyncState ReadSyncState() {
     SyncState state;
     std::ifstream f(FileUtil::Utf8ToPath(GetLuaSyncStatePath()));
     if (!f.is_open()) return state;
@@ -3166,73 +3366,46 @@ static void SyncLuaFiles() {
         }
     }
 
-    auto syncState = ReadSyncState();
-    uint64_t lastSync = syncState.lastSyncTime;
-
     auto localFiles = ReadLocalLuaFiles();
     std::unordered_map<std::string, uint64_t> localByName; // filename -> modTime
     for (auto& lf : localFiles) localByName[lf.filename] = lf.modTime;
 
-    int extracted = 0, deletedLocally = 0, addedToCloud = 0, markedDeleted = 0;
+    int extracted = 0, addedToCloud = 0;
     bool manifestChanged = false;
 
+    // Extract cloud luas missing locally; never delete or tombstone.
     for (auto& [filename, entry] : cloudManifest) {
         if (!IsValidLuaFilename(filename)) {
             LOG("[LuaSync] Skipping invalid manifest entry: %s", filename.c_str());
             continue;
         }
         bool onDisk = localByName.count(filename) > 0;
-        bool inSyncState = syncState.files.count(filename) > 0;
 
-        if (entry.isDeleted()) {
-            // Cloud says deleted
-            if (onDisk && lastSync > 0 && entry.del > lastSync) {
-                // Deleted on another machine after our last sync - delete locally
-                std::string path = luaDir + filename;
-                // Wide-API: DeleteFileA's ACP narrowing fails with ERROR_FILE_NOT_FOUND on non-ASCII installs, stranding the stale lua.
-                auto pathWide = FileUtil::Utf8ToPath(path).wstring();
-                if (DeleteFileW(pathWide.c_str())) {
-                    deletedLocally++;
-                    localByName.erase(filename);
-                    LOG("[LuaSync] Deleted locally (remote deletion): %s", filename.c_str());
+        if (!onDisk) {
+            auto it = cloudFiles.find(filename);
+            if (it != cloudFiles.end()) {
+                std::error_code ec;
+                // Route via Utf8ToPath: create_directories on std::string narrows via ACP internally.
+                std::filesystem::create_directories(FileUtil::Utf8ToPath(luaDir), ec);
+                std::string destPath = luaDir + filename;
+                // Atomic-write so a crash never leaves a partial lua.
+                if (FileUtil::AtomicWriteBinary(destPath, it->second.data(), it->second.size())) {
+                    localByName[filename] = entry.mod;
+                    extracted++;
+                    LOG("[LuaSync] Extracted new lua: %s (%zu bytes)", filename.c_str(), it->second.size());
+                } else {
+                    LOG("[LuaSync] Failed to extract lua %s", filename.c_str());
                 }
-            }
-            // If not on disk or deletion is old, no action
-        } else {
-            // Cloud says alive
-            if (!onDisk && !inSyncState) {
-                // New file for this machine
-                auto it = cloudFiles.find(filename);
-                if (it != cloudFiles.end()) {
-                    std::error_code ec;
-                    // Route via Utf8ToPath: create_directories on std::string narrows via ACP internally.
-                    std::filesystem::create_directories(FileUtil::Utf8ToPath(luaDir), ec);
-                    std::string destPath = luaDir + filename;
-                    // Atomic-write so a crash never leaves a partial lua.
-                    if (FileUtil::AtomicWriteBinary(destPath, it->second.data(), it->second.size())) {
-                        localByName[filename] = entry.mod;
-                        extracted++;
-                        LOG("[LuaSync] Extracted new lua: %s (%zu bytes)", filename.c_str(), it->second.size());
-                    } else {
-                        LOG("[LuaSync] Failed to extract lua %s", filename.c_str());
-                    }
-                }
-            } else if (!onDisk && inSyncState) {
-                // User deleted locally - mark as deleted in cloud
-                entry.del = now;
-                markedDeleted++;
-                manifestChanged = true;
-                LOG("[LuaSync] User deleted %s, marking deleted in cloud", filename.c_str());
             }
         }
     }
 
-    if (extracted > 0 || deletedLocally > 0) {
+    if (extracted > 0) {
         localFiles = ReadLocalLuaFiles();
         localByName.clear();
         for (auto& lf : localFiles) localByName[lf.filename] = lf.modTime;
 
-        if (extracted > 0) {
+        {
             for (auto& lf : localFiles) {
                 auto dot = lf.filename.rfind('.');
                 if (dot != std::string::npos) {
@@ -3255,23 +3428,17 @@ static void SyncLuaFiles() {
         }
     }
 
+    // Propagate local additions up; never remove or tombstone entries.
     for (auto& [filename, modTime] : localByName) {
         auto it = cloudManifest.find(filename);
         if (it == cloudManifest.end()) {
             cloudManifest[filename] = { modTime, 0 };
             addedToCloud++;
             manifestChanged = true;
-        } else if (it->second.isDeleted()) {
-            // File exists locally but cloud says deleted - local wins (re-added)
-            it->second.mod = modTime;
-            it->second.del = 0;
-            addedToCloud++;
-            manifestChanged = true;
-            LOG("[LuaSync] Re-added %s (was deleted in cloud)", filename.c_str());
         }
     }
 
-    bool needUpload = manifestChanged || extracted > 0 || deletedLocally > 0;
+    bool needUpload = manifestChanged || extracted > 0;
     if (!needUpload && cloudManifest.empty() && !localFiles.empty()) {
         needUpload = true;
         LOG("[LuaSync] Cloud empty, seeding %zu lua files", localFiles.size());
@@ -3280,24 +3447,30 @@ static void SyncLuaFiles() {
     }
 
     if (needUpload) {
-        // Build archive from alive files only
-        std::vector<LuaFile> aliveFiles;
-        for (auto& lf : localFiles) {
-            auto it = cloudManifest.find(lf.filename);
-            if (it != cloudManifest.end() && !it->second.isDeleted())
-                aliveFiles.push_back(lf);
+        // Archive = union of cloud archive and local luas; local bytes win on collision.
+        std::unordered_map<std::string, std::vector<uint8_t>> unionFiles = cloudFiles;
+        for (auto& lf : localFiles)
+            unionFiles[lf.filename] = lf.content;
+
+        std::vector<LuaFile> archiveFiles;
+        archiveFiles.reserve(unionFiles.size());
+        for (auto& [filename, content] : unionFiles) {
+            if (cloudManifest.count(filename) == 0) continue;
+            LuaFile lf;
+            lf.filename = filename;
+            lf.content = content;
+            lf.modTime = cloudManifest[filename].mod;
+            archiveFiles.push_back(std::move(lf));
         }
 
-        if (!aliveFiles.empty()) {
-            auto zipData = CreateLuaZip(aliveFiles);
+        if (!archiveFiles.empty()) {
+            auto zipData = CreateLuaZip(archiveFiles);
             if (!zipData.empty()) {
                 CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID,
                     "LuaArchive.zip", zipData.data(), zipData.size());
-                LOG("[LuaSync] Uploaded archive: %zu files, %zu bytes zip",
-                    aliveFiles.size(), zipData.size());
+                LOG("[LuaSync] Uploaded archive (union): %zu files, %zu bytes zip",
+                    archiveFiles.size(), zipData.size());
             }
-        } else {
-            CloudStorage::DeleteBlob(accountId, LUA_SYNC_APPID, "LuaArchive.zip");
         }
 
         std::string manifestStr = SerializeManifest(cloudManifest);
@@ -3311,12 +3484,11 @@ static void SyncLuaFiles() {
     }
     WriteSyncState(now, newFiles);
 
-    LOG("[LuaSync] Sync complete: %d extracted, %d deleted locally, %d added to cloud, %d marked deleted",
-        extracted, deletedLocally, addedToCloud, markedDeleted);
+    LOG("[LuaSync] Sync complete: %d extracted, %d added to cloud (union, grow-only)",
+        extracted, addedToCloud);
 }
 
-// Shutdown upload: captures local changes (additions + deletions) to cloud.
-// Downloads manifest first to detect local deletions and set timestamps.
+// Shutdown upload: propagate local lua additions only; never tombstone (grow-only).
 static void UploadLuaOnShutdown() {
     if (!CloudStorage::IsCloudActive()) return;
     uint32_t accountId = GetAccountId();
@@ -3324,9 +3496,37 @@ static void UploadLuaOnShutdown() {
 
     uint64_t now = NowUnix();
 
-    // Download current cloud manifest to compare against
     auto manifestData = CloudStorage::RetrieveBlob(accountId, LUA_SYNC_APPID, "LuaManifest.json");
     auto cloudManifest = ParseManifest(manifestData);
+
+    bool hasCloudAlive = false;
+    for (auto& [f, e] : cloudManifest) { if (!e.isDeleted()) { hasCloudAlive = true; break; } }
+    std::unordered_map<std::string, std::vector<uint8_t>> cloudFiles;
+    if (hasCloudAlive) {
+        auto archiveData = CloudStorage::RetrieveBlob(accountId, LUA_SYNC_APPID, "LuaArchive.zip");
+        if (!archiveData.empty()) {
+            mz_zip_archive zip{};
+            if (mz_zip_reader_init_mem(&zip, archiveData.data(), archiveData.size(), 0)) {
+                mz_uint numFiles = mz_zip_reader_get_num_files(&zip);
+                for (mz_uint i = 0; i < numFiles && numFiles <= 10000; i++) {
+                    mz_uint nameLenPlusNul = mz_zip_reader_get_filename(&zip, i, nullptr, 0);
+                    if (nameLenPlusNul == 0 || nameLenPlusNul > 256) continue;
+                    char fname[256];
+                    mz_zip_reader_get_filename(&zip, i, fname, sizeof(fname));
+                    if (!IsValidLuaFilename(fname)) continue;
+                    size_t uncompSize = 0;
+                    void* p = mz_zip_reader_extract_to_heap(&zip, i, &uncompSize, 0);
+                    if (p) {
+                        if (IsValidLuaContent(static_cast<uint8_t*>(p), uncompSize))
+                            cloudFiles[fname] = std::vector<uint8_t>(
+                                static_cast<uint8_t*>(p), static_cast<uint8_t*>(p) + uncompSize);
+                        mz_free(p);
+                    }
+                }
+                mz_zip_reader_end(&zip);
+            }
+        }
+    }
 
     auto localFiles = ReadLocalLuaFiles();
     std::unordered_map<std::string, uint64_t> localByName;
@@ -3334,65 +3534,58 @@ static void UploadLuaOnShutdown() {
 
     bool changed = false;
 
-    // Mark cloud-alive files that are no longer on disk as deleted
-    for (auto& [filename, entry] : cloudManifest) {
-        if (!entry.isDeleted() && localByName.count(filename) == 0) {
-            entry.del = now;
-            changed = true;
-            LOG("[LuaSync] Shutdown: marking %s as deleted", filename.c_str());
-        }
-    }
-
-    // Add new local files
+    // Add new local files to the manifest; never tombstone.
     for (auto& [filename, modTime] : localByName) {
         auto it = cloudManifest.find(filename);
         if (it == cloudManifest.end()) {
             cloudManifest[filename] = { modTime, 0 };
-            changed = true;
-        } else if (it->second.isDeleted()) {
-            it->second.mod = modTime;
-            it->second.del = 0;
             changed = true;
         }
     }
 
     if (!changed && !cloudManifest.empty()) {
         LOG("[LuaSync] Shutdown: no changes to upload");
-        // Still update sync state time
         std::unordered_set<std::string> newFiles;
         for (auto& [f, e] : cloudManifest) { if (!e.isDeleted()) newFiles.insert(f); }
         WriteSyncState(now, newFiles);
         return;
     }
 
-    // Upload archive (alive files only)
-    std::vector<LuaFile> aliveFiles;
-    for (auto& lf : localFiles) {
-        auto it = cloudManifest.find(lf.filename);
-        if (it != cloudManifest.end() && !it->second.isDeleted())
-            aliveFiles.push_back(lf);
+    // Archive = union of cloud archive and local luas.
+    std::unordered_map<std::string, std::vector<uint8_t>> unionFiles = cloudFiles;
+    for (auto& lf : localFiles)
+        unionFiles[lf.filename] = lf.content;
+
+    std::vector<LuaFile> archiveFiles;
+    archiveFiles.reserve(unionFiles.size());
+    for (auto& [filename, content] : unionFiles) {
+        auto it = cloudManifest.find(filename);
+        if (it == cloudManifest.end() || it->second.isDeleted()) continue;
+        LuaFile lf;
+        lf.filename = filename;
+        lf.content = content;
+        lf.modTime = it->second.mod;
+        archiveFiles.push_back(std::move(lf));
     }
 
-    if (!aliveFiles.empty()) {
-        auto zipData = CreateLuaZip(aliveFiles);
+    if (!archiveFiles.empty()) {
+        auto zipData = CreateLuaZip(archiveFiles);
         if (!zipData.empty()) {
             CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID,
                 "LuaArchive.zip", zipData.data(), zipData.size());
         }
     }
 
-    // Upload manifest (includes deletion markers)
     std::string manifestStr = SerializeManifest(cloudManifest);
     CloudStorage::StoreBlob(accountId, LUA_SYNC_APPID, "LuaManifest.json",
         reinterpret_cast<const uint8_t*>(manifestStr.data()), manifestStr.size());
 
-    // Update sync state
     std::unordered_set<std::string> newFiles;
     for (auto& [f, e] : cloudManifest) { if (!e.isDeleted()) newFiles.insert(f); }
     WriteSyncState(now, newFiles);
 
-    LOG("[LuaSync] Shutdown upload: %zu alive, %zu total manifest entries",
-        localFiles.size(), cloudManifest.size());
+    LOG("[LuaSync] Shutdown upload (union): %zu archived, %zu total manifest entries",
+        archiveFiles.size(), cloudManifest.size());
 }
 
 // Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.

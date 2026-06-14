@@ -520,6 +520,7 @@ bool OneDriveProvider::Upload(const std::string& path,
 bool OneDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
     if (items.empty()) return true;
     if (items.size() == 1) {
+        if (CheckExists(items[0].path) == ExistsStatus::Exists) return true;
         return Upload(items[0].path, items[0].data.data(), items[0].data.size());
     }
 
@@ -531,7 +532,15 @@ bool OneDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
 
     // Upload sequentially with rollback on failure.
     std::vector<std::string> uploaded;
+    size_t dedupSkips = 0;
     for (const auto& item : items) {
+        // Per-file CAS dedup (PromoteStagedBatchForCommit no longer pre-filters).
+        // Skip only on a definite Exists; on Missing OR Error, upload -- the CAS path
+        // is idempotent, so an errored check never strands a blob.
+        if (CheckExists(item.path) == ExistsStatus::Exists) {
+            ++dedupSkips;
+            continue;
+        }
         if (!Upload(item.path, item.data.data(), item.data.size())) {
             LOG("[OneDriveProvider] UploadBatch: failed on '%s', rolling back %zu uploads",
                 item.path.c_str(), uploaded.size());
@@ -540,7 +549,8 @@ bool OneDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
         }
         uploaded.push_back(item.path);
     }
-    LOG("[OneDriveProvider] UploadBatch: uploaded %zu files", items.size());
+    LOG("[OneDriveProvider] UploadBatch: %zu file(s) (%zu uploaded, %zu CAS-skipped)",
+        items.size(), uploaded.size(), dedupSkips);
     return true;
 }
 

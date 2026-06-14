@@ -35,7 +35,7 @@ static std::unordered_map<std::string, std::pair<uint64_t, std::chrono::steady_c
 static std::unordered_set<std::string>   g_failedPaths;
 static std::unordered_map<std::string, WorkItem> g_failedWorkItems;
 static std::condition_variable           g_drainCV;
-static constexpr int                     WORKER_THREAD_COUNT = 4;
+static constexpr int                     WORKER_THREAD_COUNT = 8;
 
 static constexpr int                     MAX_DRAIN_REQUEUES = 3;
 static constexpr int                     FAIL_THRESHOLD     = 5;

@@ -14,6 +14,10 @@
 #include <vector>
 #include <cstdint>
 
+// Global counter of HTTP 429/403 rate-limit hits, incremented in ApiRequest.
+// Read/reset per batch in UploadBatch for throughput telemetry.
+extern std::atomic<uint64_t> g_rateLimitHits;
+
 // ── IHttpTransport ────────────────────────────────────────────────────────
 // Platform adapter for raw HTTP request execution.
 // Windows: WinHTTP session/connection/request handles.

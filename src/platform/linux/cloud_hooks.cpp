@@ -700,7 +700,13 @@ extern "C" int hook_NotificationDirect(void* pThis, const char* methodName, void
         if (accountId != 0) {
             PendingOpsJournal::RecordExitSyncState(accountId, appId,
                 uploadsCompleted, uploadsRequired, clientId);
-            CloudStorage::ReleaseCloudSession(accountId, appId, clientId);
+            // Native-faithful: ExitSyncDone is fire-and-forget (notification, no
+            // response). Dispatch session release off Steam's thread.
+            std::thread([accountId, appId, clientId] {
+                CloudStorage::InflightSyncScope guard;
+                if (!guard.entered) return;  // shutting down, skip session release
+                CloudStorage::ReleaseCloudSession(accountId, appId, clientId);
+            }).detach();
         }
         LOG("[Hook-Notif] %s app=%u: letting Steam process internally", methodName, appId);
         return origFn(pThis, methodName, body, flags);

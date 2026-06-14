@@ -69,6 +69,33 @@ struct BlobIndex {
 };
 static std::unordered_map<uint64_t, BlobIndex> g_blobIndex; // key = (accountId<<32)|appId
 
+// Session-scoped set of CAS hashes (sha1hex) provider-confirmed durable this process
+// lifetime. The session lock (LaunchIntent EResult=108) blocks other machines from
+// GC-ing them, so a hash durable earlier this session is still durable now. Lets
+// VerifyAndHealManifestForPublish skip its slow blob listing. Keyed by sha (CAS blobs
+// are immutable), in-memory only; a fresh launch re-verifies.
+static std::mutex                                            g_durableBlobsMutex;
+static std::unordered_map<uint64_t, std::unordered_set<std::string>> g_durableBlobs; // (acct<<32|app) -> {sha1hex}
+
+static void RecordDurableBlobShas(uint32_t accountId, uint32_t appId,
+                                  const std::vector<std::string>& shaHexes) {
+    if (shaHexes.empty()) return;
+    uint64_t key = (static_cast<uint64_t>(accountId) << 32) | appId;
+    std::lock_guard<std::mutex> lk(g_durableBlobsMutex);
+    auto& set = g_durableBlobs[key];
+    for (const auto& s : shaHexes)
+        if (s.size() == 40) set.insert(s);
+}
+
+static bool IsBlobShaDurableThisSession(uint32_t accountId, uint32_t appId,
+                                        const std::string& shaHex) {
+    if (shaHex.size() != 40) return false;
+    uint64_t key = (static_cast<uint64_t>(accountId) << 32) | appId;
+    std::lock_guard<std::mutex> lk(g_durableBlobsMutex);
+    auto it = g_durableBlobs.find(key);
+    return it != g_durableBlobs.end() && it->second.count(shaHex) > 0;
+}
+
 // Serializes token persistence (root_token.dat, file_tokens.dat) across
 // concurrent callers (rpc_handlers batch operations).
 // Per-(account,app) sync mutex registry (Steam-parity). Non-reentrant: SyncFromCloudInner-reachable callers go direct.
@@ -79,7 +106,6 @@ static std::unordered_map<uint64_t, std::shared_ptr<std::mutex>> g_syncMutexRegi
 // long-running Download/Upload doesn't return into freed memory.
 static std::atomic<int>  g_inflightSyncCount{0};
 static std::atomic<bool> g_shuttingDown{false};
-static std::atomic<int>  g_inflightCommitDrainCount{0};
 
 InflightSyncScope::InflightSyncScope() {
     g_inflightSyncCount.fetch_add(1, std::memory_order_seq_cst);
@@ -741,103 +767,9 @@ static std::string LocalBlobPath(uint32_t accountId, uint32_t appId,
 
 // Enqueue a cloud upload of the current CN value for this app.
 // Dedup in EnqueueWork will coalesce multiple calls during a batch.
-void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn) {
-    ClearMissingMetadataPath(CloudMetadataPath(accountId, appId, kCNFilename));
-    std::string cnStr = std::to_string(cn);
-    CloudWorkQueue::WorkItem wi;
-    wi.type = CloudWorkQueue::WorkItem::Upload;
-    wi.cloudPath = CloudMetadataPath(accountId, appId, kCNFilename);
-    wi.data.assign(cnStr.begin(), cnStr.end());
-    CloudWorkQueue::EnqueueWork(std::move(wi));
-}
-
-bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn) {
-    InflightSyncScope guard;
-    if (!guard) return false;
-    if (!g_provider) return false;
-    std::string cnStr = std::to_string(cn);
-    if (!UploadCloudMetadataText(accountId, appId, kCNFilename, cnStr)) {
-        return false;
-    }
-    RemoveCloudMetadataIfPresent(accountId, appId, kLegacyCNFilename);
-    return true;
-}
-
-uint64_t FetchCloudCN(uint32_t accountId, uint32_t appId) {
-    InflightSyncScope guard;
-    if (!guard) return 0;
-    if (!g_provider || !g_provider->IsAuthenticated()) return 0;
-
-    std::vector<uint8_t> data;
-    bool usedLegacy = false;
-    if (!DownloadCloudMetadataWithLegacyFallback(accountId, appId,
-            kCNFilename, kLegacyCNFilename, data, &usedLegacy)) {
-        return 0;
-    }
-
-    std::string s(data.begin(), data.end());
-    try {
-        uint64_t cn = std::stoull(s);
-        if (usedLegacy) {
-            if (UploadCloudMetadataText(accountId, appId, kCNFilename, std::to_string(cn))) {
-                RemoveCloudMetadataIfPresent(accountId, appId, kLegacyCNFilename);
-            } else {
-                LOG("[CloudStorage] FetchCloudCN app %u: failed to migrate legacy cloud CN", appId);
-            }
-        } else {
-            RemoveCloudMetadataIfPresent(accountId, appId, kLegacyCNFilename);
-        }
-        return cn;
-    } catch (...) {
-        return 0;
-    }
-}
-
-
-bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn) {
-    bool drained = CloudWorkQueue::DrainQueueForApp(accountId, appId);
-    if (g_shuttingDown.load(std::memory_order_seq_cst)) return false;
-    bool cnPublished = drained && PushCNToCloudSync(accountId, appId, cn);
-    if (cnPublished) return true;
-    if (g_shuttingDown.load(std::memory_order_seq_cst)) return false;
-    LOG("[CloudStorage] CommitCNWithRetry app %u CN=%llu drained=%d: deferring to async retry",
-        appId, (unsigned long long)cn, drained ? 1 : 0);
-    PushCNToCloud(accountId, appId, cn);
-    if (g_shuttingDown.load(std::memory_order_seq_cst)) return false;
-    CloudWorkQueue::DrainQueueForApp(accountId, appId);
-    return false;
-}
-
 // --- manifest utilities needed by SyncFromCloudInner ---
 // ManifestToJson lives in manifest_store.cpp; SyncFromCloudWithFlag uses
 // SaveManifestLocal / SaveManifest which call through to ManifestStore.
-
-
-// Detached: don't block Steam's RPC dispatch. Per-app sync mutex orders against SyncFromCloud and prevents older CNs landing after newer.
-void CommitCNAsync(uint32_t accountId, uint32_t appId, uint64_t cn) {
-    g_inflightCommitDrainCount.fetch_add(1, std::memory_order_seq_cst);
-    if (g_shuttingDown.load(std::memory_order_seq_cst)) {
-        g_inflightCommitDrainCount.fetch_sub(1, std::memory_order_seq_cst);
-        return;
-    }
-    try {
-        std::thread([accountId, appId, cn]() {
-            struct Guard {
-                ~Guard() { g_inflightCommitDrainCount.fetch_sub(1, std::memory_order_seq_cst); }
-            } guard;
-            if (g_shuttingDown.load(std::memory_order_seq_cst)) return;
-            auto m = AcquireAppSyncMutex(accountId, appId);
-            std::lock_guard<std::mutex> lk(*m);
-            if (g_shuttingDown.load(std::memory_order_seq_cst)) return;
-            // No WaitForForegroundSyncIdle: per-app mutex covers ordering; a cross-app park here would deadlock or invert FIFO.
-            (void)CommitCNWithRetry(accountId, appId, cn);
-        }).detach();
-    } catch (...) {
-        g_inflightCommitDrainCount.fetch_sub(1, std::memory_order_seq_cst);
-        LOG("[CloudStorage] CommitCNAsync: std::thread construction failed for app %u CN=%llu",
-            appId, (unsigned long long)cn);
-    }
-}
 
 
 // Drop stale conflict-copy files (>30 days) from cloud_redirect\conflicts\.
@@ -963,17 +895,14 @@ void Shutdown() {
     // Drain in-flight ops before g_provider teardown (no internal cancel). 5s cap so session switches don't lag.
     {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        while ((g_inflightSyncCount.load(std::memory_order_seq_cst) > 0
-                || g_inflightCommitDrainCount.load(std::memory_order_seq_cst) > 0)
+        while (g_inflightSyncCount.load(std::memory_order_seq_cst) > 0
                && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
-        int residualSync   = g_inflightSyncCount.load(std::memory_order_seq_cst);
-        int residualCommit = g_inflightCommitDrainCount.load(std::memory_order_seq_cst);
-        if (residualSync > 0 || residualCommit > 0) {
-            LOG("[CloudStorage] Shutdown: %d in-flight SyncFromCloud and %d CommitCNAsync "
-                "call(s) did not drain within 5s; leaking provider to avoid UAF",
-                residualSync, residualCommit);
+        int residualSync = g_inflightSyncCount.load(std::memory_order_seq_cst);
+        if (residualSync > 0) {
+            LOG("[CloudStorage] Shutdown: %d in-flight SyncFromCloud call(s) did not "
+                "drain within 5s; leaking provider to avoid UAF", residualSync);
             (void)g_provider.release();
             g_provider = nullptr;
             return;
@@ -1610,7 +1539,8 @@ bool DeleteBlobStaged(uint32_t accountId, uint32_t appId,
 // (forget) rather than advertise a blob that 404s elsewhere. Returns false only
 // when the cloud listing is unavailable (can't tell durable from phantom).
 bool VerifyAndHealManifestForPublish(uint32_t accountId, uint32_t appId,
-                                     CloudAppState& state) {
+                                     CloudAppState& state,
+                                     const std::unordered_set<std::string>* confirmedDurable) {
     if (state.files.empty()) return true;
 
     InflightSyncScope guard;
@@ -1620,6 +1550,33 @@ bool VerifyAndHealManifestForPublish(uint32_t accountId, uint32_t appId,
 
     // Account-scope metadata is filename-addressed, not CAS; skip.
     if (appId == CloudIntercept::kAccountScopeAppId) return true;
+
+    // Skip blob re-listing for a file whose content hash is in the session durable
+    // cache. Sha-keyed only: the cache holds the shas the promote actually uploaded
+    // (RecordDurableBlobShas, populated before this runs). Filename is not trusted --
+    // fe.sha may differ from the uploaded sha, which could skip a stale CAS path. If
+    // every file qualifies the ~20s GDrive walk is skipped; a mixed state still lists
+    // the unconfirmed remainder. confirmedDurable is kept for ABI but no longer read.
+    auto durableWithoutListing = [&](const std::string& filename,
+                                     const FileEntry& fe) -> bool {
+        (void)filename;
+        (void)confirmedDurable;
+        std::string shaHex = fe.sha.empty() ? std::string() : ShaToHex(fe.sha);
+        return !shaHex.empty() && IsBlobShaDurableThisSession(accountId, appId, shaHex);
+    };
+
+    {
+        bool allConfirmed = true;
+        for (const auto& [filename, fe] : state.files) {
+            if (!durableWithoutListing(filename, fe)) { allConfirmed = false; break; }
+        }
+        if (allConfirmed) {
+            LOG("[CloudStorage] VerifyManifest app %u: all %zu file(s) confirmed durable "
+                "this session; skipping blob listing",
+                appId, state.files.size());
+            return true;
+        }
+    }
 
     std::string blobPrefix = std::to_string(accountId) + "/" +
                              std::to_string(appId) + "/blobs/";
@@ -1655,6 +1612,11 @@ bool VerifyAndHealManifestForPublish(uint32_t accountId, uint32_t appId,
     for (auto it = state.files.begin(); it != state.files.end(); ) {
         const std::string& filename = it->first;
         const FileEntry& fe = it->second;
+
+        // Sha confirmed durable this session: durable by definition, no need to consult
+        // the listing (it may even race a just-completed upload's eventual-consistency
+        // window). Trust the upload 2xx, exactly as native trusts EResult.
+        if (durableWithoutListing(filename, fe)) { ++it; continue; }
 
         std::string shaHex = fe.sha.empty() ? std::string() : ShaToHex(fe.sha);
         bool present = (!shaHex.empty() && cloudShas.count(shaHex) > 0) ||
@@ -1721,6 +1683,8 @@ bool PromoteStagedBatchForCommit(uint32_t accountId, uint32_t appId,
 
     std::vector<ICloudProvider::UploadItem> batchItems;
     batchItems.reserve(uploads.size());
+    std::vector<std::string> batchShaHexes;       // content hashes promoted this batch
+    batchShaHexes.reserve(uploads.size());
 
     for (const auto& filename : uploads) {
         if (CloudIntercept::IsReservedBlobFilename(filename)) {
@@ -1744,28 +1708,24 @@ bool PromoteStagedBatchForCommit(uint32_t accountId, uint32_t appId,
         item.path = CloudBlobPathByNameAndSHA(accountId, appId, filename, shaHex);
         item.data = std::move(data);
         batchItems.push_back(std::move(item));
+        batchShaHexes.push_back(std::move(shaHex));
     }
 
     if (!batchItems.empty()) {
-        // Filter out blobs that already exist on cloud (CAS dedup).
-        std::vector<ICloudProvider::UploadItem> newItems;
-        newItems.reserve(batchItems.size());
-        for (auto& item : batchItems) {
-            if (g_provider->CheckExists(item.path) == ICloudProvider::ExistsStatus::Exists) {
-                LOG("[CloudStorage] PromoteStagedBatch app %u batch %llu: CAS dedup skipped %s",
-                    appId, (unsigned long long)batchId, item.path.c_str());
-                continue;
-            }
-            newItems.push_back(std::move(item));
+        // CAS dedup is now done per-file INSIDE UploadBatch's parallel workers
+        // (native-faithful: mirrors ClientBeginFileUpload's server-side EResult-29
+        // short-circuit), so the prior serial CheckExists pre-pass is gone -- it
+        // was ~100 sequential round-trips on Steam's thread before the parallel
+        // upload even started.
+        if (!g_provider->UploadBatch(batchItems)) {
+            LOG("[CloudStorage] PromoteStagedBatch app %u batch %llu: batch upload failed",
+                appId, (unsigned long long)batchId);
+            return false;
         }
-
-        if (!newItems.empty()) {
-            if (!g_provider->UploadBatch(newItems)) {
-                LOG("[CloudStorage] PromoteStagedBatch app %u batch %llu: batch upload failed",
-                    appId, (unsigned long long)batchId);
-                return false;
-            }
-        }
+        // UploadBatch==true => every blob is provider-confirmed durable (2xx or
+        // CAS-Exists). Record their hashes so a later batch's publish can skip
+        // re-listing them (the session lock guarantees no other machine removes them).
+        RecordDurableBlobShas(accountId, appId, batchShaHexes);
     }
 
     // CAS: deletes don't remove cloud blobs; GC reclaims orphans.

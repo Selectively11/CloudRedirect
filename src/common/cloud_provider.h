@@ -30,8 +30,15 @@ public:
         std::vector<uint8_t> data;
     };
 
+    // Contract: implementations MUST CAS-skip items already present on the
+    // provider (CheckExists == Exists), because callers such as
+    // PromoteStagedBatchForCommit no longer pre-filter existing blobs -- dedup
+    // happens here (native-faithful: per-file, ideally inside parallel workers,
+    // mirroring ClientBeginFileUpload's server-side short-circuit). Skip only on
+    // a definite Exists; on Missing/Error, upload (the CAS path is idempotent).
     virtual bool UploadBatch(const std::vector<UploadItem>& items) {
         for (const auto& item : items) {
+            if (CheckExists(item.path) == ExistsStatus::Exists) continue;
             if (!Upload(item.path, item.data.data(), item.data.size()))
                 return false;
         }

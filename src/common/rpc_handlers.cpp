@@ -11,6 +11,7 @@
 #include "cloud_staging.h"
 #include "app_state.h"
 #include "cloud_storage.h"
+#include "coop_yield.h"
 #include "pending_ops_journal.h"
 #include "file_util.h"
 #include "remotecache_repair.h"
@@ -147,6 +148,11 @@ static std::mutex g_fileTokensDirtyMutex;
 
 // Per-batch AutoCloud canonical root map: resolve once, reuse across begin/commit.
 static std::unordered_map<uint64_t, std::unordered_map<std::string, std::string>> g_batchCanonicalTokens;
+// Keys already loaded this batch -- tracked separately so an EMPTY token map still
+// counts as "prepared" and avoids re-hitting the provider (a Drive 404 for
+// file_tokens.dat + root_token.dat) on every per-file commit. Otherwise a fresh app
+// with no tokens re-downloads both files per commit on Steam's thread = UI freeze.
+static std::unordered_set<uint64_t> g_batchTokensPrepared;
 static std::mutex g_batchCanonicalTokensMutex;
 
 // Serializes token load-merge-save cycles.
@@ -350,7 +356,8 @@ static void PrepareBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
     uint64_t key = MakeAppAccountKey(accountId, appId);
     {
         std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
-        if (g_batchCanonicalTokens.find(key) != g_batchCanonicalTokens.end()) return;
+        // Already prepared this batch (even if empty) -- skip the provider load.
+        if (g_batchTokensPrepared.count(key)) return;
     }
 
     // File->root-token mappings are persisted to disk by the upload path; load
@@ -358,15 +365,19 @@ static void PrepareBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
     // cache, but that component is gone -- disk is the single source of truth.)
     std::unordered_map<std::string, std::string> tokens =
         CloudStorage::LoadFileTokens(accountId, appId);
-    if (tokens.empty()) return;
 
     std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
-    g_batchCanonicalTokens.emplace(key, std::move(tokens));
+    // Mark prepared unconditionally so an empty result is cached too.
+    g_batchTokensPrepared.insert(key);
+    if (!tokens.empty())
+        g_batchCanonicalTokens.emplace(key, std::move(tokens));
 }
 
 static void ClearBatchCanonicalTokens(uint32_t accountId, uint32_t appId) {
     std::lock_guard<std::mutex> lock(g_batchCanonicalTokensMutex);
-    g_batchCanonicalTokens.erase(MakeAppAccountKey(accountId, appId));
+    uint64_t key = MakeAppAccountKey(accountId, appId);
+    g_batchCanonicalTokens.erase(key);
+    g_batchTokensPrepared.erase(key);
 }
 
 static std::string CanonicalizeUploadRootToken(uint32_t accountId, uint32_t appId,
@@ -600,6 +611,11 @@ RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqB
             LOG("[NS-CL] GetAppFileChangelist app=%u: cloud state CN=%llu (%zu files)",
                 appId, cloudCN, cloudManifest.size());
         } else if (stateResult.status == CloudStorage::StateFetchStatus::NotFound) {
+            // Definitively no cloud data (not a fetch failure). Treat as an empty
+            // cloud manifest so the authoritative path returns is_only_delta=0,
+            // which tells Steam "cloud is empty" and triggers its disk scan + upload.
+            haveCloudManifest = true;
+            cloudCN = 0;
             LOG("[NS-CL] GetAppFileChangelist app=%u: no cloud state (new app), using local",
                 appId);
         } else if (stateResult.status == CloudStorage::StateFetchStatus::Timeout) {
@@ -1078,8 +1094,12 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
     bool sessionConflict = false;
     if (stateResult.status == CloudStorage::StateFetchStatus::Ok) {
         // Sync mutex: serialize state RMW to prevent interleaved publishes.
+        // Cooperative acquire (same rationale as CompleteBatch): a background publish
+        // thread may hold this mutex through a slow cloud round-trip; a hard lock here
+        // would stall BMainLoop past the >15s watchdog. This handler also runs on the
+        // active job coroutine, so LockCooperatively can yield while it waits.
         auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
-        std::lock_guard<std::mutex> syncLock(*syncMtx);
+        auto syncLock = CoopYield::LockCooperatively(*syncMtx);
 
         auto& state = stateResult.state;
         uint64_t now = static_cast<uint64_t>(time(nullptr));
@@ -1107,7 +1127,8 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
                 state.session.machineName = currentSession.machineName;
                 state.session.timeLastUpdated = now;
                 state.session.operation = "active";
-                if (!CloudStorage::PublishCloudState(accountId, appId, state)) {
+                // Session-only: skip blob verification (lockOnly=true).
+                if (!CloudStorage::PublishCloudState(accountId, appId, state, /*lockOnly=*/true)) {
                     LOG("[NS] LaunchIntent app=%u: session override publish failed", appId);
                 }
                 LOG("[NS] LaunchIntent app=%u: forced session override (machine=%s, client=%llu)",
@@ -1118,7 +1139,8 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
             state.session.machineName = currentSession.machineName;
             state.session.timeLastUpdated = now;
             state.session.operation = "active";
-            if (!CloudStorage::PublishCloudState(accountId, appId, state)) {
+            // Session-only: skip blob verification (lockOnly=true).
+            if (!CloudStorage::PublishCloudState(accountId, appId, state, /*lockOnly=*/true)) {
                 // Publish refused/failed -- typically the CN-monotonic guard saw a
                 // newer cloud state (another machine published in the window).
                 // Re-fetch the fresh state and re-apply our session onto it.
@@ -1133,7 +1155,7 @@ RpcResult HandleLaunchIntent(uint32_t appId, const std::vector<PB::Field>& reqBo
                         sessionConflict = !ignorePendingOperations;
                     } else {
                         freshState.session = state.session;
-                        if (!CloudStorage::PublishCloudState(accountId, appId, freshState)) {
+                        if (!CloudStorage::PublishCloudState(accountId, appId, freshState, /*lockOnly=*/true)) {
                             LOG("[NS] LaunchIntent app=%u: session acquire retry also failed", appId);
                         }
                     }
@@ -1264,6 +1286,11 @@ RpcResult HandleBeginBatch(uint32_t appId, const std::vector<PB::Field>& reqBody
         // Fail early: error skips CompleteBatch, preventing orphaned local blobs.
         return RpcResult(PB::Writer(), kEResultFail);
     }
+
+    // If a previous batch's cloud publish is still in-flight, wait for it so
+    // FetchCloudStateForServe sees the fresh CN. Typically a no-op (single batch)
+    // or instant (publish already landed between batches).
+    CloudStorage::WaitForPendingPublish(accountId, appId);
 
     // The CN returned here is what Steam records as synced and what we must publish
     // at CompleteBatch -- they have to match, or Steam re-downloads what it just
@@ -1753,232 +1780,283 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
     // blocked BMainLoop past the 15s watchdog on large saves. Detach it instead.
     uint64_t newCN = batch.assignedCN;
 
-    // Worker order: promote -> advance local CN/manifest -> publish. Advancing the
-    // manifest only after promote avoids advertising a not-yet-uploaded SHA.
-    {
-        uint64_t publishCN = newCN;
-        uint64_t publishBuildId = batch.appBuildId;
-        uint64_t workerBatchId = batch.batchId;
-        // Copies of the per-file metadata the publish stage rebuilds cloud state from.
-        auto uploadMeta = std::make_shared<
-            std::unordered_map<std::string, CloudIntercept::UploadFileMeta>>(batch.uploadMeta);
-        auto filePlatforms = std::make_shared<
-            std::unordered_map<std::string, uint32_t>>(batch.filePlatforms);
-        auto uploadsCopy = std::make_shared<std::vector<std::string>>(uploads);
-        auto deletesCopy = std::make_shared<std::vector<std::string>>(deletes);
+    // Native CompleteAppUploadBatchBlocking yields while BMainLoop keeps pumping.
+    // Return quickly after the critical sync work (promote + local CN advance) and
+    // defer the slow cloud publish to a background thread. Correct because:
+    //   1. The next BeginBatch reads CN from local state (already advanced).
+    //   2. ExitSyncDone is fire-and-forget (IDA-validated: notification, no response).
+    //   3. ReleaseCloudSession waits on the publish barrier before releasing the
+    //      session lock, so another machine can't see stale state.
+    uint64_t publishCN = newCN;
+    uint64_t publishBuildId = batch.appBuildId;
+    uint64_t workerBatchId = batch.batchId;
+    auto& uploadMeta = batch.uploadMeta;
+    auto& filePlatforms = batch.filePlatforms;
 
-        std::thread([accountId, appId, publishCN, publishBuildId, workerBatchId,
-                     uploadMeta, filePlatforms, uploadsCopy, deletesCopy] {
-            // Inflight-sync scope first: drains before provider teardown (UAF guard).
-            CloudStorage::InflightSyncScope guard;
-            if (!guard.entered) return;
+    // --- Synchronous on Steam's thread: promote + local CN advance ---
 
-            // Promote: the blob upload (the slow part).
-            auto tPromote = std::chrono::steady_clock::now();
-            bool promoteOk = CloudStorage::PromoteStagedBatchForCommit(
-                accountId, appId, workerBatchId, *uploadsCopy, *deletesCopy);
-            LOG("[NS] CompleteBatch(async) app=%u: promote done in %lldms (ok=%d)",
-                appId,
-                (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - tPromote).count(),
-                promoteOk ? 1 : 0);
-            if (!promoteOk) {
-                // Upload failed: leave the CN so the next BeginBatch reassigns it and
-                // Steam re-uploads.
-                LOG("[NS] CompleteBatch(async) app=%u: staged promotion failed; "
-                    "leaving CN unchanged (Steam re-uploads next sync)", appId);
-                PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
-                return;
-            }
-
-            // Advance the local CN/manifest only now that the blobs are durable, so
-            // the fallback-serve manifest never references a not-yet-uploaded SHA.
-            {
-                auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
-                std::lock_guard<std::mutex> lock(*syncMtx);
-                auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
-                for (const auto& filename : *deletesCopy)
-                    localManifest.erase(filename);
-                for (const auto& filename : *uploadsCopy) {
-                    if (IsReservedBlobFilename(filename)) continue;
-                    CloudStorage::ManifestEntry me;
-                    auto metaIt = uploadMeta->find(filename);
-                    if (metaIt != uploadMeta->end()) {
-                        me.sha = metaIt->second.sha;
-                        me.timestamp = metaIt->second.timestamp;
-                        me.size = metaIt->second.size;
-                    } else {
-                        auto entry = LocalStorage::GetFileEntry(accountId, appId, filename);
-                        if (!entry.has_value()) continue;
-                        me.sha = entry->sha;
-                        me.timestamp = entry->timestamp;
-                        me.size = entry->rawSize;
-                    }
-                    localManifest[filename] = std::move(me);
-                }
-                LocalStorage::SetChangeNumber(accountId, appId, publishCN);
-                CloudStorage::SaveManifestLocal(accountId, appId, localManifest);
-                CloudStorage::SaveManifestSnapshot(accountId, appId, publishCN);
-                LOG("[NS] CompleteBatch(async) app=%u: local CN advanced to %llu + manifest saved "
-                    "(blobs durable)", appId, (unsigned long long)publishCN);
-            }
-
-            // Publish: re-fetch live state, CN-monotonic guard, then write.
-            constexpr int kMaxAttempts = 4;          // 1 immediate + 3 backoff retries
-            constexpr int kBaseDelayMs = 2000;
-            for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
-                if (attempt > 1)
-                    std::this_thread::sleep_for(
-                        std::chrono::milliseconds(kBaseDelayMs * (attempt - 1)));
-                // Re-fetch live state under sync mutex to preserve session changes.
-                auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
-                std::lock_guard<std::mutex> lock(*syncMtx);
-                auto result = CloudStorage::FetchCloudState(accountId, appId);
-                if (result.status != CloudStorage::StateFetchStatus::Ok) {
-                    // Cloud fetch failed; skip to avoid erasing session lock.
-                    LOG("[NS] CompleteBatch(async): publish %d/%d skipped for app %u: cloud fetch failed",
-                        attempt, kMaxAttempts, appId);
-                    continue;
-                }
-                CloudStorage::CloudAppState publishState = std::move(result.state);
-                // Refuse if another device already committed at >= our CN. This is
-                // always a fresh commit (never a same-CN republish), so equality aborts.
-                if (publishState.cn >= publishCN) {
-                    LOG("[NS] CompleteBatch(async): publish aborted for app %u: cloud CN %llu >= batch CN %llu",
-                        appId, publishState.cn, publishCN);
-                    return;
-                }
-
-                // Rebuild the file list from the cloud base (or local manifest if
-                // behind) and apply this batch's deletes/uploads from captured meta.
-                uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
-                if (publishState.cn < localCN) {
-                    LOG("[NS] CompleteBatch(async) app %u: cloud CN %llu < local CN %llu, "
-                        "rebuilding file list from local manifest",
-                        appId, (unsigned long long)publishState.cn,
-                        (unsigned long long)localCN);
-                    publishState.files.clear();
-                    auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
-                    for (const auto& [name, me] : localManifest) {
-                        CloudStorage::FileEntry fe;
-                        fe.sha = me.sha;
-                        fe.timestamp = me.timestamp;
-                        fe.size = me.size;
-                        publishState.files[name] = std::move(fe);
-                    }
-                }
-
-                for (const auto& filename : *deletesCopy)
-                    publishState.files.erase(filename);
-
-                for (const auto& filename : *uploadsCopy) {
-                    if (IsReservedBlobFilename(filename)) continue;
-                    CloudStorage::FileEntry fe;
-                    auto metaIt = uploadMeta->find(filename);
-                    if (metaIt != uploadMeta->end()) {
-                        fe.sha = metaIt->second.sha;
-                        fe.timestamp = metaIt->second.timestamp;
-                        fe.size = metaIt->second.size;
-                    } else {
-                        auto entry = LocalStorage::GetFileEntry(accountId, appId, filename);
-                        if (!entry.has_value()) continue;
-                        fe.sha = entry->sha;
-                        fe.timestamp = entry->timestamp;
-                        fe.size = entry->rawSize;
-                    }
-                    auto ptIt = filePlatforms->find(filename);
-                    fe.platformsToSync = (ptIt != filePlatforms->end())
-                        ? ptIt->second : 0xFFFFFFFFu;
-                    publishState.files[filename] = std::move(fe);
-                }
-
-                // Capture the DEVELOPER's PICS quota into cloud state so it propagates
-                // to machines that can't read PICS (Linux KvInjector cache-null).
-                {
-                    uint64_t q = 0; uint32_t f = 0;
-                    if (publishState.quota.maxNumFiles == 0 &&
-                        SteamKvInjector::ReadAppQuota(appId, q, f) && f > 0 && q > 0 &&
-                        f != kFallbackMaxFiles) {
-                        publishState.quota.quotaBytes = q;
-                        publishState.quota.maxNumFiles = f;
-                        publishState.quota.fetchedAtUnix = static_cast<uint64_t>(time(nullptr));
-                        publishState.quota.lastSeenBuildId = publishState.appBuildId;
-                        LOG("[NS] CompleteBatch(async) app=%u: captured PICS quota=%llu files=%u into cloud state",
-                            appId, (unsigned long long)q, f);
-                    }
-                }
-
-                // Mirror native over-quota eviction before publishing (live KV cap,
-                // fall back to cloud-state PICS). Must run before PublishCloudState.
-                uint64_t evictBytes = publishState.quota.quotaBytes;
-                uint32_t evictFiles = publishState.quota.maxNumFiles;
-                {
-                    uint64_t liveBytes = 0; uint32_t liveFiles = 0;
-                    if (SteamKvInjector::ReadAppQuota(appId, liveBytes, liveFiles) &&
-                        liveFiles > 0) {
-                        evictBytes = liveBytes;
-                        evictFiles = liveFiles;
-                        LOG("[NS] CompleteBatch(async) app=%u: eviction uses live KV cap "
-                            "maxnumfiles=%u quota=%llu (what native's exit-walk sees)",
-                            appId, evictFiles, (unsigned long long)evictBytes);
-                    } else {
-                        LOG("[NS] CompleteBatch(async) app=%u: live KV cap unreadable; eviction "
-                            "falls back to cloud-state PICS maxnumfiles=%u",
-                            appId, evictFiles);
-                    }
-                }
-                // Drop over-quota entries, but defer the local-blob deletes until the
-                // publish is durable (else a failed publish strands the manifest).
-                auto evicted = ApplyNativeOverQuotaEviction(accountId, appId,
-                                                            publishState.files,
-                                                            evictBytes, evictFiles);
-                if (!evicted.empty())
-                    LOG("[NS] CompleteBatch(async) app=%u: evicting %zu over-quota file(s) "
-                        "from cloud set (local blobs dropped only after publish)",
-                        appId, evicted.size());
-
-                publishState.cn = publishCN;
-                publishState.appBuildId = publishBuildId;
-                if (CloudStorage::PublishCloudState(accountId, appId, publishState)) {
-                    LOG("[NS] CompleteBatch(async): publish %d/%d succeeded for app %u",
-                        attempt, kMaxAttempts, appId);
-                    // Now safe: drop the evicted local blobs and prune them from the
-                    // manifest so the fallback-serve manifest stays consistent.
-                    if (!evicted.empty()) {
-                        auto m = CloudStorage::LoadLocalManifest(accountId, appId);
-                        for (const auto& name : evicted) {
-                            m.erase(name);
-                            CloudStorage::DeleteBlobStaged(accountId, appId, name);
-                        }
-                        CloudStorage::SaveManifestLocal(accountId, appId, m);
-                    }
-                    PendingOpsJournal::RecordUploadBatchEnd(accountId, appId);
-                    // GC only after a durable publish, when the keep-set (cloud state)
-                    // references the new SHAs -- earlier it could reclaim a live blob.
-                    CloudStorage::GarbageCollectBlobs(accountId, appId);
-                    return;
-                }
-                LOG("[NS] CompleteBatch(async): publish %d/%d failed for app %u",
-                    attempt, kMaxAttempts, appId);
-            }
-            // Local CN/manifest committed and blobs durable -- record End (the next
-            // sync republishes from the local CN).
-            PendingOpsJournal::RecordUploadBatchEnd(accountId, appId);
-            LOG("[NS] CompleteBatch(async): all publish attempts exhausted for app %u; "
-                "remote state stale until next sync", appId);
-        }).detach();
+    // Inflight-sync scope: drains before provider teardown (UAF guard).
+    CloudStorage::InflightSyncScope guard;
+    if (!guard.entered) {
+        LOG("[NS] CompleteBatch app=%u: inflight-sync scope refused entry (shutting down?)", appId);
+        BatchTracker_Clear(accountId, appId, batch.batchId);
+        ClearBatchCanonicalTokens(accountId, appId);
+        return PB::Writer();
     }
 
-    // The worker copied everything by value, so clearing the batch is safe now.
-    BatchTracker_Clear(accountId, appId, batch.batchId);
-    // Only validation + token drain ran on Steam's thread; the upload/publish are
-    // off-thread, so this total should be a few ms.
-    LOG("[NS] CompleteBatch app=%u CN=%llu DONE: returned to Steam in %lldms total "
-        "(blob upload + publish + GC are async)", appId, newCN, elapsedMs());
+    // Promote (blob upload, ~43s for a 100-file batch). The handler runs on the active
+    // job coroutine, so mirror native YldUploadFiles: run the promote on a background
+    // thread and PumpUntil it finishes rather than hard-blocking BMainLoop. Returns
+    // only after the promote completes, keeping the CN advance below strictly after
+    // durability; no CR mutex is held across the pump, so a re-entry can't deadlock.
+    auto tPromote = std::chrono::steady_clock::now();
+    std::atomic<bool> promoteDone{false};
+    bool promoteOk = false;
+    std::thread promoteThread(
+        [&accountId, &appId, &workerBatchId, &uploads, &deletes,
+         &promoteOk, &promoteDone]() {
+            promoteOk = CloudStorage::PromoteStagedBatchForCommit(
+                accountId, appId, workerBatchId, uploads, deletes);
+            promoteDone.store(true, std::memory_order_release);
+        });
+    // Cooperative wait: pumps BMainLoop via the guarded job-coroutine yield until the
+    // promote thread signals completion. Degrades to a plain spin off Steam.
+    CoopYield::PumpUntil([&promoteDone]() {
+        return promoteDone.load(std::memory_order_acquire);
+    });
+    promoteThread.join();
+    auto promoteMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tPromote).count();
+    LOG("[NS] CompleteBatch app=%u: promote done in %lldms (ok=%d)",
+        appId, (long long)promoteMs, promoteOk ? 1 : 0);
+    if (!promoteOk) {
+        LOG("[NS] CompleteBatch app=%u: staged promotion failed; "
+            "leaving CN unchanged (Steam re-uploads next sync)", appId);
+        PendingOpsJournal::RecordUploadBatchInterrupted(accountId, appId);
+        BatchTracker_Clear(accountId, appId, batch.batchId);
+        ClearBatchCanonicalTokens(accountId, appId);
+        return PB::Writer();
+    }
 
+    // Advance the local CN/manifest now that the blobs are durable.
+    {
+        // Cooperative acquire: a prior batch's deferred publish thread can still hold
+        // the app-sync mutex through a ~20s cloud List. A hard lock_guard here would
+        // hard-block BMainLoop for that whole window (tripping the >15s watchdog, as
+        // observed). LockCooperatively keeps the job coroutine yielding while it waits.
+        auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
+        auto lock = CoopYield::LockCooperatively(*syncMtx);
+        auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
+        for (const auto& filename : deletes)
+            localManifest.erase(filename);
+        for (const auto& filename : uploads) {
+            if (IsReservedBlobFilename(filename)) continue;
+            CloudStorage::ManifestEntry me;
+            auto metaIt = uploadMeta.find(filename);
+            if (metaIt != uploadMeta.end()) {
+                me.sha = metaIt->second.sha;
+                me.timestamp = metaIt->second.timestamp;
+                me.size = metaIt->second.size;
+            } else {
+                auto entry = LocalStorage::GetFileEntry(accountId, appId, filename);
+                if (!entry.has_value()) continue;
+                me.sha = entry->sha;
+                me.timestamp = entry->timestamp;
+                me.size = entry->rawSize;
+            }
+            localManifest[filename] = std::move(me);
+        }
+        LocalStorage::SetChangeNumber(accountId, appId, publishCN);
+        CloudStorage::SaveManifestLocal(accountId, appId, localManifest);
+        CloudStorage::SaveManifestSnapshot(accountId, appId, publishCN);
+        LOG("[NS] CompleteBatch app=%u: local CN advanced to %llu + manifest saved",
+            appId, (unsigned long long)publishCN);
+    }
+
+    // --- Deferred to background thread: cloud state publish ---
+    // Captures batch metadata by value; the background thread owns it.
+    auto uploadMetaCopy = std::make_shared<
+        std::unordered_map<std::string, CloudIntercept::UploadFileMeta>>(uploadMeta);
+    auto filePlatformsCopy = std::make_shared<
+        std::unordered_map<std::string, uint32_t>>(filePlatforms);
+    auto uploadsCopy = std::make_shared<std::vector<std::string>>(uploads);
+    auto deletesCopy = std::make_shared<std::vector<std::string>>(deletes);
+
+    std::promise<void> publishPromise;
+    CloudStorage::SetPendingPublish(accountId, appId, publishPromise.get_future().share());
+
+    std::thread([accountId, appId, publishCN, publishBuildId,
+                 uploadMetaCopy, filePlatformsCopy, uploadsCopy, deletesCopy,
+                 publishPromise = std::move(publishPromise)]() mutable {
+        CloudStorage::InflightSyncScope pubGuard;
+        if (!pubGuard.entered) {
+            publishPromise.set_value();
+            return;
+        }
+
+        // Files this batch uploaded are provider-confirmed durable (the promote's
+        // UploadBatch returned true, i.e. a 2xx per file). Pass them to the publish so
+        // it can skip the slow blob re-listing for them -- native trusts the same
+        // upload result and never re-lists. Deletes/reserved names are excluded; only
+        // carried-forward files (not in this set) still need a durability check.
+        std::unordered_set<std::string> confirmedDurable;
+        confirmedDurable.reserve(uploadsCopy->size());
+        for (const auto& filename : *uploadsCopy) {
+            if (IsReservedBlobFilename(filename)) continue;
+            confirmedDurable.insert(filename);
+        }
+        for (const auto& filename : *deletesCopy) confirmedDurable.erase(filename);
+
+        bool publishSucceeded = false;
+        constexpr int kMaxAttempts = 4;
+        constexpr int kBaseDelayMs = 2000;
+        for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            if (attempt > 1)
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(kBaseDelayMs * (attempt - 1)));
+            auto syncMtx = CloudStorage::AcquireAppSyncMutex(accountId, appId);
+            std::lock_guard<std::mutex> lock(*syncMtx);
+            auto result = CloudStorage::FetchCloudState(accountId, appId);
+            // NotFound is the expected state for a brand-new app (no cloud state
+            // file yet) -- proceed with an empty base state so the first batch can
+            // create it. Only genuine transient failures (FetchFailed/ParseFailed/
+            // Timeout) are retry-worthy; otherwise the first-ever batch could never
+            // publish (chicken-and-egg deadlock).
+            if (result.status != CloudStorage::StateFetchStatus::Ok &&
+                result.status != CloudStorage::StateFetchStatus::NotFound) {
+                LOG("[NS] CompleteBatch(pub): publish %d/%d skipped for app %u: cloud fetch failed",
+                    attempt, kMaxAttempts, appId);
+                continue;
+            }
+            CloudStorage::CloudAppState publishState = std::move(result.state);
+            if (result.status == CloudStorage::StateFetchStatus::NotFound) {
+                // Fresh app: start from an empty, CN-0 base; uploads layer on below.
+                publishState = CloudStorage::CloudAppState{};
+                LOG("[NS] CompleteBatch(pub) app %u: no cloud state yet (NotFound); "
+                    "publishing initial state for batch CN %llu",
+                    appId, (unsigned long long)publishCN);
+            }
+            if (publishState.cn >= publishCN) {
+                LOG("[NS] CompleteBatch(pub): publish aborted for app %u: cloud CN %llu >= batch CN %llu",
+                    appId, publishState.cn, publishCN);
+                publishSucceeded = true;
+                break;
+            }
+
+            uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
+            if (publishState.cn < localCN) {
+                LOG("[NS] CompleteBatch(pub) app %u: cloud CN %llu < local CN %llu, "
+                    "rebuilding file list from local manifest",
+                    appId, (unsigned long long)publishState.cn, (unsigned long long)localCN);
+                publishState.files.clear();
+                auto localManifest = CloudStorage::LoadLocalManifest(accountId, appId);
+                for (const auto& [name, me] : localManifest) {
+                    CloudStorage::FileEntry fe;
+                    fe.sha = me.sha;
+                    fe.timestamp = me.timestamp;
+                    fe.size = me.size;
+                    publishState.files[name] = std::move(fe);
+                }
+            }
+
+            for (const auto& filename : *deletesCopy)
+                publishState.files.erase(filename);
+
+            for (const auto& filename : *uploadsCopy) {
+                if (IsReservedBlobFilename(filename)) continue;
+                CloudStorage::FileEntry fe;
+                auto metaIt = uploadMetaCopy->find(filename);
+                if (metaIt != uploadMetaCopy->end()) {
+                    fe.sha = metaIt->second.sha;
+                    fe.timestamp = metaIt->second.timestamp;
+                    fe.size = metaIt->second.size;
+                } else {
+                    auto entry = LocalStorage::GetFileEntry(accountId, appId, filename);
+                    if (!entry.has_value()) continue;
+                    fe.sha = entry->sha;
+                    fe.timestamp = entry->timestamp;
+                    fe.size = entry->rawSize;
+                }
+                auto ptIt = filePlatformsCopy->find(filename);
+                fe.platformsToSync = (ptIt != filePlatformsCopy->end())
+                    ? ptIt->second : 0xFFFFFFFFu;
+                publishState.files[filename] = std::move(fe);
+            }
+
+            // Capture PICS quota into cloud state for cross-machine propagation.
+            {
+                uint64_t q = 0; uint32_t f = 0;
+                if (publishState.quota.maxNumFiles == 0 &&
+                    SteamKvInjector::ReadAppQuota(appId, q, f) && f > 0 && q > 0 &&
+                    f != kFallbackMaxFiles) {
+                    publishState.quota.quotaBytes = q;
+                    publishState.quota.maxNumFiles = f;
+                    publishState.quota.fetchedAtUnix = static_cast<uint64_t>(time(nullptr));
+                    publishState.quota.lastSeenBuildId = publishState.appBuildId;
+                    LOG("[NS] CompleteBatch(pub) app=%u: captured PICS quota=%llu files=%u",
+                        appId, (unsigned long long)q, f);
+                }
+            }
+
+            // Native over-quota eviction before publishing.
+            uint64_t evictBytes = publishState.quota.quotaBytes;
+            uint32_t evictFiles = publishState.quota.maxNumFiles;
+            {
+                uint64_t liveBytes = 0; uint32_t liveFiles = 0;
+                if (SteamKvInjector::ReadAppQuota(appId, liveBytes, liveFiles) &&
+                    liveFiles > 0) {
+                    evictBytes = liveBytes;
+                    evictFiles = liveFiles;
+                }
+            }
+            auto evicted = ApplyNativeOverQuotaEviction(accountId, appId,
+                                                        publishState.files,
+                                                        evictBytes, evictFiles);
+            if (!evicted.empty())
+                LOG("[NS] CompleteBatch(pub) app=%u: evicting %zu over-quota file(s)",
+                    appId, evicted.size());
+
+            publishState.cn = publishCN;
+            publishState.appBuildId = publishBuildId;
+            if (CloudStorage::PublishCloudState(accountId, appId, publishState,
+                                                /*lockOnly=*/false, &confirmedDurable)) {
+                LOG("[NS] CompleteBatch(pub): publish %d/%d succeeded for app %u at CN=%llu",
+                    attempt, kMaxAttempts, appId, (unsigned long long)publishCN);
+                if (!evicted.empty()) {
+                    auto m = CloudStorage::LoadLocalManifest(accountId, appId);
+                    for (const auto& name : evicted) {
+                        m.erase(name);
+                        CloudStorage::DeleteBlobStaged(accountId, appId, name);
+                    }
+                    CloudStorage::SaveManifestLocal(accountId, appId, m);
+                }
+                publishSucceeded = true;
+                PendingOpsJournal::RecordUploadBatchEnd(accountId, appId);
+                break;
+            }
+            LOG("[NS] CompleteBatch(pub): publish %d/%d failed for app %u",
+                attempt, kMaxAttempts, appId);
+        }
+
+        if (!publishSucceeded) {
+            PendingOpsJournal::RecordUploadBatchEnd(accountId, appId);
+            LOG("[NS] CompleteBatch(pub): all publish attempts exhausted for app %u",
+                appId);
+        }
+        // Resolve the barrier BEFORE GC — session release must not wait on housekeeping.
+        publishPromise.set_value();
+        // GC is best-effort housekeeping; runs after the barrier is released.
+        if (publishSucceeded)
+            CloudStorage::GarbageCollectBlobs(accountId, appId);
+    }).detach();
+
+    BatchTracker_Clear(accountId, appId, batch.batchId);
+    LOG("[NS] CompleteBatch app=%u CN=%llu returned to Steam in %lldms "
+        "(publish deferred, barrier at session release)",
+        appId, (unsigned long long)newCN, elapsedMs());
     ClearBatchCanonicalTokens(accountId, appId);
 
-    PB::Writer body; // empty response
+    PB::Writer body;
     return body;
 }
 

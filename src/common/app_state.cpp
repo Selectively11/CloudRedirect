@@ -1,6 +1,7 @@
 #include "app_state.h"
 #include "cloud_storage.h"
 #include "cloud_metadata_paths.h"
+#include "coop_yield.h"
 #include "file_util.h"
 #include "json.h"
 #include "local_storage.h"
@@ -62,6 +63,46 @@ inline int64_t NowMs() {
 }
 
 } // namespace
+
+// Pending publish barrier: CompleteBatch defers the cloud publish to a background
+// thread and stores its future here. ReleaseCloudSession (ExitSyncDone) waits on it
+// before releasing the session lock so cloud state is durable before another machine
+// can acquire. BeginBatch's FetchCloudStateForServe also drains it so the next batch
+// sees the fresh cloud CN.
+namespace {
+std::mutex& g_pendingPublishMtx = *new std::mutex();
+std::unordered_map<uint64_t, std::shared_future<void>>& g_pendingPublish =
+    *new std::unordered_map<uint64_t, std::shared_future<void>>();
+} // namespace
+
+void SetPendingPublish(uint32_t accountId, uint32_t appId,
+                       std::shared_future<void> fut) {
+    std::lock_guard<std::mutex> lk(g_pendingPublishMtx);
+    g_pendingPublish[ServeCacheKey(accountId, appId)] = std::move(fut);
+}
+
+void WaitForPendingPublish(uint32_t accountId, uint32_t appId) {
+    std::shared_future<void> fut;
+    {
+        std::lock_guard<std::mutex> lk(g_pendingPublishMtx);
+        auto it = g_pendingPublish.find(ServeCacheKey(accountId, appId));
+        if (it == g_pendingPublish.end()) return;
+        fut = it->second;
+    }
+    if (fut.valid()) {
+        // Runs on BMainLoop (BeginBatch handler); a hard fut.wait() here starved the
+        // frame watchdog while a prior batch's publish held its barrier. Pump the job
+        // coroutine instead, polling with wait_for(0). Degrades to a plain spin off Steam.
+        CoopYield::PumpUntil([&fut]() {
+            return fut.wait_for(std::chrono::seconds(0)) ==
+                   std::future_status::ready;
+        });
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_pendingPublishMtx);
+        g_pendingPublish.erase(ServeCacheKey(accountId, appId));
+    }
+}
 
 // See g_ownClientId.
 void NoteOwnClientId(uint64_t clientId) {
@@ -489,7 +530,8 @@ StateFetchResult FetchCloudStateForServe(uint32_t accountId, uint32_t appId) {
 }
 
 bool PublishCloudState(uint32_t accountId, uint32_t appId,
-                       const CloudAppState& state, bool lockOnly) {
+                       const CloudAppState& state, bool lockOnly,
+                       const std::unordered_set<std::string>* confirmedDurable) {
     InflightSyncScope guard;
     if (!guard) return false;
     if (!g_stateProvider || !g_stateProvider->IsAuthenticated()) {
@@ -501,7 +543,8 @@ bool PublishCloudState(uint32_t accountId, uint32_t appId,
     // we never publish a state pointing at blobs that 404 elsewhere. lockOnly skips
     // it: a session-release publish reuses the manifest CompleteBatch just verified.
     CloudAppState verified = state;
-    if (!lockOnly && !VerifyAndHealManifestForPublish(accountId, appId, verified)) {
+    if (!lockOnly &&
+        !VerifyAndHealManifestForPublish(accountId, appId, verified, confirmedDurable)) {
         LOG("[AppState] PublishCloudState app %u: cannot verify blobs, deferring publish", appId);
         return false;
     }
@@ -548,6 +591,11 @@ bool PublishCloudState(uint32_t accountId, uint32_t appId,
 }
 
 void ReleaseCloudSession(uint32_t accountId, uint32_t appId, uint64_t clientId) {
+    // Wait for any deferred CompleteBatch publish to land before releasing the
+    // session. This ensures the cloud state is durable (at the batch CN) before
+    // another machine can acquire and fetch it.
+    WaitForPendingPublish(accountId, appId);
+
     // Sync mutex: serialize state RMW to prevent interleaved publishes.
     auto syncMtx = AcquireAppSyncMutex(accountId, appId);
     std::lock_guard<std::mutex> syncLock(*syncMtx);

@@ -925,11 +925,16 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
     // safe: per-call request handles, distinct CAS paths, m_folderMtx-guarded folders.
     if (items.empty()) return true;
 
+    // Per-batch throughput telemetry: wall time + rate-limit hit delta.
+    auto batchStart = std::chrono::steady_clock::now();
+    uint64_t rlBefore = g_rateLimitHits.load(std::memory_order_relaxed);
+
     static constexpr size_t kMaxParallel = 10;                 // native @nClientCloudMaxNumParallelUploads
     static constexpr uint64_t kMaxBytesInFlight = 64ull << 20; // native @nClientCloudMaxMBParallelUploads (64 MB)
 
     std::atomic<size_t> next{0};
     std::atomic<bool> failed{false};
+    std::atomic<size_t> dedupSkips{0};        // CAS-existing blobs skipped in-worker
     std::mutex doneMtx;
     std::vector<std::string> uploadedPaths;   // for rollback, guarded by doneMtx
 
@@ -944,7 +949,21 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
             // here (bad_alloc is likelier with up to 10 buffers in flight).
             bool ok = false;
             try {
-                ok = Upload(item.path, item.data.data(), item.data.size());
+                // CAS dedup IN the parallel worker (native-faithful: mirrors
+                // ClientBeginFileUpload's per-file EResult-29 server short-circuit,
+                // IDA EYieldingUploadFile sub_1389119A0). Skip only on a definite
+                // Exists; on Missing OR Error, upload (idempotent CAS path, so
+                // treating an errored check as "must upload" never strands a blob).
+                if (CheckExists(item.path) == ExistsStatus::Exists) {
+                    dedupSkips.fetch_add(1, std::memory_order_relaxed);
+                    ok = true;  // already durable; nothing to roll back
+                } else {
+                    ok = Upload(item.path, item.data.data(), item.data.size());
+                    if (ok) {
+                        std::lock_guard<std::mutex> lk(doneMtx);
+                        uploadedPaths.push_back(item.path);
+                    }
+                }
             } catch (const std::exception& e) {
                 LOG("[GDriveProvider] UploadBatch: worker threw on '%s': %s",
                     item.path.c_str(), e.what());
@@ -957,8 +976,6 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
                 LOG("[GDriveProvider] UploadBatch: failed to upload '%s'", item.path.c_str());
                 return;
             }
-            std::lock_guard<std::mutex> lk(doneMtx);
-            uploadedPaths.push_back(item.path);
         }
     };
 
@@ -981,6 +998,10 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
 
     std::vector<std::thread> pool;
     pool.reserve(workerCount);
+
+    // Plain spawn-then-join worker pool. BMainLoop responsiveness is handled by the
+    // CompleteBatch handler (PumpUntil at the active-coroutine level), not here -- the
+    // coroutine is inactive this deep, so a yield would corrupt it.
     for (size_t t = 0; t < workerCount; ++t) pool.emplace_back(worker);
     for (auto& th : pool) th.join();
 
@@ -990,8 +1011,16 @@ bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
         for (const auto& path : uploadedPaths) Remove(path);
         return false;
     }
-    LOG("[GDriveProvider] UploadBatch: uploaded %zu file(s) with %zu parallel worker(s)",
-        items.size(), workerCount);
+    double elapsedSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - batchStart).count();
+    uint64_t rlHits = g_rateLimitHits.load(std::memory_order_relaxed) - rlBefore;
+    double filesPerSec = elapsedSec > 0 ? items.size() / elapsedSec : 0.0;
+    double mbPerSec = elapsedSec > 0 ? (totalBytes / (1024.0 * 1024.0)) / elapsedSec : 0.0;
+    LOG("[GDriveProvider] UploadBatch: %zu file(s) (%zu uploaded, %zu CAS-skipped) "
+        "with %zu parallel worker(s) in %.1fs (%.2f files/s, %.2f MB/s, %llu rate-limit hits)",
+        items.size(), items.size() - dedupSkips.load(), dedupSkips.load(),
+        workerCount, elapsedSec, filesPerSec, mbPerSec,
+        (unsigned long long)rlHits);
     return true;
 }
 

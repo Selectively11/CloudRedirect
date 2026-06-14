@@ -51,6 +51,7 @@ set(CR_SO_VERSION "${CR_RELEASE_VERSION}+${GIT_SHA}")
 set(COMMON_SOURCES
     src/common/protobuf.cpp
     src/common/json.cpp
+    src/common/coop_yield.cpp
     src/common/vdf.cpp
     src/common/remotecache_repair.cpp
     src/common/manifest_store.cpp
