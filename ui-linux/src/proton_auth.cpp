@@ -30,8 +30,8 @@
 #include <algorithm>
 
 static const char *kApiBase    = "https://mail.proton.me/api";
-static const char *kAppVersion = "linux-drive@2.1.0";
-static const char *kUserAgent  = "ProtonDrive/2.1.0 (Linux)";
+static const char *kAppVersion = "linux-bridge@3.4.0";
+static const char *kUserAgent  = "ProtonDrive/3.4.0 (Linux)";
 
 // ── Base64 / Hex helpers ───────────────────────────────────────────────────────
 

@@ -87,8 +87,9 @@ internal static class ProtonSrpService
             int authCode = GetInt(auth, "Code");
             if (authCode != 1000)
             {
-                log($"ERROR: Authentication failed — Code {authCode}");
-                if (authCode == 8002) log("Incorrect password.");
+                string authErr = auth.TryGetProperty("Error", out var ep) ? ep.GetString() ?? "" : "";
+                log($"ERROR: Authentication failed — Code {authCode}: {authErr}");
+                if (authCode == 8002) log("Hint: Incorrect password.");
                 return false;
             }
 
