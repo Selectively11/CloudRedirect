@@ -30,7 +30,8 @@
 #include <algorithm>
 
 static const char *kApiBase    = "https://mail.proton.me/api";
-static const char *kAppVersion = "external-drive-cloudredirect@2.1.8-stable";
+static const char *kAppVersion = "linux-drive-cloudredirect@1.0.0";
+static const char *kUserAgent  = "ProtonDrive/1.0.0 (Linux)";
 
 // ── Base64 / Hex helpers ───────────────────────────────────────────────────────
 
@@ -465,7 +466,10 @@ void ProtonAuthService::postJson(const QString &path, const QByteArray &body,
 {
     QNetworkRequest req(QUrl(QString(kApiBase) + path));
     req.setRawHeader("x-pm-appversion", kAppVersion);
-    req.setRawHeader("User-Agent", kAppVersion);
+    req.setRawHeader("User-Agent", kUserAgent);
+    req.setRawHeader("Accept", "application/vnd.protonmail.api+json");
+    req.setRawHeader("Accept-Language", "en-US,en");
+    req.setRawHeader("x-pm-locale", "en_US");
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     if (!m_uid.isEmpty()) {
         req.setRawHeader("x-pm-uid", m_uid.toUtf8());
@@ -489,7 +493,10 @@ void ProtonAuthService::getJson(const QString &path,
 {
     QNetworkRequest req(QUrl(QString(kApiBase) + path));
     req.setRawHeader("x-pm-appversion", kAppVersion);
-    req.setRawHeader("User-Agent", kAppVersion);
+    req.setRawHeader("User-Agent", kUserAgent);
+    req.setRawHeader("Accept", "application/vnd.protonmail.api+json");
+    req.setRawHeader("Accept-Language", "en-US,en");
+    req.setRawHeader("x-pm-locale", "en_US");
     if (!m_uid.isEmpty()) {
         req.setRawHeader("x-pm-uid", m_uid.toUtf8());
         req.setRawHeader("Authorization", ("Bearer " + m_accessToken).toUtf8());

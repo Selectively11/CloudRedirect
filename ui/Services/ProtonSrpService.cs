@@ -21,7 +21,8 @@ namespace CloudRedirect.Services;
 internal static class ProtonSrpService
 {
     private const string ApiBase    = "https://mail.proton.me/api";
-    private const string AppVersion = "external-drive-cloudredirect@2.1.8-stable";
+    private const string AppVersion = "windows-drive@2.1.0";
+    private const string UserAgent  = "ProtonDrive/2.1.0 (Windows)";
 
     public static async Task<bool> AuthorizeAsync(
         string tokenPath, Action<string> log, CancellationToken cancel)
@@ -292,6 +293,10 @@ internal static class ProtonSrpService
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         client.DefaultRequestHeaders.TryAddWithoutValidation("x-pm-appversion", AppVersion);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgent);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/vnd.protonmail.api+json");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("x-pm-locale", "en_US");
         return client;
     }
 
