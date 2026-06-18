@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using CloudRedirect.Windows;
-using Konscious.Security.Cryptography;
 using Org.BouncyCastle.Bcpg;
 using Org.BouncyCastle.Bcpg.OpenPgp;
 using Org.BouncyCastle.Crypto.Parameters;
@@ -20,7 +19,7 @@ namespace CloudRedirect.Services;
 /// </summary>
 internal static class ProtonSrpService
 {
-    private const string ApiBase    = "https://mail.proton.me/api";
+    private const string ApiBase = "https://mail.proton.me/api";
     private const string AppVersion = "windows-drive@2.1.0";
     private const string UserAgent  = "ProtonDrive/2.1.0 (Windows)";
 
@@ -104,6 +103,44 @@ internal static class ProtonSrpService
             http.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", accessToken);
 
+            // ── Step 3b: Two-factor authentication ────────────────────────────
+            bool twoFaRequired = auth.TryGetProperty("TwoFactor", out var tf)
+                && tf.TryGetProperty("Enabled", out var tfEnabled)
+                && (tfEnabled.GetInt32() & 1) != 0;
+
+            if (twoFaRequired)
+            {
+                log("Two-factor authentication required...");
+                string twoFaCode = "";
+                await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
+                {
+                    var twoFaWin = new ProtonTwoFaWindow
+                    {
+                        Owner = System.Windows.Application.Current.MainWindow
+                    };
+                    if (twoFaWin.ShowDialog() == true)
+                        twoFaCode = twoFaWin.TotpCode;
+                });
+
+                if (string.IsNullOrEmpty(twoFaCode))
+                {
+                    log("Two-factor authentication cancelled.");
+                    return false;
+                }
+
+                log("Submitting two-factor code...");
+                var twoFaResp = await PostJsonAsync(http, "/auth/v4/2fa",
+                    $"{{\"TwoFactorCode\":{JsonEscape(twoFaCode)}}}", cancel);
+                int twoFaResult = GetInt(twoFaResp, "Code");
+                if (twoFaResult != 1000)
+                {
+                    string twoFaErr = twoFaResp.TryGetProperty("Error", out var twoFaEp)
+                        ? twoFaEp.GetString() ?? "" : "";
+                    log($"ERROR: Two-factor authentication failed — Code {twoFaResult}: {twoFaErr}");
+                    return false;
+                }
+            }
+
             // ── Step 4: Key salt ──────────────────────────────────────────────
             log("Fetching key salts...");
             var saltsResp = await GetJsonAsync(http, "/core/v4/keys/salts", cancel);
@@ -143,7 +180,7 @@ internal static class ProtonSrpService
             if (!string.IsNullOrEmpty(primarySaltB64))
             {
                 byte[] keySaltBytes = FromB64(primarySaltB64);
-                keyPass = Argon2idDeriveKey(Encoding.UTF8.GetBytes(password), keySaltBytes, 32);
+                keyPass = MailboxPassword(password, keySaltBytes);
             }
             else
             {
@@ -152,8 +189,8 @@ internal static class ProtonSrpService
 
             // ── Step 7: Decrypt user key ──────────────────────────────────────
             log("Decrypting user key...");
-            RsaComponents? userRsa = DecryptPgpPrivateKey(userKeyArmored, keyPass);
-            if (userRsa == null)
+            PgpKeyResult? userKey = DecryptPgpPrivateKey(userKeyArmored, keyPass);
+            if (userKey == null)
             {
                 log("ERROR: Failed to decrypt user private key. Incorrect password?");
                 return false;
@@ -196,7 +233,7 @@ internal static class ProtonSrpService
             byte[] addrKeyPass;
             if (!string.IsNullOrEmpty(addrKeyToken))
             {
-                var decrypted = DecryptPgpMessage(addrKeyToken, userRsa);
+                var decrypted = DecryptPgpMessage(addrKeyToken, userKey);
                 if (decrypted == null || decrypted.Length == 0)
                 {
                     log("ERROR: Failed to decrypt address key token.");
@@ -209,36 +246,27 @@ internal static class ProtonSrpService
                 addrKeyPass = keyPass;
             }
 
-            RsaComponents? addrRsa = DecryptPgpPrivateKey(addrKeyArmored, addrKeyPass);
-            if (addrRsa == null)
+            PgpKeyResult? addrKey = DecryptPgpPrivateKey(addrKeyArmored, addrKeyPass);
+            if (addrKey == null)
             {
                 log("ERROR: Failed to decrypt address private key.");
                 return false;
             }
 
-            // ── Step 10: Drive volume / share ─────────────────────────────────
+            // ── Step 10: Drive share ──────────────────────────────────────────
             log("Fetching drive metadata...");
-            var volResp = await GetJsonAsync(http, "/drive/v2/volumes", cancel);
-            var volumes = volResp.GetProp("Volumes");
-            string volumeId = "";
-            if (volumes.TryGetAt(0, out var vol))
-                volumeId = vol.Str("VolumeID");
-
-            if (string.IsNullOrEmpty(volumeId))
-            {
-                log("ERROR: No Drive volume found.");
-                return false;
-            }
-
-            var sharesResp = await GetJsonAsync(http, $"/drive/v2/volumes/{volumeId}/shares", cancel);
+            var sharesResp = await GetJsonAsync(http, "/drive/shares", cancel);
             var shares = sharesResp.GetProp("Shares");
+            string volumeId   = "";
             string shareId    = "";
             string rootLinkId = "";
             for (int i = 0; ; i++)
             {
                 if (!shares.TryGetAt(i, out var sh)) break;
-                if (sh.Int("IsLocked") == 0 && sh.Int("Type") == 1)
+                bool locked = sh.TryGetProperty("Locked", out var lv) && lv.ValueKind == JsonValueKind.True;
+                if (!locked && sh.Int("Type") == 1)
                 {
+                    volumeId   = sh.Str("VolumeID");
                     shareId    = sh.Str("ShareID");
                     rootLinkId = sh.Str("LinkID");
                     break;
@@ -263,15 +291,27 @@ internal static class ProtonSrpService
                 ["share_id"]      = shareId,
                 ["root_link_id"]  = rootLinkId,
                 ["address_email"] = addressEmail,
-                ["address_key_n"]  = ToB64(addrRsa.N),
-                ["address_key_e"]  = ToB64(addrRsa.E),
-                ["address_key_d"]  = ToB64(addrRsa.D),
-                ["address_key_p"]  = ToB64(addrRsa.P),
-                ["address_key_q"]  = ToB64(addrRsa.Q),
-                ["address_key_dp"] = ToB64(addrRsa.Dp),
-                ["address_key_dq"] = ToB64(addrRsa.Dq),
-                ["address_key_qi"] = ToB64(addrRsa.Qi),
+                ["address_key_type"] = addrKey.IsEcc ? "ecc" : "rsa",
             };
+
+            if (addrKey.IsEcc)
+            {
+                if (addrKey.X25519Priv  != null) tokenObj["address_x25519_priv"]  = ToB64(addrKey.X25519Priv);
+                if (addrKey.X25519Pub   != null) tokenObj["address_x25519_pub"]   = ToB64(addrKey.X25519Pub);
+                if (addrKey.Ed25519Priv != null) tokenObj["address_ed25519_priv"] = ToB64(addrKey.Ed25519Priv);
+                if (addrKey.Ed25519Pub  != null) tokenObj["address_ed25519_pub"]  = ToB64(addrKey.Ed25519Pub);
+            }
+            else
+            {
+                tokenObj["address_key_n"]  = ToB64(addrKey.N!);
+                tokenObj["address_key_e"]  = ToB64(addrKey.E!);
+                tokenObj["address_key_d"]  = ToB64(addrKey.D!);
+                tokenObj["address_key_p"]  = ToB64(addrKey.P!);
+                tokenObj["address_key_q"]  = ToB64(addrKey.Q!);
+                tokenObj["address_key_dp"] = ToB64(addrKey.Dp!);
+                tokenObj["address_key_dq"] = ToB64(addrKey.Dq!);
+                tokenObj["address_key_qi"] = ToB64(addrKey.Qi!);
+            }
 
             string json = JsonSerializer.Serialize(tokenObj, new JsonSerializerOptions { WriteIndented = true });
             await Task.Run(() => TokenFile.WriteJson(tokenPath, json), cancel);
@@ -464,30 +504,48 @@ internal static class ProtonSrpService
         return (A_LE, proof);
     }
 
-    // ── Argon2id ───────────────────────────────────────────────────────────────
+    // ── Key passphrase (go-srp MailboxPassword) ────────────────────────────────
+    // bcrypt(password, $2y$10$<bcryptBase64(keySalt)[:22]>, cost=10) → take chars [29..] as bytes
 
-    private static byte[] Argon2idDeriveKey(byte[] password, byte[] salt, int keyLen)
+    private static byte[] MailboxPassword(string password, byte[] keySalt)
     {
-        using var argon2 = new Argon2id(password)
-        {
-            Salt                = salt,
-            Iterations          = 4,
-            MemorySize          = 65536,
-            DegreeOfParallelism = 4,
-        };
-        return argon2.GetBytes(keyLen);
+        string enc = BcryptBase64Encode(keySalt);
+        string saltStr22 = enc.Length >= 22 ? enc[..22] : enc.PadRight(22, '.');
+
+        byte[] saltBin = BcryptBase64Decode(saltStr22);
+        if (saltBin.Length > 16) Array.Resize(ref saltBin, 16);
+        while (saltBin.Length < 16) saltBin = [.. saltBin, (byte)0];
+
+        byte[] passBytes = Encoding.UTF8.GetBytes(password);
+        int tlen = Math.Min(passBytes.Length, 72);
+        char[] passChars = new char[tlen];
+        for (int i = 0; i < tlen; i++) passChars[i] = (char)passBytes[i];
+
+        string bcryptOut = Org.BouncyCastle.Crypto.Generators.OpenBsdBCrypt
+            .Generate("2y", passChars, saltBin, 10);
+
+        // bcryptOut is "$2y$10$<22-salt><31-hash>" (60 chars); reconstruct with exact salt
+        string full = "$2y$10$" + saltStr22 + bcryptOut[29..];
+        return Encoding.ASCII.GetBytes(full[29..]);
     }
 
     // ── PGP (BouncyCastle) ─────────────────────────────────────────────────────
 
-    private sealed class RsaComponents
+    private sealed class PgpKeyResult
     {
-        public byte[] N = [], E = [], D = [], P = [], Q = [], Dp = [], Dq = [], Qi = [];
+        // Session-only: held for PGP decryption within the auth flow
+        public PgpPrivateKey? EncryptionSubkey; // X25519 (ECDH) or RSA
+
+        // ECC key material for token file
+        public bool IsEcc;
+        public byte[]? X25519Priv, X25519Pub, Ed25519Priv, Ed25519Pub;
+
+        // RSA key material for token file (legacy/fallback)
+        public byte[]? N, E, D, P, Q, Dp, Dq, Qi;
     }
 
-    private static RsaComponents? DecryptPgpPrivateKey(string armored, byte[] passphrase)
+    private static PgpKeyResult? DecryptPgpPrivateKey(string armored, byte[] passphrase)
     {
-        // BouncyCastle ExtractPrivateKey takes char[]; convert byte[] 1:1.
         char[] passChars = Array.ConvertAll(passphrase, b => (char)b);
         try
         {
@@ -509,47 +567,54 @@ internal static class ProtonSrpService
         return null;
     }
 
-    private static RsaComponents? TryExtractFromRing(PgpSecretKeyRing ring, char[] passChars)
+    private static PgpKeyResult? TryExtractFromRing(PgpSecretKeyRing ring, char[] passChars)
     {
+        var result = new PgpKeyResult();
+
         foreach (PgpSecretKey sk in ring.GetSecretKeys())
         {
             try
             {
                 var pk = sk.ExtractPrivateKey(passChars);
-                if (pk?.Key is RsaPrivateCrtKeyParameters rsa)
-                    return RsaToComponents(rsa);
+
+                if (pk == null) continue;
+
+                if (pk.Key is RsaPrivateCrtKeyParameters rsa)
+                {
+                    result.N  = rsa.Modulus.ToByteArrayUnsigned();
+                    result.E  = rsa.PublicExponent.ToByteArrayUnsigned();
+                    result.D  = rsa.Exponent.ToByteArrayUnsigned();
+                    result.P  = rsa.P.ToByteArrayUnsigned();
+                    result.Q  = rsa.Q.ToByteArrayUnsigned();
+                    result.Dp = rsa.DP.ToByteArrayUnsigned();
+                    result.Dq = rsa.DQ.ToByteArrayUnsigned();
+                    result.Qi = rsa.QInv.ToByteArrayUnsigned();
+                    result.EncryptionSubkey ??= pk;
+                }
+                else if (pk.Key is X25519PrivateKeyParameters x25519)
+                {
+                    result.IsEcc = true;
+                    result.X25519Priv = x25519.GetEncoded();
+                    result.X25519Pub  = ((X25519PublicKeyParameters)x25519.GeneratePublicKey()).GetEncoded();
+                    result.EncryptionSubkey = pk; // X25519 is the encryption subkey
+                }
+                else if (pk.Key is Ed25519PrivateKeyParameters ed25519)
+                {
+                    result.IsEcc = true;
+                    result.Ed25519Priv = ed25519.GetEncoded();
+                    result.Ed25519Pub  = ((Ed25519PublicKeyParameters)ed25519.GeneratePublicKey()).GetEncoded();
+                }
             }
             catch { }
         }
-        return null;
+
+        return (result.EncryptionSubkey != null) ? result : null;
     }
 
-    private static RsaComponents RsaToComponents(RsaPrivateCrtKeyParameters rsa) => new()
-    {
-        N  = rsa.Modulus.ToByteArrayUnsigned(),
-        E  = rsa.PublicExponent.ToByteArrayUnsigned(),
-        D  = rsa.Exponent.ToByteArrayUnsigned(),
-        P  = rsa.P.ToByteArrayUnsigned(),
-        Q  = rsa.Q.ToByteArrayUnsigned(),
-        Dp = rsa.DP.ToByteArrayUnsigned(),
-        Dq = rsa.DQ.ToByteArrayUnsigned(),
-        Qi = rsa.QInv.ToByteArrayUnsigned(),
-    };
-
-    private static byte[]? DecryptPgpMessage(string armored, RsaComponents rsa)
+    private static byte[]? DecryptPgpMessage(string armored, PgpKeyResult key)
     {
         try
         {
-            var privParams = new RsaPrivateCrtKeyParameters(
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.N),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.E),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.D),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.P),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.Q),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.Dp),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.Dq),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.Qi));
-
             using var stream  = new MemoryStream(Encoding.ASCII.GetBytes(armored));
             using var decoded = PgpUtilities.GetDecoderStream(stream);
             var factory = new PgpObjectFactory(decoded);
@@ -562,20 +627,36 @@ internal static class ProtonSrpService
             }
             if (encList == null) return null;
 
-            // Build PgpPrivateKey — GetDataStream requires PgpPrivateKey in BC 2.x.
-            // We reconstruct it from raw RSA components with a minimal PublicKeyPacket.
-            var rsaBcpgKey = new RsaPublicBcpgKey(
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.N),
-                new Org.BouncyCastle.Math.BigInteger(1, rsa.E));
-            var pubKeyPacket = new PublicKeyPacket(
-                PublicKeyAlgorithmTag.RsaEncrypt, DateTime.UtcNow, rsaBcpgKey);
-
             foreach (PgpPublicKeyEncryptedData pked in encList.GetEncryptedDataObjects())
             {
                 try
                 {
-                    var pgpPrivKey = new PgpPrivateKey(pked.KeyId, pubKeyPacket, privParams);
-                    using var plain = pked.GetDataStream(pgpPrivKey);
+                    PgpPrivateKey decryptKey;
+                    if (key.IsEcc && key.EncryptionSubkey != null)
+                    {
+                        decryptKey = key.EncryptionSubkey;
+                    }
+                    else if (!key.IsEcc && key.N != null)
+                    {
+                        var rsaBcpgKey2 = new RsaPublicBcpgKey(
+                            new Org.BouncyCastle.Math.BigInteger(1, key.N),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.E!));
+                        var pubKeyPacket2 = new PublicKeyPacket(
+                            PublicKeyAlgorithmTag.RsaEncrypt, DateTime.UtcNow, rsaBcpgKey2);
+                        var privParams2 = new RsaPrivateCrtKeyParameters(
+                            new Org.BouncyCastle.Math.BigInteger(1, key.N),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.E!),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.D!),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.P!),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.Q!),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.Dp!),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.Dq!),
+                            new Org.BouncyCastle.Math.BigInteger(1, key.Qi!));
+                        decryptKey = new PgpPrivateKey(pked.KeyId, pubKeyPacket2, privParams2);
+                    }
+                    else continue;
+
+                    using var plain = pked.GetDataStream(decryptKey);
                     var inner = new PgpObjectFactory(plain);
                     PgpObject? innerObj;
                     while ((innerObj = inner.NextPgpObject()) != null)

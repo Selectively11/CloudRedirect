@@ -88,6 +88,39 @@ Page {
         }
     }
 
+    Dialog {
+        id: protonTwoFaDialog
+        title: "Two-Factor Authentication"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: 340
+        standardButtons: Dialog.Ok | Dialog.Cancel
+
+        onOpened: twoFaCodeField.text = ""
+        onAccepted: {
+            if (oauth) oauth.submitProtonTwoFactor(twoFaCodeField.text.trim())
+        }
+        onRejected: {
+            if (oauth) oauth.submitProtonTwoFactor("")
+        }
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 12
+
+            Label {
+                text: "Enter your authenticator code:"
+            }
+            TextField {
+                id: twoFaCodeField
+                Layout.fillWidth: true
+                placeholderText: "123456"
+                inputMethodHints: Qt.ImhDigitsOnly
+                maximumLength: 8
+            }
+        }
+    }
+
     FolderDialog {
         id: folderDialog
         title: "Select Sync Folder"
@@ -113,6 +146,9 @@ Page {
         }
         function onAuthFailed(provider, error) {
             statusText.text = "Error: " + error
+        }
+        function onProtonNeedsTwoFactor() {
+            protonTwoFaDialog.open()
         }
     }
     

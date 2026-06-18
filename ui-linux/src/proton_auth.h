@@ -2,7 +2,9 @@
 #include <QObject>
 #include <QString>
 #include <QByteArray>
+#include <QList>
 #include <functional>
+#include <memory>
 #include <vector>
 
 class QNetworkAccessManager;
@@ -15,14 +17,30 @@ class ProtonAuthService : public QObject
 public:
     explicit ProtonAuthService(QObject *parent = nullptr);
 
-    struct RsaKey { QByteArray n, e, d, p, q, dp, dq, qi; };
+    struct RsaKey {
+        // RSA fields (used when isEcc == false)
+        QByteArray n, e, d, p, q, dp, dq, qi;
+        // ECC fields (used when isEcc == true)
+        bool isEcc = false;
+        QByteArray ed25519Priv;
+        QByteArray x25519Priv;   // 32 bytes, little-endian (OpenSSL EVP_PKEY_X25519 format)
+        // ECDH KDF metadata (needed for address-key-token decryption)
+        QByteArray oid;
+        uint8_t kdfHashAlgo   = 8; // SHA-256
+        uint8_t kdfCipherAlgo = 9; // AES-256
+        QByteArray fingerprint;    // SHA-1 of public key packet body, for KDF param
+    };
 
     void start(const QString &email, const QString &password, const QString &tokenPath);
+    void listRemoteApps(const QString &tokenPath, const QString &accountId);
+    void submitTwoFactor(const QString &code);
 
 signals:
     void statusMessage(const QString &msg);
     void succeeded();
     void failed(const QString &error);
+    void needsTwoFactor();
+    void remoteAppsListed(const QList<uint32_t> &appIds);
 
 private:
     QString   m_email;
@@ -50,6 +68,11 @@ private:
     QString m_shareId;
     QString m_rootLinkId;
 
+    // Listing flow state
+    QString m_listAccountId;
+    QString m_listShareId;
+    QString m_listRootLinkId;
+
     // HTTP helpers
     void postJson(const QString &path, const QByteArray &body,
                   std::function<void(bool, const QByteArray &)> cb);
@@ -75,7 +98,16 @@ private:
     void stepFetchAddresses();
     void stepDecryptAddress(const QString &addrKeyArmored, const QString &addrKeyToken,
                             const QString &email);
-    void stepFetchVolumes();
-    void stepFetchShares(const QString &volumeId);
+    void stepFetchShares();
     void stepWriteToken(const QString &shareId, const QString &rootLinkId);
+
+    // Remote-app listing steps
+    void listFetchShare();
+    void listFetchRootLink(const RsaKey &shareKey);
+    void listFindFolder(const RsaKey &parentKey, const QByteArray &hashKey,
+                        const QString &parentLinkId, const QString &targetName,
+                        bool isAccountFolder);
+    void listFetchAppChildren(const RsaKey &accountKey, const QString &accountLinkId,
+                              int page, std::shared_ptr<QList<uint32_t>> result);
+
 };

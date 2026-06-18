@@ -92,6 +92,7 @@ private:
     QString readAccessToken() const;
     void fetchGoogleDriveApps(const QString &token);
     void fetchOneDriveApps(const QString &token);
+    void fetchProtonDriveApps();
     void refreshAndFetch();
     void deleteCloudAppData(uint appId);
     void deleteGoogleDriveAppData(uint appId, const QString &token);

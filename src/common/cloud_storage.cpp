@@ -2861,7 +2861,7 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     if (lower == "onedrive") {
         return wireAuthCallback(std::make_unique<OneDriveProvider>());
     }
-    if (lower == "protondrive") {
+    if (lower == "protondrive" || lower == "proton") {
         return wireAuthCallback(std::make_unique<ProtonDriveProvider>());
     }
     LOG("[CloudStorage] CreateCloudProvider: unknown provider '%s'", name.c_str());

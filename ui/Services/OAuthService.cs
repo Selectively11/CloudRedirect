@@ -105,7 +105,7 @@ public sealed class OAuthService : IDisposable
         Action<string> log,
         CancellationToken cancel = default)
     {
-        if (provider == "protondrive")
+        if (provider is "protondrive" or "proton")
             return await ProtonSrpService.AuthorizeAsync(tokenPath, log, cancel);
 
         // Track current provider for state validation
