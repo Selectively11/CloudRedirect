@@ -33,6 +33,7 @@ public:
 
     void start(const QString &email, const QString &password, const QString &tokenPath);
     void listRemoteApps(const QString &tokenPath, const QString &accountId);
+    void deleteAppFolder(const QString &tokenPath, const QString &accountId, uint32_t appId);
     void submitTwoFactor(const QString &code);
 
 signals:
@@ -41,6 +42,7 @@ signals:
     void failed(const QString &error);
     void needsTwoFactor();
     void remoteAppsListed(const QList<uint32_t> &appIds);
+    void appFolderDeleted();
 
 private:
     QString   m_email;
@@ -68,10 +70,12 @@ private:
     QString m_shareId;
     QString m_rootLinkId;
 
-    // Listing flow state
-    QString m_listAccountId;
-    QString m_listShareId;
-    QString m_listRootLinkId;
+    // Listing / delete flow state
+    QString  m_listAccountId;
+    QString  m_listShareId;
+    QString  m_listRootLinkId;
+    bool     m_deleteMode = false;
+    uint32_t m_deleteAppId = 0;
 
     // HTTP helpers
     void postJson(const QString &path, const QByteArray &body,
@@ -101,6 +105,9 @@ private:
     void stepFetchShares();
     void stepWriteToken(const QString &shareId, const QString &rootLinkId);
 
+    // Shared token loading for listing and delete
+    bool loadTokenFile(const QString &tokenPath);
+
     // Remote-app listing steps
     void listFetchShare();
     void listFetchRootLink(const RsaKey &shareKey);
@@ -109,5 +116,10 @@ private:
                         bool isAccountFolder);
     void listFetchAppChildren(const RsaKey &accountKey, const QString &accountLinkId,
                               int page, std::shared_ptr<QList<uint32_t>> result);
+
+    // Delete-specific steps (reuse listFetchShare/listFetchRootLink/listFindFolder)
+    void delFindAppFolder(const RsaKey &accountKey, const QByteArray &accountHashKey,
+                          const QString &accountLinkId);
+    void delTrashFolder(const QString &linkId);
 
 };

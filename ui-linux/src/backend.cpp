@@ -1117,10 +1117,27 @@ void Backend::fetchProtonDriveApps()
     auth->listRemoteApps(defaultTokenPath("proton"), m_accountId);
 }
 
+void Backend::deleteProtonDriveAppData(uint appId)
+{
+    auto *auth = new ProtonAuthService(this);
+    connect(auth, &ProtonAuthService::appFolderDeleted, this,
+            [auth, appId]() {
+                fprintf(stderr, "[Backend] Proton: deleted cloud folder for app %u\n", appId);
+                auth->deleteLater();
+            });
+    connect(auth, &ProtonAuthService::failed, this,
+            [auth, appId](const QString &err) {
+                fprintf(stderr, "[Backend] Proton: delete app %u failed: %s\n",
+                        appId, err.toUtf8().constData());
+                auth->deleteLater();
+            });
+    auth->deleteAppFolder(defaultTokenPath("proton"), m_accountId, (uint32_t)appId);
+}
+
 void Backend::deleteCloudAppData(uint appId)
 {
     if (m_providerName == "proton") {
-        fprintf(stderr, "[Backend] Proton Drive delete not yet implemented\n");
+        deleteProtonDriveAppData(appId);
         return;
     }
 

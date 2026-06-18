@@ -1281,16 +1281,10 @@ static QString hmacSha256Hex(const QByteArray &key, const QByteArray &data)
     return hex;
 }
 
-void ProtonAuthService::listRemoteApps(const QString &tokenPath, const QString &accountId)
+bool ProtonAuthService::loadTokenFile(const QString &tokenPath)
 {
-    m_listAccountId = accountId;
-    m_tokenPath = tokenPath;
-
     QFile f(tokenPath);
-    if (!f.open(QIODevice::ReadOnly)) {
-        emit failed("Cannot read Proton token file");
-        return;
-    }
+    if (!f.open(QIODevice::ReadOnly)) return false;
     QJsonObject tok = QJsonDocument::fromJson(f.readAll()).object();
     f.close();
 
@@ -1300,15 +1294,13 @@ void ProtonAuthService::listRemoteApps(const QString &tokenPath, const QString &
     m_listRootLinkId = tok["root_link_id"].toString();
 
     if (m_accessToken.isEmpty() || m_uid.isEmpty() ||
-        m_listShareId.isEmpty() || m_listRootLinkId.isEmpty()) {
-        emit failed("Incomplete Proton token — re-authenticate");
-        return;
-    }
+        m_listShareId.isEmpty() || m_listRootLinkId.isEmpty())
+        return false;
 
     QString keyType = tok["address_key_type"].toString();
     if (keyType == "ecc") {
-        m_addrKey          = {};
-        m_addrKey.isEcc    = true;
+        m_addrKey               = {};
+        m_addrKey.isEcc         = true;
         m_addrKey.x25519Priv    = fromB64(tok["address_key_x25519"].toString());
         m_addrKey.ed25519Priv   = fromB64(tok["address_key_ed25519"].toString());
         m_addrKey.oid           = fromB64(tok["address_key_oid"].toString());
@@ -1327,7 +1319,33 @@ void ProtonAuthService::listRemoteApps(const QString &tokenPath, const QString &
         m_addrKey.dq = fromB64(tok["address_key_dq"].toString());
         m_addrKey.qi = fromB64(tok["address_key_qi"].toString());
     }
+    return true;
+}
 
+void ProtonAuthService::listRemoteApps(const QString &tokenPath, const QString &accountId)
+{
+    m_listAccountId = accountId;
+    m_tokenPath     = tokenPath;
+    m_deleteMode    = false;
+    if (!loadTokenFile(tokenPath)) {
+        emit failed("Cannot read or incomplete Proton token — re-authenticate");
+        return;
+    }
+    listFetchShare();
+}
+
+void ProtonAuthService::deleteAppFolder(const QString &tokenPath,
+                                         const QString &accountId,
+                                         uint32_t appId)
+{
+    m_listAccountId = accountId;
+    m_tokenPath     = tokenPath;
+    m_deleteMode    = true;
+    m_deleteAppId   = appId;
+    if (!loadTokenFile(tokenPath)) {
+        emit failed("Cannot read or incomplete Proton token — re-authenticate");
+        return;
+    }
     listFetchShare();
 }
 
@@ -1428,6 +1446,8 @@ void ProtonAuthService::listFindFolder(const RsaKey &parentKey, const QByteArray
             if (!isAccountFolder) {
                 listFindFolder(childKey, childHashBytes, childLinkId,
                                m_listAccountId, true);
+            } else if (m_deleteMode) {
+                delFindAppFolder(childKey, childHashBytes, childLinkId);
             } else {
                 auto result = std::make_shared<QList<uint32_t>>();
                 listFetchAppChildren(childKey, childLinkId, 0, result);
@@ -1435,9 +1455,14 @@ void ProtonAuthService::listFindFolder(const RsaKey &parentKey, const QByteArray
             return;
         }
 
-        fprintf(stderr, "[Proton] %s folder not found in drive\n",
-                isAccountFolder ? qPrintable(m_listAccountId) : "CloudRedirect");
-        emit remoteAppsListed({});
+        if (m_deleteMode) {
+            // Folder not found — already gone, treat as success
+            emit appFolderDeleted();
+        } else {
+            fprintf(stderr, "[Proton] %s folder not found in drive\n",
+                    isAccountFolder ? qPrintable(m_listAccountId) : "CloudRedirect");
+            emit remoteAppsListed({});
+        }
     });
 }
 
@@ -1484,5 +1509,51 @@ void ProtonAuthService::listFetchAppChildren(const RsaKey &accountKey,
         } else {
             emit remoteAppsListed(*result);
         }
+    });
+}
+
+void ProtonAuthService::delFindAppFolder(const RsaKey &accountKey,
+                                          const QByteArray &accountHashKey,
+                                          const QString &accountLinkId)
+{
+    QString targetHash = hmacSha256Hex(accountHashKey,
+                                       QString::number(m_deleteAppId).toUtf8());
+    QString path = "/drive/v2/shares/" + m_listShareId + "/folders/" + accountLinkId
+                 + "/children?Page=0&PageSize=150";
+
+    getJson(path, [this, accountKey, targetHash](bool ok, const QByteArray &resp) {
+        if (!ok) { emit failed("Proton delete: failed to list account folder children"); return; }
+        QJsonArray links = QJsonDocument::fromJson(resp).object()["Links"].toArray();
+
+        for (const QJsonValue &v : links) {
+            QJsonObject lj = v.toObject();
+            if (lj["Hash"].toString().toLower() != targetHash) continue;
+            if (lj["State"].toInt() == 2) {
+                // Already in trash
+                emit appFolderDeleted();
+                return;
+            }
+            delTrashFolder(lj["LinkID"].toString());
+            return;
+        }
+        // Not found — already gone
+        emit appFolderDeleted();
+    });
+}
+
+void ProtonAuthService::delTrashFolder(const QString &linkId)
+{
+    QString path = "/drive/v2/shares/" + m_listShareId + "/links/trash";
+    QJsonObject body;
+    body["LinkIDs"] = QJsonArray{linkId};
+    postJson(path, QJsonDocument(body).toJson(QJsonDocument::Compact),
+             [this](bool ok, const QByteArray &resp) {
+        if (!ok) {
+            QJsonObject j = QJsonDocument::fromJson(resp).object();
+            emit failed(QString("Proton delete: trash failed (Code %1)")
+                        .arg(j["Code"].toInt()));
+            return;
+        }
+        emit appFolderDeleted();
     });
 }
