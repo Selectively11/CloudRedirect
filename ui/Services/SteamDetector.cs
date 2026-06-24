@@ -58,6 +58,8 @@ public static class SteamDetector
     {
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
             return false;
+        if (!File.Exists(Path.Combine(path, "steam.exe")))
+            return false;
         lock (_cacheLock) { _cachedPath = path; }
         return true;
     }
@@ -112,19 +114,19 @@ public static class SteamDetector
             // 64-bit Steam
             using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Wow6432Node\Valve\Steam");
             var path = key?.GetValue("InstallPath") as string;
-            if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
+            if (IsValidSteamRoot(path))
                 return path;
 
             // 32-bit Steam
             using var key32 = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Valve\Steam");
             path = key32?.GetValue("InstallPath") as string;
-            if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
+            if (IsValidSteamRoot(path))
                 return path;
 
             // Current user
             using var keyUser = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Valve\Steam");
             path = keyUser?.GetValue("SteamPath") as string;
-            if (!string.IsNullOrEmpty(path) && Directory.Exists(path))
+            if (IsValidSteamRoot(path))
                 return path;
         }
         catch
@@ -133,6 +135,13 @@ public static class SteamDetector
         }
 
         return null;
+    }
+
+    private static bool IsValidSteamRoot(string? path)
+    {
+        return !string.IsNullOrEmpty(path)
+            && Directory.Exists(path)
+            && File.Exists(Path.Combine(path, "steam.exe"));
     }
 
     private static string? TryKnownPaths()
@@ -149,7 +158,7 @@ public static class SteamDetector
 
         foreach (var path in candidates)
         {
-            if (Directory.Exists(path) && File.Exists(Path.Combine(path, "steam.exe")))
+            if (IsValidSteamRoot(path))
                 return path;
         }
 
