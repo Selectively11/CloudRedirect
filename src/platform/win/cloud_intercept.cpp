@@ -4360,7 +4360,17 @@ void InstallManifestPinHook() {
         return;
     }
 
-    uintptr_t scBase = reinterpret_cast<uintptr_t>(hSteamClient);
+    // Ensure g_steamClientBase is set before SC_RESOLVE (which uses it as fallback).
+    // InstallManifestPinHook runs before FindCurrentUser / InstallServiceMethodHookLocked,
+    // so g_steamClientBase may still be zero at this point.
+    if (!g_steamClientBase)
+        g_steamClientBase = reinterpret_cast<uintptr_t>(hSteamClient);
+
+    // Run the auto-resolver so g_resolved.buildDepotDependency is populated
+    // (otherwise SC_RESOLVE falls back to the hardcoded RVA, which is fine but
+    // the resolver gives us the correct address on updated builds).
+    RunAutoResolver();
+
     g_bddOrigAddr = reinterpret_cast<uint8_t*>(SC_RESOLVE(buildDepotDependency, SC_RVA_BUILD_DEPOT_DEPENDENCY));
     LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p)",
         g_bddOrigAddr, hSteamClient);
