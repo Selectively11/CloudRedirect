@@ -599,7 +599,7 @@ Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.<
     <value>Proveedor de nube</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configura tu proveedor de Steam Cloud. Solo Google Drive/OneDrive/Carpeta local por ahora.</value>
+    <value>Configura tu proveedor de Steam Cloud. Compatible con Google Drive, OneDrive, Proton Drive y carpeta local.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Proveedor</value>
@@ -703,6 +703,30 @@ Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.<
   </data>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
     <value>No se especificó ruta de archivo de token</value>
+  </data>
+  <data name="CloudProvider_ProtonDrive" xml:space="preserve">
+    <value>Proton Drive</value>
+  </data>
+  <data name="ProtonLogin_WindowTitle" xml:space="preserve">
+    <value>Iniciar sesión en Proton</value>
+  </data>
+  <data name="ProtonLogin_Subtitle" xml:space="preserve">
+    <value>Introduce tus credenciales de Proton. Tu contraseña solo se usa localmente para descifrar tus claves y nunca se almacena.</value>
+  </data>
+  <data name="ProtonLogin_EmailLabel" xml:space="preserve">
+    <value>Correo electrónico</value>
+  </data>
+  <data name="ProtonLogin_EmailPlaceholder" xml:space="preserve">
+    <value>tú@proton.me</value>
+  </data>
+  <data name="ProtonLogin_PasswordLabel" xml:space="preserve">
+    <value>Contraseña</value>
+  </data>
+  <data name="ProtonLogin_SignIn" xml:space="preserve">
+    <value>Iniciar sesión</value>
+  </data>
+  <data name="ProtonLogin_Cancel" xml:space="preserve">
+    <value>Cancelar</value>
   </data>
 
   <data name="Apps_Title" xml:space="preserve">

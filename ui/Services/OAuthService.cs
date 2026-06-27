@@ -90,10 +90,11 @@ public sealed class OAuthService : IDisposable
     private string? _currentProvider; // Track current provider for state validation
 
     /// <summary>
-    /// Run the full OAuth flow for the given provider.
-    /// Opens the browser, waits for the callback, exchanges the code, and saves tokens.
+    /// Run the full auth flow for the given provider.
+    /// For "gdrive"/"onedrive": opens the browser OAuth flow.
+    /// For "protondrive": shows a login dialog and runs Proton SRP.
     /// </summary>
-    /// <param name="provider">"gdrive" or "onedrive"</param>
+    /// <param name="provider">"gdrive", "onedrive", or "protondrive"</param>
     /// <param name="tokenPath">Where to save the resulting tokens.json</param>
     /// <param name="log">Progress callback</param>
     /// <param name="cancel">Cancellation token</param>
@@ -104,6 +105,9 @@ public sealed class OAuthService : IDisposable
         Action<string> log,
         CancellationToken cancel = default)
     {
+        if (provider is "protondrive" or "proton")
+            return await ProtonSrpService.AuthorizeAsync(tokenPath, log, cancel);
+
         // Track current provider for state validation
         _currentProvider = provider;
         

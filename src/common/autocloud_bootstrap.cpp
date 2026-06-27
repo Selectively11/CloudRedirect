@@ -784,13 +784,37 @@ int RestoreBlobsToGameFolder(uint32_t accountId, uint32_t appId,
             const std::string& fname = jobs[i].filename;
             const std::string& fsha = jobs[i].expectedShaHex;
             futures.push_back(std::async(std::launch::async,
-                [acct, app, &fname, &fsha]() {
-                    return CloudStorage::RetrieveBlob(acct, app, fname, nullptr, fsha);
+                [acct, app, &fname, &fsha]() -> std::vector<uint8_t> {
+                    // Never let an exception escape the async task: it would be
+                    // stored in the future and re-thrown at .get() below, where
+                    // an uncaught throw on this worker thread calls
+                    // std::terminate and takes the whole Steam client down.
+                    try {
+                        return CloudStorage::RetrieveBlob(acct, app, fname, nullptr, fsha);
+                    } catch (const std::exception& ex) {
+                        LOG("[AutoCloudRestore] app %u file %s: blob fetch threw (%s), skipping",
+                            app, fname.c_str(), ex.what());
+                    } catch (...) {
+                        LOG("[AutoCloudRestore] app %u file %s: blob fetch threw, skipping",
+                            app, fname.c_str());
+                    }
+                    return {};
                 }));
         }
 
         for (size_t i = 0; i < futures.size(); ++i) {
-            blobResults[base + i] = futures[i].get();
+            // Backstop: even though the task body above is exception-safe,
+            // .get() can still surface a broken_promise / system_error if the
+            // async machinery itself failed. Swallow it so one bad file can
+            // never abort the client; leave the result empty.
+            try {
+                blobResults[base + i] = futures[i].get();
+            } catch (const std::exception& ex) {
+                LOG("[AutoCloudRestore] app %u: blob future failed (%s), skipping",
+                    appId, ex.what());
+            } catch (...) {
+                LOG("[AutoCloudRestore] app %u: blob future failed, skipping", appId);
+            }
         }
     }
 

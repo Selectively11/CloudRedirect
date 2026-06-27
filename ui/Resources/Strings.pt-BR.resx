@@ -599,7 +599,7 @@ Forçar encerramento?</value>
     <value>Provedor de Nuvem</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure seu provedor de Steam Cloud. Apenas Google Drive/OneDrive/Pasta local por enquanto.</value>
+    <value>Configure seu provedor de Steam Cloud. Suporta Google Drive, OneDrive, Proton Drive e pasta local.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Provedor</value>
@@ -703,6 +703,30 @@ Forçar encerramento?</value>
   </data>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
     <value>Nenhum caminho de arquivo de token especificado</value>
+  </data>
+  <data name="CloudProvider_ProtonDrive" xml:space="preserve">
+    <value>Proton Drive</value>
+  </data>
+  <data name="ProtonLogin_WindowTitle" xml:space="preserve">
+    <value>Entrar no Proton</value>
+  </data>
+  <data name="ProtonLogin_Subtitle" xml:space="preserve">
+    <value>Insira suas credenciais do Proton. Sua senha é usada localmente para descriptografar suas chaves e nunca é armazenada.</value>
+  </data>
+  <data name="ProtonLogin_EmailLabel" xml:space="preserve">
+    <value>Endereço de e-mail</value>
+  </data>
+  <data name="ProtonLogin_EmailPlaceholder" xml:space="preserve">
+    <value>você@proton.me</value>
+  </data>
+  <data name="ProtonLogin_PasswordLabel" xml:space="preserve">
+    <value>Senha</value>
+  </data>
+  <data name="ProtonLogin_SignIn" xml:space="preserve">
+    <value>Entrar</value>
+  </data>
+  <data name="ProtonLogin_Cancel" xml:space="preserve">
+    <value>Cancelar</value>
   </data>
 
   <data name="Apps_Title" xml:space="preserve">

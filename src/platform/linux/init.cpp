@@ -243,7 +243,6 @@ static void DoInit()
     g_initialized.store(true, std::memory_order_release);
     DebugLog("[CR] DoInit: SUCCESS\n");
     Log::Info("CloudRedirect initialized successfully (all hooks active)");
-    Notify("Loaded successfully");
 }
 
 
@@ -387,9 +386,16 @@ static void* DeferredInitThread(void*)
     // Poll for steamclient.so -- under LD_PRELOAD we load before Steam has
     // mapped steamclient, so a fixed delay is insufficient.
     DebugLog("[CR] DeferredInit: waiting for steamclient.so\n");
-    for (int i = 0; i < 20; i++) {  // up to 10 seconds
-        if (SteamclientMapped()) break;
+    bool mapped = false;
+    for (int i = 0; i < 240; i++) {  // up to 120 seconds
+        if (SteamclientMapped()) { mapped = true; break; }
         usleep(500000);
+    }
+    if (!mapped) {
+        DebugLog("[CR] DeferredInit: steamclient.so never mapped; aborting\n");
+        Log::Error("DeferredInit: steamclient.so never appeared; aborting");
+        g_initThreadDone.store(true, std::memory_order_release);
+        return nullptr;
     }
     DebugLog("[CR] DeferredInit: starting\n");
 
@@ -425,13 +431,8 @@ static void* DeferredInitThread(void*)
 
 
 
-__attribute__((constructor))
-static void OnLoad()
+static void SpawnDeferredInit()
 {
-    std::string proc = GetProcessName();
-    if (proc != "steam" && !SteamclientMapped())
-        return;
-
     // Clean ourselves from LD_PRELOAD so child processes don't inherit us
     CleanLdPreload();
 
@@ -447,6 +448,16 @@ static void OnLoad()
             g_initThreadDone.store(true, std::memory_order_release);
         }
     }
+}
+
+__attribute__((constructor))
+static void OnLoad()
+{
+    std::string proc = GetProcessName();
+    if (proc != "steam" && !SteamclientMapped())
+        return;
+
+    SpawnDeferredInit();
 }
 
 __attribute__((destructor))

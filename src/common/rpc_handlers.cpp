@@ -2679,6 +2679,32 @@ RpcResult HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqBo
         }
     }
 
+    // If we still have no size, the file likely exists only in the cloud and
+    // the local manifest hasn't been populated yet (e.g. an app just migrated
+    // from the legacy manifest.dat layout, published at CN=0, so the local
+    // sync was skipped). Declaring size=0 makes Steam's download stall/time
+    // out. Consult the cloud state, which is authoritative for size/sha, and
+    // persist it locally so subsequent lookups are cheap.
+    if (fileSize == 0 && sha.empty() && CloudStorage::IsCloudActive()) {
+        auto stateResult = CloudStorage::FetchCloudState(accountId, appId);
+        if (stateResult.status == CloudStorage::StateFetchStatus::Ok) {
+            auto fit = stateResult.state.files.find(cleanName);
+            if (fit != stateResult.state.files.end() && fit->second.size > 0) {
+                fileSize = fit->second.size;
+                timestamp = fit->second.timestamp;
+                sha = fit->second.sha;
+                CloudStorage::ManifestEntry me;
+                me.sha = fit->second.sha;
+                me.timestamp = fit->second.timestamp;
+                me.size = fit->second.size;
+                manifest[cleanName] = std::move(me);
+                CloudStorage::SaveManifestLocal(accountId, appId, manifest);
+                LOG("[NS-DL] FileDownload app=%u file=%s: resolved size=%llu from cloud state",
+                    appId, cleanName.c_str(), (unsigned long long)fileSize);
+            }
+        }
+    }
+
     LOG("[NS-DL] FileDownload app=%u file=%s (clean=%s) size=%llu -> %s%s",
         appId, filename.c_str(), cleanName.c_str(), fileSize, urlHost.c_str(), urlPath.c_str());
 

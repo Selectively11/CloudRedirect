@@ -152,7 +152,26 @@ static Manifest ParseManifestJson(const std::string& json) {
         if (entry.has("sha"))   me.sha      = HexToSha(entry["sha"].str());
         if (entry.has("ts"))    me.timestamp = (uint64_t)entry["ts"].integer();
         if (entry.has("size"))  me.size     = (uint64_t)entry["size"].integer();
-        result[filename] = std::move(me);
+
+        // Heal CAS-corrupt keys: builds <= 2.0.4 stored the blob path
+        // "<file>/<sha40>" as the manifest key. Strip a 40-hex-char leaf so
+        // the manifest is keyed by the true filename.
+        std::string key = filename;
+        size_t lastSlash = key.rfind('/');
+        if (lastSlash != std::string::npos && lastSlash != 0 &&
+            lastSlash + 1 < key.size()) {
+            std::string leaf = key.substr(lastSlash + 1);
+            if (leaf.size() == 40 &&
+                leaf.find_first_not_of("0123456789abcdef") == std::string::npos) {
+                key = key.substr(0, lastSlash);
+            }
+        }
+        if (key.empty()) continue;
+
+        // If multiple CAS keys collapse onto one filename, keep the largest.
+        auto existing = result.find(key);
+        if (existing != result.end() && existing->second.size >= me.size) continue;
+        result[key] = std::move(me);
     }
     return result;
 }

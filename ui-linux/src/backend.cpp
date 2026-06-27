@@ -1,4 +1,5 @@
 #include "backend.h"
+#include "proton_auth.h"
 #include "utils.h"
 #include <QDir>
 #include <QFile>
@@ -291,7 +292,7 @@ void Backend::loadConfig()
         m_notificationsEnabled ? "true" : "false");
 
     m_providerAuthenticated = false;
-    if (m_providerName == "gdrive" || m_providerName == "onedrive") {
+    if (m_providerName == "gdrive" || m_providerName == "onedrive" || m_providerName == "proton") {
         QString tokenPath = defaultTokenPath(m_providerName);
         if (QFile::exists(tokenPath)) {
             m_providerAuthenticated = true;
@@ -866,12 +867,17 @@ void Backend::fetchRemoteApps()
     if (m_accountId.isEmpty()) {
         return;
     }
-    if (m_providerName != "gdrive" && m_providerName != "onedrive") {
-        fprintf(stderr, "[Backend] provider is not gdrive/onedrive, skipping\n");
+    if (m_providerName != "gdrive" && m_providerName != "onedrive" && m_providerName != "proton") {
+        fprintf(stderr, "[Backend] provider is not gdrive/onedrive/proton, skipping\n");
         emit remoteAppsFetched();
         return;
     }
-    
+
+    if (m_providerName == "proton") {
+        fetchProtonDriveApps();
+        return;
+    }
+
     QString token = readAccessToken();
     if (token.isEmpty()) {
         fprintf(stderr, "[Backend] No valid access token for remote listing\n");
@@ -1072,8 +1078,69 @@ void Backend::fetchOneDriveApps(const QString &token)
     });
 }
 
+void Backend::fetchProtonDriveApps()
+{
+    auto *auth = new ProtonAuthService(this);
+    connect(auth, &ProtonAuthService::remoteAppsListed, this,
+            [this, auth](const QList<uint32_t> &appIds) {
+                auth->deleteLater();
+                m_remoteAppIds.clear();
+                for (uint32_t id : appIds) {
+                    if (id > 0 && !kHiddenAppIds.contains(id))
+                        m_remoteAppIds.insert(id);
+                }
+                QSet<uint32_t> localAppIds;
+                for (auto &app : m_apps) {
+                    localAppIds.insert(app.appId);
+                    if (m_remoteAppIds.contains(app.appId))
+                        app.isRemote = true;
+                }
+                for (uint32_t appId : m_remoteAppIds) {
+                    if (!localAppIds.contains(appId)) {
+                        QString name = m_nameCache.value(appId, QString("App %1").arg(appId));
+                        m_apps.append({appId, name, QString(), QString(), 0, 0, false, true});
+                    }
+                }
+                fprintf(stderr, "[Backend] Proton remote apps: %d remote IDs, %d total apps\n",
+                        (int)m_remoteAppIds.size(), (int)m_apps.size());
+                emit appsChanged();
+                emit remoteAppsFetched();
+                QTimer::singleShot(0, this, &Backend::resolveAppNames);
+            });
+    connect(auth, &ProtonAuthService::failed, this,
+            [this, auth](const QString &err) {
+                fprintf(stderr, "[Backend] Proton remote listing failed: %s\n",
+                        err.toUtf8().constData());
+                auth->deleteLater();
+                emit remoteAppsFetched();
+            });
+    auth->listRemoteApps(defaultTokenPath("proton"), m_accountId);
+}
+
+void Backend::deleteProtonDriveAppData(uint appId)
+{
+    auto *auth = new ProtonAuthService(this);
+    connect(auth, &ProtonAuthService::appFolderDeleted, this,
+            [auth, appId]() {
+                fprintf(stderr, "[Backend] Proton: deleted cloud folder for app %u\n", appId);
+                auth->deleteLater();
+            });
+    connect(auth, &ProtonAuthService::failed, this,
+            [auth, appId](const QString &err) {
+                fprintf(stderr, "[Backend] Proton: delete app %u failed: %s\n",
+                        appId, err.toUtf8().constData());
+                auth->deleteLater();
+            });
+    auth->deleteAppFolder(defaultTokenPath("proton"), m_accountId, (uint32_t)appId);
+}
+
 void Backend::deleteCloudAppData(uint appId)
 {
+    if (m_providerName == "proton") {
+        deleteProtonDriveAppData(appId);
+        return;
+    }
+
     QString token = readAccessToken();
     if (token.isEmpty()) return;
 

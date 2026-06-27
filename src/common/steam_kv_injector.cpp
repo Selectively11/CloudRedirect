@@ -14,6 +14,8 @@
 #include <link.h>
 #include <cstdio>
 #include <cstring>
+#include <csetjmp>
+#include <csignal>
 #endif
 
 namespace SteamKvInjector {
@@ -438,6 +440,46 @@ static std::once_flag g_initOnce;
 
 static constexpr uint32_t kSectionUfs = 10;
 
+#ifndef _WIN32
+// Crash guard for calls into steamclient.so internals. If a Steam client
+// update shifts the scanned offsets in a way the scanner can't catch, a call
+// could dereference a bad pointer and SIGSEGV on a Steam worker thread, taking
+// the whole client down. We catch SIGSEGV/SIGBUS for the duration of the call,
+// longjmp out, and permanently disable the KV injector for this session.
+// Only guards QUOTA-METADATA calls; save data is never touched here.
+static std::atomic<bool> g_kvBroken{false};
+static sigjmp_buf g_kvJmpBuf;
+static volatile sig_atomic_t g_inKvCall = 0;
+
+static void KvCrashHandler(int sig) {
+    if (g_inKvCall) {
+        siglongjmp(g_kvJmpBuf, sig);
+    }
+    raise(sig);
+}
+
+class KvCrashGuard {
+public:
+    KvCrashGuard() {
+        struct sigaction sa = {};
+        sa.sa_handler = KvCrashHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESETHAND;
+        sigaction(SIGSEGV, &sa, &m_oldSegv);
+        sigaction(SIGBUS, &sa, &m_oldBus);
+        g_inKvCall = 1;
+    }
+    ~KvCrashGuard() {
+        g_inKvCall = 0;
+        sigaction(SIGSEGV, &m_oldSegv, nullptr);
+        sigaction(SIGBUS, &m_oldBus, nullptr);
+    }
+private:
+    struct sigaction m_oldSegv = {};
+    struct sigaction m_oldBus = {};
+};
+#endif
+
 struct MemRegion { uintptr_t start; uintptr_t end; };
 
 // Find steamclient.so base and executable region via dl_iterate_phdr.
@@ -795,11 +837,31 @@ bool IsReady() {
 
 bool ReadAppQuota(uint32_t appId, uint64_t& outQuotaBytes, uint32_t& outMaxNumFiles) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
+#ifndef _WIN32
+    if (g_kvBroken.load(std::memory_order_acquire)) return false;
+#endif
     void* cache = GetCachePtr();
     if (!cache) return false;
 
+#ifndef _WIN32
+    uint64_t quota = 0, files = 0;
+    {
+        KvCrashGuard guard;
+        int sig = sigsetjmp(g_kvJmpBuf, 1);
+        if (sig != 0) {
+            g_kvBroken.store(true, std::memory_order_release);
+            LOG("[KvInjector] ReadAppQuota app=%u: steamclient call faulted "
+                "(signal %d); disabling KV injector, quota falls back to default",
+                appId, sig);
+            return false;
+        }
+        quota = g_r.readConfigU64(cache, appId, kSectionUfs, "quota", 0);
+        files = g_r.readConfigU64(cache, appId, kSectionUfs, "maxnumfiles", 0);
+    }
+#else
     uint64_t quota = g_r.readConfigU64(cache, appId, kSectionUfs, "quota", 0);
     uint64_t files = g_r.readConfigU64(cache, appId, kSectionUfs, "maxnumfiles", 0);
+#endif
 
     if (!QuotaValueLooksValid(quota, files)) {
         if (quota != 0 || files != 0) {
@@ -863,11 +925,23 @@ static void* ResolveAppInfo(void* cache, uint32_t appId) {
 
 bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
+    if (g_kvBroken.load(std::memory_order_acquire)) return false;
     if (quotaBytes == 0 || maxNumFiles == 0) {
         LOG("[KvInjector] InjectAppQuota app=%u: refusing zero values "
             "(quota=%llu files=%u)",
             appId, (unsigned long long)quotaBytes, maxNumFiles);
         return false;
+    }
+
+    {
+        KvCrashGuard _guard;
+        int _sig = sigsetjmp(g_kvJmpBuf, 1);
+        if (_sig != 0) {
+            g_kvBroken.store(true, std::memory_order_release);
+            LOG("[KvInjector] InjectAppQuota app=%u: steamclient call faulted "
+                "(signal %d); disabling KV injector", appId, _sig);
+            return false;
+        }
     }
 
     void* cache = GetCachePtr();
@@ -936,7 +1010,19 @@ bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
 
 bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
+    if (g_kvBroken.load(std::memory_order_acquire)) return false;
     if (rules.empty()) return false;
+
+    {
+        KvCrashGuard _guard;
+        int _sig = sigsetjmp(g_kvJmpBuf, 1);
+        if (_sig != 0) {
+            g_kvBroken.store(true, std::memory_order_release);
+            LOG("[KvInjector] InjectSaveFiles app=%u: steamclient call faulted "
+                "(signal %d); disabling KV injector", appId, _sig);
+            return false;
+        }
+    }
 
     void* cache = GetCachePtr();
     if (!cache) {

@@ -40,6 +40,16 @@ modules:
       - type: file
         path: cloudredirect.flatpakrepo
 
+  - name: libargon2
+    buildsystem: simple
+    build-commands:
+      - make OPTTARGET=''
+      - make install PREFIX=/app LIBRARY_REL=lib
+    sources:
+      - type: git
+        url: https://github.com/P-H-C/phc-winner-argon2.git
+        branch: master
+
   - name: cloud-redirect-ui
     buildsystem: cmake-ninja
     no-debuginfo: true

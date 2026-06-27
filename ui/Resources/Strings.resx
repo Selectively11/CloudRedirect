@@ -616,7 +616,7 @@ Force-kill it?</value>
     <value>Cloud Provider</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure your Steam Cloud provider. Google Drive/OneDrive/Local Folder only for now.</value>
+    <value>Configure your Steam Cloud provider. Supports Google Drive, OneDrive, Proton Drive, and local folder sync.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Provider</value>
@@ -721,6 +721,30 @@ Force-kill it?</value>
   </data>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
     <value>No token file path specified</value>
+  </data>
+  <data name="CloudProvider_ProtonDrive" xml:space="preserve">
+    <value>Proton Drive</value>
+  </data>
+  <data name="ProtonLogin_WindowTitle" xml:space="preserve">
+    <value>Sign in to Proton</value>
+  </data>
+  <data name="ProtonLogin_Subtitle" xml:space="preserve">
+    <value>Enter your Proton account credentials. Your password is used locally to decrypt your keys and is never stored.</value>
+  </data>
+  <data name="ProtonLogin_EmailLabel" xml:space="preserve">
+    <value>Email address</value>
+  </data>
+  <data name="ProtonLogin_EmailPlaceholder" xml:space="preserve">
+    <value>you@proton.me</value>
+  </data>
+  <data name="ProtonLogin_PasswordLabel" xml:space="preserve">
+    <value>Password</value>
+  </data>
+  <data name="ProtonLogin_SignIn" xml:space="preserve">
+    <value>Sign In</value>
+  </data>
+  <data name="ProtonLogin_Cancel" xml:space="preserve">
+    <value>Cancel</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->

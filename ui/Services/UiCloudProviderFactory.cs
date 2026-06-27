@@ -15,10 +15,11 @@ internal static class UiCloudProviderFactory
         if (config == null || config.IsLocal) return null;
         return config.Provider switch
         {
-            "gdrive"   => new CliUiCloudProvider("gdrive", log),
-            "onedrive" => new CliUiCloudProvider("onedrive", log),
-            "folder"   => new FolderUiCloudProvider(log, config.SyncPath!),
-            _          => null,
+            "gdrive"       => new CliUiCloudProvider("gdrive", log),
+            "onedrive"     => new CliUiCloudProvider("onedrive", log),
+            "protondrive" or "proton" => new CliUiCloudProvider("protondrive", log),
+            "folder"       => new FolderUiCloudProvider(log, config.SyncPath!),
+            _              => null,
         };
     }
 }

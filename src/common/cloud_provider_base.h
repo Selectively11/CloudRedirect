@@ -123,6 +123,20 @@ protected:
     virtual const char* ApiHost() const = 0;
     virtual bool IsRateLimited(int status, const std::string& body) const = 0;
 
+    // Optional overrides for providers that differ from standard OAuth2 refresh.
+    // Content-Type header sent with the token refresh POST.
+    virtual const char* RefreshContentType() const { return "application/x-www-form-urlencoded"; }
+    // Extra headers appended to the token refresh request (e.g. "x-pm-uid: ...").
+    virtual std::vector<std::string> ExtraRefreshHeaders() const { return {}; }
+    // Parse the access token from a refresh response (field name varies by provider).
+    virtual std::string ParseRefreshAccessToken(const std::string& body) const;
+    // Parse the refresh token from a refresh response (may be empty = unchanged).
+    virtual std::string ParseRefreshRefreshToken(const std::string& body) const;
+    // Parse the expires_in seconds from a refresh response (0 = unknown, use default).
+    virtual int64_t ParseRefreshExpiresIn(const std::string& body) const;
+    // Extra headers appended to every authenticated API request.
+    virtual std::vector<std::string> ExtraApiHeaders() const { return {}; }
+
     // Shared state
 
     struct Tokens {

@@ -225,11 +225,30 @@ StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
             state.cn = legacyCN;
             if (legacyResult.status == ManifestFetchStatus::Ok) {
                 for (const auto& [name, me] : legacyResult.manifest) {
+                    // Heal CAS-corrupted legacy keys: builds <= 2.0.4 wrote the
+                    // blob path "<file>/<sha40>" as the manifest key, which makes
+                    // restore land at "<file>/<sha40>" (a directory) instead of
+                    // the real save file. Strip a 40-hex-char leaf so the
+                    // migrated state uses the true filename.
+                    std::string clean = name;
+                    size_t lastSlash = clean.rfind('/');
+                    if (lastSlash != std::string::npos && lastSlash != 0 &&
+                        lastSlash + 1 < clean.size()) {
+                        std::string leaf = clean.substr(lastSlash + 1);
+                        if (leaf.size() == 40 &&
+                            leaf.find_first_not_of("0123456789abcdef") == std::string::npos) {
+                            clean = clean.substr(0, lastSlash);
+                        }
+                    }
+                    if (clean.empty()) continue;
                     FileEntry fe;
                     fe.sha = me.sha;
                     fe.timestamp = me.timestamp;
                     fe.size = me.size;
-                    state.files[name] = std::move(fe);
+                    // CAS dedup: if multiple SHAs collapsed to one name, keep largest.
+                    auto it = state.files.find(clean);
+                    if (it != state.files.end() && it->second.size >= fe.size) continue;
+                    state.files[clean] = std::move(fe);
                 }
             }
             if (state.cn > 0 && state.files.empty() && g_stateProvider) {

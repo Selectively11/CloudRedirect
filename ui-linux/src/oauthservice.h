@@ -14,12 +14,15 @@ public:
     ~OAuthService();
 
     Q_INVOKABLE void startAuth(const QString &provider, const QString &tokenPath);
+    Q_INVOKABLE void startProtonAuth(const QString &email, const QString &password, const QString &tokenPath);
+    Q_INVOKABLE void submitProtonTwoFactor(const QString &code);
     Q_INVOKABLE void cancel();
 
 signals:
     void authSucceeded(const QString &provider);
     void authFailed(const QString &provider, const QString &error);
     void statusMessage(const QString &msg);
+    void protonNeedsTwoFactor();
 
 private slots:
     void onNewConnection();
@@ -30,6 +33,7 @@ private:
     void exchangeCodeForTokens(const QString &code, int retryCount = 0);
 
     QTcpServer *m_server = nullptr;
+    class ProtonAuthService *m_protonSvc = nullptr;
     QString m_provider;
     QString m_tokenPath;
     QString m_state;

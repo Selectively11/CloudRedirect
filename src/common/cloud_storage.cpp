@@ -4,6 +4,7 @@
 #include "local_disk_provider.h"
 #include "google_drive_provider.h"
 #include "onedrive_provider.h"
+#include "proton_drive_provider.h"
 #include "cloud_metadata_paths.h"
 #include "cloud_staging.h"
 #include "file_util.h"
@@ -1071,18 +1072,51 @@ bool StoreBlobStaged(uint32_t accountId, uint32_t appId, uint64_t batchId,
 static bool TryReadCachedBlob(const std::string& localPath,
                               const std::string& filename,
                               std::vector<uint8_t>& out) {
-    std::ifstream f(FileUtil::Utf8ToPath(localPath), std::ios::binary | std::ios::ate);
-    if (!f) return false;
-    auto rawSize = f.tellg();
-    if (rawSize < 0) {
-        LOG("[CloudStorage] RetrieveBlob: cache tellg failed for %s",
+    std::error_code ec;
+    auto fsPath = FileUtil::Utf8ToPath(localPath);
+
+    // Resolve the real on-disk file. Older builds (<= 2.0.4) wrote blobs in a
+    // CAS-corrupt layout: instead of the file "<name>", they created a
+    // directory "<name>/" holding the bytes under a 40-hex SHA leaf
+    // ("<name>/<sha40>"). On Linux an ifstream happily "opens" a directory and
+    // tellg() then reports a bogus/huge size, so out.resize() throws
+    // std::bad_alloc. Detect that case and read the inner blob so legacy saves
+    // still restore; otherwise require a regular file.
+    if (std::filesystem::is_directory(fsPath, ec) && !ec) {
+        std::filesystem::path innerBlob;
+        size_t regularCount = 0;
+        std::filesystem::directory_iterator dit(fsPath, ec), dend;
+        for (; !ec && dit != dend; dit.increment(ec)) {
+            std::error_code fe;
+            if (dit->is_regular_file(fe) && !fe) {
+                ++regularCount;
+                innerBlob = dit->path();
+                if (regularCount > 1) break;
+            }
+        }
+        // A clean legacy CAS dir holds exactly one SHA-named blob.
+        if (regularCount != 1) {
+            LOG("[CloudStorage] RetrieveBlob: cache path is a directory with %zu files, skipping: %s",
+                regularCount, filename.c_str());
+            return false;
+        }
+        fsPath = innerBlob;
+    } else if (!std::filesystem::is_regular_file(fsPath, ec) || ec) {
+        return false;
+    }
+
+    auto fileSize = std::filesystem::file_size(fsPath, ec);
+    if (ec) {
+        LOG("[CloudStorage] RetrieveBlob: cache file_size failed for %s",
             filename.c_str());
         return false;
     }
-    auto size = static_cast<std::streamoff>(rawSize);
+
+    std::ifstream f(fsPath, std::ios::binary);
+    if (!f) return false;
+    auto size = static_cast<std::streamoff>(fileSize);
     out.resize(static_cast<size_t>(size));
     if (size == 0) return true;
-    f.seekg(0, std::ios::beg);
     f.read(reinterpret_cast<char*>(out.data()), size);
     if (f.fail() || f.gcount() != size) {
         LOG("[CloudStorage] RetrieveBlob: cache read failed for %s (gcount=%lld of %lld, fail=%d)",
@@ -2826,6 +2860,9 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     }
     if (lower == "onedrive") {
         return wireAuthCallback(std::make_unique<OneDriveProvider>());
+    }
+    if (lower == "protondrive" || lower == "proton") {
+        return wireAuthCallback(std::make_unique<ProtonDriveProvider>());
     }
     LOG("[CloudStorage] CreateCloudProvider: unknown provider '%s'", name.c_str());
     return nullptr;

@@ -627,7 +627,16 @@ bool Start(const std::string& blobRoot, uint32_t accountId) {
                     RegisterClientFd(clientFd);
                     g_clientThreads.push_back(ClientThread{std::thread([clientFd, done]() {
                         g_activeConnections.fetch_add(1);
-                        HandleConnection(clientFd);
+                        try {
+                            HandleConnection(clientFd);
+                        } catch (...) {
+                            LOG("[HttpServer] Unhandled exception in connection handler");
+                            UnregisterClientFd(clientFd);
+                            close(clientFd);
+                            g_activeConnections.fetch_sub(1);
+                            done->store(true, std::memory_order_release);
+                            return;
+                        }
                         UnregisterClientFd(clientFd);
                         g_activeConnections.fetch_sub(1);
                         done->store(true, std::memory_order_release);

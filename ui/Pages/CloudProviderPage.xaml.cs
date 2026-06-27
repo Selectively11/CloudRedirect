@@ -172,6 +172,12 @@ public partial class CloudProviderPage : Page
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "CloudRedirect", "onedrive_tokens.json");
             }
+            else if (tag == "protondrive")
+            {
+                TokenPathBox.Text = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "CloudRedirect", "proton_tokens.json");
+            }
             else if (tag is "local" or "folder")
             {
                 SetDefaultLocalPath();
@@ -189,7 +195,7 @@ public partial class CloudProviderPage : Page
         if (ProviderCombo.SelectedItem is not ComboBoxItem item) return;
 
         var tag = item.Tag as string;
-        bool needsTokens = tag is "gdrive" or "onedrive";
+        bool needsTokens = tag is "gdrive" or "onedrive" or "protondrive";
         bool isFolder = tag == "folder";
         bool isLocal = tag == "local";
         bool needsPath = needsTokens || isFolder;
