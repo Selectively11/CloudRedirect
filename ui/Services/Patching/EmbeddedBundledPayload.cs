@@ -16,12 +16,34 @@ internal static class EmbeddedBundledPayload
         try
         {
             using var stream = GetResourceStream(steamBuild);
-            if (stream == null)
+            if (stream != null)
+                return InstallStream(stream, steamPath, steamBuild, log);
+
+            // Exact build not found — deploy the newest available payload.
+            foreach (var fallback in SteamDetector.SupportedSteamVersions)
             {
-                log?.Invoke($"Embedded payload: not present for build {steamBuild}");
-                return false;
+                using var fbStream = GetResourceStream(fallback);
+                if (fbStream != null)
+                {
+                    log?.Invoke($"Embedded payload: build {steamBuild} not found, deploying latest ({fallback})");
+                    return InstallStream(fbStream, steamPath, steamBuild, log);
+                }
             }
 
+            log?.Invoke($"Embedded payload: no payloads available");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            log?.Invoke($"Embedded payload install failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static bool InstallStream(Stream stream, string steamPath, long steamBuild, Action<string>? log)
+    {
+        try
+        {
             var dst = Fingerprint.GetExpectedCachePath(steamPath);
             var dstDir = Path.GetDirectoryName(dst);
             if (!string.IsNullOrEmpty(dstDir))

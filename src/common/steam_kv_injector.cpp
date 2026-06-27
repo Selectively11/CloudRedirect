@@ -110,6 +110,16 @@ struct Resolved {
 static Resolved g_r;
 static std::atomic<bool> g_ready{false};
 static std::once_flag g_initOnce;
+static Overrides g_overrides;  // pre-resolved addresses (set before Init)
+
+void SetOverrides(const Overrides& ov) {
+    g_overrides = ov;
+}
+
+// Helper: prefer auto-resolved override, fall back to base + hardcoded RVA.
+static uintptr_t OvResolve(uintptr_t override, uintptr_t base, uintptr_t rva) {
+    return override ? override : (base + rva);
+}
 
 // Section ID for "ufs" in the app config KV tree.
 static constexpr uint32_t kSectionUfs = 10;
@@ -133,16 +143,16 @@ bool Init() {
         uintptr_t base = reinterpret_cast<uintptr_t>(hSC);
         LOG("[KvInjector] Init: steamclient64.dll base %p", hSC);
 
-        g_r.globalEnginePtrPtr = reinterpret_cast<void**>(base + SC_RVA_GLOBAL_ENGINE);
-        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(base + SC_RVA_GET_APP_INFO);
-        g_r.getSection    = reinterpret_cast<GetSectionFn>(base + SC_RVA_GET_SECTION);
-        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(base + SC_RVA_READ_CONFIG_U64);
-        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(base + SC_RVA_KV_FIND_KEY);
-        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(base + SC_RVA_KV_GET_UINT64);
-        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(base + SC_RVA_KV_GET_INT);
-        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(base + SC_RVA_KV_SET_UINT64);
-        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(base + SC_RVA_KV_SET_INT);
-        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(base + SC_RVA_KV_SET_STRING);
+        g_r.globalEnginePtrPtr = reinterpret_cast<void**>(OvResolve(g_overrides.globalEngine, base, SC_RVA_GLOBAL_ENGINE));
+        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(OvResolve(g_overrides.getAppInfo, base, SC_RVA_GET_APP_INFO));
+        g_r.getSection    = reinterpret_cast<GetSectionFn>(OvResolve(g_overrides.getSection, base, SC_RVA_GET_SECTION));
+        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(OvResolve(g_overrides.readConfigU64, base, SC_RVA_READ_CONFIG_U64));
+        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(OvResolve(g_overrides.kvFindKey, base, SC_RVA_KV_FIND_KEY));
+        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(OvResolve(g_overrides.kvGetUint64, base, SC_RVA_KV_GET_UINT64));
+        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(OvResolve(g_overrides.kvGetInt, base, SC_RVA_KV_GET_INT));
+        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(OvResolve(g_overrides.kvSetUint64, base, SC_RVA_KV_SET_UINT64));
+        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(OvResolve(g_overrides.kvSetInt, base, SC_RVA_KV_SET_INT));
+        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(OvResolve(g_overrides.kvSetString, base, SC_RVA_KV_SET_STRING));
 
         // Guard against wrong steamclient build -- bad RVA crashes on first call
         MEMORY_BASIC_INFORMATION mbi = {};

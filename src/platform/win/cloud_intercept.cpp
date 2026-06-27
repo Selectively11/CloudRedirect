@@ -5,6 +5,7 @@
 #include "protobuf.h"
 #include "parental_bypass.h"
 #include "steam_kv_injector.h"
+#include "sc_resolver.h"
 #include "log.h"
 #include "http_server.h"
 #include "vdf.h"
@@ -40,6 +41,11 @@
 #include <thread>
 
 namespace CloudIntercept {
+
+static ScResolver::ResolvedAddrs g_resolved;
+
+#define SC_RESOLVE(field, rva) \
+    (g_resolved.field ? g_resolved.field : (g_steamClientBase + (rva)))
 
 static void ShutdownImpl();
 static void InstallExitProcessHook();
@@ -486,7 +492,7 @@ static uintptr_t FindCurrentUser() {
         g_steamClientBase = (uintptr_t)hSC;
     }
 
-    uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+    uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
     uintptr_t engine = 0;
     __try { engine = *pEngineGlobal; } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
     if (!engine) return 0;
@@ -594,8 +600,8 @@ bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2w
     uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
     if (!userPtr) return false;
 
-    auto getData = (GetAppMinutesPlayedDataFn)(g_steamClientBase + SC_RVA_GET_APP_MINUTES_PLAYED_DATA);
-    auto flushData = (FlushAppMinutesPlayedFn)(g_steamClientBase + SC_RVA_FLUSH_APP_MINUTES_PLAYED);
+    auto getData = (GetAppMinutesPlayedDataFn)SC_RESOLVE(getAppMinutesPlayedData, SC_RVA_GET_APP_MINUTES_PLAYED_DATA);
+    auto flushData = (FlushAppMinutesPlayedFn)SC_RESOLVE(flushAppMinutesPlayed, SC_RVA_FLUSH_APP_MINUTES_PLAYED);
 
     unsigned int* record = nullptr;
     __try {
@@ -644,7 +650,7 @@ bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed) {
     uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
     if (!userPtr) return false;
 
-    auto setLastPlayed = (SetAppLastPlayedTimeFn)(g_steamClientBase + SC_RVA_SET_APP_LAST_PLAYED_TIME);
+    auto setLastPlayed = (SetAppLastPlayedTimeFn)SC_RESOLVE(setAppLastPlayedTime, SC_RVA_SET_APP_LAST_PLAYED_TIME);
 
     uint32_t lastPlayed32 = ClampToUint32(lastPlayed);
     __try {
@@ -791,7 +797,7 @@ static void* FindCCMInterface() {
     uintptr_t ccm = userPtr + USER_OFF_CCMINTERFACE;
 
     // Validate by checking vtable matches CCMInterface::vftable
-    uintptr_t expectedVtable = g_steamClientBase + SC_RVA_CCMINTERFACE_VT;
+    uintptr_t expectedVtable = SC_RESOLVE(ccmInterfaceVtable, SC_RVA_CCMINTERFACE_VT);
     uintptr_t actualVtable = 0;
     __try { actualVtable = *(uintptr_t*)ccm; } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 
@@ -827,7 +833,7 @@ static void TryFindCCMInterface() {
 
     // Log details for debugging (wrapped in SEH - raw pointer dereferences for diagnostics only)
     __try {
-        uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
         uintptr_t engine = *pEngineGlobal;
         uint32_t handle = *(uint32_t*)(engine + ENGINE_OFF_GLOBAL_HANDLE);
 
@@ -839,12 +845,12 @@ static void TryFindCCMInterface() {
         LOG("[CCM] WARNING: exception reading engine globals (code=0x%lX)", GetExceptionCode());
     }
 
-    // Resolve BRouteMsgToJob bypass function pointers (computed from base + RVA, no dereferences)
-    g_wrapPacket     = (WrapPacketFn)(g_steamClientBase + SC_RVA_WRAP_PACKET);
-    g_bRouteMsgToJob = (BRouteMsgToJobFn)(g_steamClientBase + SC_RVA_BROUTEMSG);
-    g_releaseWrapped = (ReleaseWrappedFn)(g_steamClientBase + SC_RVA_RELEASE_WRAPPED);
-    g_refCountHelper = (RefCountHelperFn)(g_steamClientBase + SC_RVA_REFCOUNT_HELPER);
-    g_refCountGlobalPtr = (volatile int64_t**)(g_steamClientBase + SC_RVA_REFCOUNT_GLOBAL);
+    // Resolve BRouteMsgToJob bypass function pointers
+    g_wrapPacket     = (WrapPacketFn)SC_RESOLVE(wrapPacket, SC_RVA_WRAP_PACKET);
+    g_bRouteMsgToJob = (BRouteMsgToJobFn)SC_RESOLVE(bRouteMsgToJob, SC_RVA_BROUTEMSG);
+    g_releaseWrapped = (ReleaseWrappedFn)SC_RESOLVE(releaseWrapped, SC_RVA_RELEASE_WRAPPED);
+    g_refCountHelper = (RefCountHelperFn)SC_RESOLVE(refCountHelper, SC_RVA_REFCOUNT_HELPER);
+    g_refCountGlobalPtr = (volatile int64_t**)SC_RESOLVE(refCountGlobal, SC_RVA_REFCOUNT_GLOBAL);
     LOG("[CCM]   WrapPacket=%p BRouteMsgToJob=%p ReleaseWrapped=%p",
         g_wrapPacket, g_bRouteMsgToJob, g_releaseWrapped);
 
@@ -853,7 +859,7 @@ static void TryFindCCMInterface() {
         LOG("[CCM]   RefCountHelper=%p RefCountGlobal=%p (*=%p)",
             g_refCountHelper, g_refCountGlobalPtr,
             g_refCountGlobalPtr ? (void*)*g_refCountGlobalPtr : nullptr);
-        uintptr_t engine = *(uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t engine = *(uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
         LOG("[CCM]   CJobMgr (engine+%u)=%p  ConnCtx (ccm+%u)=%p",
             ENGINE_OFF_JOBMGR, (void*)(engine + ENGINE_OFF_JOBMGR),
             CCM_OFF_CONN_CONTEXT, *(void**)((uintptr_t)ccm + CCM_OFF_CONN_CONTEXT));
@@ -969,7 +975,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     void* jobMgr = nullptr;
     void* connCtx = nullptr;
     __try {
-        uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine, SC_RVA_GLOBAL_ENGINE);
         uintptr_t engine = *pEngineGlobal;
         jobMgr = (void*)(engine + ENGINE_OFF_JOBMGR);
         connCtx = *(void**)((uintptr_t)g_cmInterface + CCM_OFF_CONN_CONTEXT);
@@ -995,7 +1001,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     // missing slot but returns 1, which would log a false success while the
     // game's pending download silently fails.
     using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
-    FindJobFn findJob = (FindJobFn)(g_steamClientBase + SC_RVA_FIND_JOB);
+    FindJobFn findJob = (FindJobFn)SC_RESOLVE(findJob, SC_RVA_FIND_JOB);
     int jobSlot = -1;
     bool findJobThrew = false;
     __try {
@@ -2312,18 +2318,30 @@ static void RefuseVtableHook(const char* reasonFmt, ...) {
 
     if (g_vtableHookFailureNotified.exchange(true)) return;
 
-    std::string msg =
-        "CloudRedirect could not install its primary cloud-save interception hook.\n\n"
-        "Most likely a Steam update changed steamclient64.dll layout.\n\n"
-        "Cloud saves may not be redirected for some games.\n\n"
-        "Please report cloud_redirect.log at\n"
-        "https://github.com/anomalyco/CloudRedirect/issues\n\n"
-        "Reason: ";
-    msg += reason;
-    std::thread t([msg]() {
+    uint64_t ver = g_detectedSteamVersion.load(std::memory_order_relaxed);
+    char msg[1024];
+    if (ver != 0) {
+        snprintf(msg, sizeof(msg),
+            "Your Steam client (version %llu) is newer than what "
+            "CloudRedirect supports.\n\n"
+            "Update CloudRedirect to match your Steam version.\n\n"
+            "Cloud saves will not be redirected. STFixer patches will still apply.\n\n"
+            "Reason: %s",
+            ver, reason);
+    } else {
+        snprintf(msg, sizeof(msg),
+            "CloudRedirect could not identify required addresses in "
+            "steamclient64.dll.\n\n"
+            "Update CloudRedirect to match your Steam version.\n\n"
+            "Cloud saves will not be redirected. STFixer patches will still apply.\n\n"
+            "Reason: %s",
+            reason);
+    }
+    std::string msgStr(msg);
+    std::thread t([msgStr]() {
         if (g_shuttingDown.load(std::memory_order_acquire)) return;
-        MessageBoxA(nullptr, msg.c_str(),
-            "CloudRedirect -- Hook Install Failed",
+        MessageBoxA(nullptr, msgStr.c_str(),
+            "CloudRedirect -- Incompatible Steam Update",
             MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
     });
     std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
@@ -2350,24 +2368,35 @@ static void InstallServiceMethodHook() {
     InstallServiceMethodHookLocked();
 }
 
+static std::atomic<bool> g_resolverRan{false};
+
+static void RunAutoResolver() {
+    if (g_resolverRan.exchange(true)) return; // one-shot
+    g_resolved = ScResolver::Resolve(g_steamClientBase);
+    ScResolver::LogComparison(g_resolved, g_steamClientBase);
+}
+
 static void InstallServiceMethodHookLocked() {
     if (g_vtableHookInstalled.load(std::memory_order_acquire) || !g_steamClientBase) return;
 
-    // Resolve g_pJobCur pointer for crash diagnostics (once)
-    if (!g_pJobCurPtr)
-        g_pJobCurPtr = (uintptr_t*)(g_steamClientBase + SC_RVA_JOBCUR_GLOBAL);
+    // Run auto-resolver on first entry (logs comparison with hardcoded RVAs)
+    RunAutoResolver();
 
-    // Validate Parse/Serialize RVAs before relying on them; a Steam update can repoint these into garbage.
-    auto candidateParse     = (ParseFromArrayFn)(g_steamClientBase + SC_RVA_PARSE_FROM_ARRAY);
-    auto candidateSerialize = (SerializeToArrayFn)(g_steamClientBase + SC_RVA_SERIALIZE_TO_ARRAY);
+    // Resolve g_pJobCur pointer for crash diagnostics (once)
+    // Use auto-resolved address if available, otherwise fall back to hardcoded RVA
+    if (!g_pJobCurPtr) {
+        g_pJobCurPtr = (uintptr_t*)SC_RESOLVE(jobCurGlobal, SC_RVA_JOBCUR_GLOBAL);
+    }
+
+    // Resolve Parse/Serialize
+    auto candidateParse     = (ParseFromArrayFn)SC_RESOLVE(parseFromArray, SC_RVA_PARSE_FROM_ARRAY);
+    auto candidateSerialize = (SerializeToArrayFn)SC_RESOLVE(serializeToArray, SC_RVA_SERIALIZE_TO_ARRAY);
     if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateParse))) {
-        RefuseVtableHook("ParseFromArray RVA 0x%X does not point at a function prologue (Steam update?)",
-            (unsigned)SC_RVA_PARSE_FROM_ARRAY);
+        RefuseVtableHook("ParseFromArray does not point at a function prologue (Steam update?)");
         return;
     }
     if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateSerialize))) {
-        RefuseVtableHook("SerializeToArray RVA 0x%X does not point at a function prologue (Steam update?)",
-            (unsigned)SC_RVA_SERIALIZE_TO_ARRAY);
+        RefuseVtableHook("SerializeToArray does not point at a function prologue (Steam update?)");
         return;
     }
     g_parseFromArray   = candidateParse;
@@ -2414,17 +2443,17 @@ static void InstallServiceMethodHookLocked() {
             }
         }
         if (!vtableEa) {
-            const uintptr_t fallback = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT;
+            const uintptr_t fallback = SC_RESOLVE(serviceTransportVtable, SC_RVA_SERVICE_TRANSPORT_VT);
             uintptr_t slot0 = 0;
             __try { slot0 = *reinterpret_cast<uintptr_t*>(fallback); }
             __except (EXCEPTION_EXECUTE_HANDLER) { slot0 = 0; }
             if (slot0 && LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(slot0))) {
-                LOG("[VtHook] RTTI resolution failed, falling back to hardcoded RVA 0x%X -> %p",
-                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)fallback);
+                LOG("[VtHook] RTTI resolution failed, falling back to resolved/hardcoded RVA -> %p",
+                    (void*)fallback);
                 vtableEa = fallback;
             } else {
-                RefuseVtableHook("RTTI walk + hardcoded RVA 0x%X both failed (slot0=%p not a function prologue) -- Steam update?",
-                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)slot0);
+                RefuseVtableHook("RTTI walk + resolved/hardcoded RVA both failed (slot0=%p not a function prologue) -- Steam update?",
+                    (void*)slot0);
                 return;
             }
         }
@@ -3296,15 +3325,6 @@ static void UploadLuaOnShutdown() {
         archiveFiles.size(), cloudManifest.size());
 }
 
-// Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1782344391ULL, 1782257239ULL, 1781041600ULL, 1780352834ULL, 1779918128ULL, 1779486452ULL, 1778281814ULL };
-
-static bool IsSupportedSteamVersion(uint64_t v) {
-    for (uint64_t s : SUPPORTED_STEAM_VERSIONS)
-        if (v == s) return true;
-    return false;
-}
-
 static uint64_t ReadSteamVersion(const std::string& steamDir) {
     std::string manifest = steamDir + "package\\steam_client_win64.manifest";
     std::ifstream f(FileUtil::Utf8ToPath(manifest));
@@ -3837,12 +3857,11 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     if (!g_steamPath.empty() && g_steamPath.back() != '\\')
         g_steamPath += '\\';
 
-    // Read Steam version early (used by version gate below and auto-update).
+    // Read Steam version for diagnostics and auto-update.
     uint64_t detectedVersion = ReadSteamVersion(g_steamPath);
     g_detectedSteamVersion.store(detectedVersion, std::memory_order_relaxed);
-    bool versionOk = (detectedVersion != 0) && IsSupportedSteamVersion(detectedVersion);
     if (detectedVersion != 0)
-        LOG("Steam version: %llu (%s)", detectedVersion, versionOk ? "OK" : "UNSUPPORTED");
+        LOG("Steam version: %llu", detectedVersion);
     else
         LOG("Steam version: UNKNOWN (manifest unreadable)");
 
@@ -4003,58 +4022,6 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     }
 
     LOG("cloud_redirect=%d", g_cloudRedirectEnabled.load());
-
-    // Steam version gate (after config read so we know the mode).
-    if (!versionOk && !cloudSaveOnly) {
-        bool isCloudMode = g_cloudRedirectEnabled.load();
-        if (isCloudMode) {
-            // CloudRedirect mode: block cloud init, but STFixer still works.
-            if (detectedVersion == 0) {
-                LOG("FATAL: Could not read Steam version from manifest");
-                NotifyUser(CR_NOTIFY_ERROR, "CloudRedirect -- Version Unknown",
-                    "CloudRedirect could not determine the installed Steam version.\n\n"
-                    "CloudRedirect cannot activate. STFixer patches will still apply.");
-            } else {
-                constexpr uint64_t newestSupported = SUPPORTED_STEAM_VERSIONS[0];
-                bool steamIsNewer = detectedVersion > newestSupported;
-                LOG("FATAL: Steam version mismatch! supported_newest=%llu actual=%llu (%s)",
-                    newestSupported, detectedVersion,
-                    steamIsNewer ? "Steam is newer" : "Steam is older");
-                char msg[512];
-                if (steamIsNewer) {
-                    snprintf(msg, sizeof(msg),
-                        "Your Steam client (version %llu) is newer than what "
-                        "CloudRedirect supports (version %llu).\n\n"
-                        "Update CloudRedirect to match your Steam version.\n\n"
-                        "CloudRedirect cannot activate. STFixer patches will still apply.",
-                        detectedVersion, newestSupported);
-                } else {
-                    snprintf(msg, sizeof(msg),
-                        "Your Steam client (version %llu) is older than what "
-                        "CloudRedirect expects (version %llu).\n\n"
-                        "Update Steam to match your CloudRedirect version.\n\n"
-                        "CloudRedirect cannot activate. STFixer patches will still apply.",
-                        detectedVersion, newestSupported);
-                }
-                NotifyUser(CR_NOTIFY_ERROR, "CloudRedirect -- Version Mismatch", msg);
-            }
-            return;  // block cloud init, STFixer patches already applied by payload
-        } else {
-            // STFixer mode: warn once, continue.
-            std::string flagPath = cloudRoot + ".version_warned_" + std::to_string(detectedVersion);
-            if (!std::filesystem::exists(FileUtil::Utf8ToPath(flagPath))) {
-                MessageBoxA(nullptr,
-                    "CloudRedirect is not fully compatible with your Steam client version.\n\n"
-                    "STFixer patches should still work, but consider updating CloudRedirect.\n\n"
-                    "This message will only be shown once.",
-                    "CloudRedirect -- Update Available",
-                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
-                // Write flag so we don't show again
-                std::ofstream(FileUtil::Utf8ToPath(flagPath)) << "1";
-            }
-            LOG("Steam version unsupported but STFixer mode -- continuing with warning");
-        }
-    }
 
     if (!g_cloudRedirectEnabled.load()) {
         LOG("Cloud redirection disabled, skipping cloud init");
@@ -4320,6 +4287,21 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     CloudStorage::Init(cloudRoot, std::move(provider));
     g_startupMetadataScheduled.store(false);
 
+    // Pass auto-resolved addresses to KV injector before Init
+    {
+        SteamKvInjector::Overrides ov;
+        ov.globalEngine  = g_resolved.globalEngine;
+        ov.getAppInfo    = g_resolved.getAppInfo;
+        ov.getSection    = g_resolved.getSection;
+        ov.readConfigU64 = g_resolved.readConfigU64;
+        ov.kvFindKey     = g_resolved.kvFindKey;
+        ov.kvGetUint64   = g_resolved.kvGetUint64;
+        ov.kvGetInt      = g_resolved.kvGetInt;
+        ov.kvSetUint64   = g_resolved.kvSetUint64;
+        ov.kvSetInt      = g_resolved.kvSetInt;
+        ov.kvSetString   = g_resolved.kvSetString;
+        SteamKvInjector::SetOverrides(ov);
+    }
     SteamKvInjector::Init();
 
 
@@ -4378,10 +4360,20 @@ void InstallManifestPinHook() {
         return;
     }
 
-    uintptr_t scBase = reinterpret_cast<uintptr_t>(hSteamClient);
-    g_bddOrigAddr = reinterpret_cast<uint8_t*>(scBase + SC_RVA_BUILD_DEPOT_DEPENDENCY);
-    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p + 0x%X)",
-        g_bddOrigAddr, hSteamClient, SC_RVA_BUILD_DEPOT_DEPENDENCY);
+    // Ensure g_steamClientBase is set before SC_RESOLVE (which uses it as fallback).
+    // InstallManifestPinHook runs before FindCurrentUser / InstallServiceMethodHookLocked,
+    // so g_steamClientBase may still be zero at this point.
+    if (!g_steamClientBase)
+        g_steamClientBase = reinterpret_cast<uintptr_t>(hSteamClient);
+
+    // Run the auto-resolver so g_resolved.buildDepotDependency is populated
+    // (otherwise SC_RESOLVE falls back to the hardcoded RVA, which is fine but
+    // the resolver gives us the correct address on updated builds).
+    RunAutoResolver();
+
+    g_bddOrigAddr = reinterpret_cast<uint8_t*>(SC_RESOLVE(buildDepotDependency, SC_RVA_BUILD_DEPOT_DEPENDENCY));
+    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p)",
+        g_bddOrigAddr, hSteamClient);
 
     // Verify the prologue bytes match what we expect from IDA:
     // 48 8B C4             mov rax, rsp
@@ -4843,7 +4835,7 @@ static void ShutdownImpl() {
             // the hardcoded RVA to still attempt restore.
             const uintptr_t vtableEa = g_serviceTransportVtableEa
                                        ? g_serviceTransportVtableEa
-                                       : (g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT);
+                                       : SC_RESOLVE(serviceTransportVtable, SC_RVA_SERVICE_TRANSPORT_VT);
             const uintptr_t vtableSlot4Addr = vtableEa + kSlot4Off;
             const uintptr_t vtableSlot5Addr = vtableEa + kSlot5Off;
             const uintptr_t vtableSlot7Addr = vtableEa + kSlot7Off;

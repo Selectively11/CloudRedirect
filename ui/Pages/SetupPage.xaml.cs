@@ -418,16 +418,7 @@ public partial class SetupPage : Page
             var direction = version.Value > SteamDetector.ExpectedSteamVersion
                 ? S.Get("Setup_DirectionNewer") : S.Get("Setup_DirectionOlder");
             VersionStatusText.Text = S.Format("Setup_VersionUnsupported", version.Value, direction, SteamDetector.ExpectedSteamVersion);
-            VersionStatusText.Foreground = new System.Windows.Media.SolidColorBrush(
-                System.Windows.Media.Color.FromRgb(0xFF, 0x44, 0x44));
-            VersionIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ErrorCircle24;
-
-            // Disable all patching buttons -- they will fail or cause damage
-            PatchButton.IsEnabled = false;
-            DeployButton.IsEnabled = false;
-            OfflineSetupButton.IsEnabled = false;
-            StExePatchButton.IsEnabled = false;
-            RunAllButton.IsEnabled = false;
+            VersionIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.Warning24;
         }
     }
 

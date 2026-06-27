@@ -8,6 +8,23 @@
 
 namespace SteamKvInjector {
 
+#ifdef _WIN32
+// Auto-resolved addresses. Fields left at 0 fall back to hardcoded RVAs.
+struct Overrides {
+    uintptr_t globalEngine  = 0;
+    uintptr_t getAppInfo    = 0;
+    uintptr_t getSection    = 0;
+    uintptr_t readConfigU64 = 0;
+    uintptr_t kvFindKey     = 0;
+    uintptr_t kvGetUint64   = 0;
+    uintptr_t kvGetInt      = 0;
+    uintptr_t kvSetUint64   = 0;
+    uintptr_t kvSetInt      = 0;
+    uintptr_t kvSetString   = 0;
+};
+void SetOverrides(const Overrides& ov);
+#endif
+
 bool Init();
 
 bool IsReady();
