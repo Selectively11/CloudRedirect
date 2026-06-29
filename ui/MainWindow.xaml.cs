@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
 using TextBlock = System.Windows.Controls.TextBlock;
@@ -14,6 +15,7 @@ public partial class MainWindow : FluentWindow
 {
     private Services.AppUpdater.CheckResult? _pendingUpdate;
     public bool AppUpdateAvailable { get; private set; }
+    private readonly DispatcherTimer _steamStateTimer = new() { Interval = TimeSpan.FromSeconds(5) };
 
     public MainWindow()
     {
@@ -40,6 +42,10 @@ public partial class MainWindow : FluentWindow
                     RootNavigation.Navigate(typeof(Pages.DashboardPage));
             }
             catch { }
+
+            UpdateSteamNavItem();
+            _steamStateTimer.Tick += (_, _) => UpdateSteamNavItem();
+            _steamStateTimer.Start();
         };
     }
 
@@ -181,18 +187,42 @@ public partial class MainWindow : FluentWindow
 
     public void ShowRestartSteam()
     {
-        // Button is always visible now; kept for callers.
+        UpdateSteamNavItem();
     }
 
-    private async void RestartSteamItem_Click(object sender, RoutedEventArgs e)
+    private void UpdateSteamNavItem()
     {
+        var running = Services.SteamDetector.IsSteamRunning();
+        RestartSteamItem.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        CloseSteamItem.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        StartSteamItem.Visibility = running ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void SteamNav_Click(object sender, RoutedEventArgs e)
+    {
+        var tag = (sender as FrameworkElement)?.Tag as string;
+
         var steamPath = Services.SteamDetector.FindSteamPath();
         if (steamPath == null) return;
 
         var steamExe = Path.Combine(steamPath, "steam.exe");
         if (!File.Exists(steamExe)) return;
 
-        // Graceful shutdown first
+        if (tag == "start")
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = steamExe,
+                    UseShellExecute = true
+                })?.Dispose();
+            }
+            catch { }
+            return;
+        }
+
+        // restart or close — shut down Steam first
         var procs = Process.GetProcessesByName("steam");
         bool wasRunning = procs.Length > 0;
         foreach (var p in procs) p.Dispose();
@@ -206,7 +236,6 @@ public partial class MainWindow : FluentWindow
                 UseShellExecute = true
             })?.Dispose();
 
-            // Wait up to 15s for Steam to close
             for (int i = 0; i < 30; i++)
             {
                 await Task.Delay(500);
@@ -217,16 +246,19 @@ public partial class MainWindow : FluentWindow
             }
         }
 
-        try
+        if (tag == "restart")
         {
-            Process.Start(new ProcessStartInfo
+            try
             {
-                FileName = steamExe,
-                UseShellExecute = true
-            })?.Dispose();
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = steamExe,
+                    UseShellExecute = true
+                })?.Dispose();
+            }
+            catch { }
         }
-        catch { }
 
-        RestartSteamItem.Visibility = Visibility.Collapsed;
+        UpdateSteamNavItem();
     }
 }
