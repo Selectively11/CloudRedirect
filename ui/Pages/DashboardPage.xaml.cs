@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using CloudRedirect.Resources;
 
 namespace CloudRedirect.Pages;
@@ -11,6 +12,7 @@ namespace CloudRedirect.Pages;
 public partial class DashboardPage : Page
 {
     private string? _steamPath;
+    private readonly DispatcherTimer _steamStateTimer = new() { Interval = TimeSpan.FromSeconds(5) };
 
     public void HideDllUpdateBanner()
     {
@@ -24,6 +26,10 @@ public partial class DashboardPage : Page
         {
             try { await LoadStatusAsync(); }
             catch { }
+
+            UpdateSteamButtons();
+            _steamStateTimer.Tick += (_, _) => UpdateSteamButtons();
+            _steamStateTimer.Start();
 
             // Give the app-level update check time to finish, then hide the
             // DLL banner if a full app update is available (avoids two banners).
@@ -269,6 +275,96 @@ public partial class DashboardPage : Page
             button.Content = originalContent;
             button.IsEnabled = true;
         }
+    }
+
+    private void UpdateSteamButtons()
+    {
+        var running = Services.SteamDetector.IsSteamRunning();
+        RestartSteamBtn.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        CloseSteamBtn.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        StartSteamBtn.Visibility = running ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void CloseSteam_Click(object sender, RoutedEventArgs e)
+    {
+        var steamPath = Services.SteamDetector.FindSteamPath();
+        if (steamPath == null) return;
+
+        var steamExe = Path.Combine(steamPath, "steam.exe");
+        if (!File.Exists(steamExe)) return;
+
+        var button = (Wpf.Ui.Controls.Button)sender;
+        button.IsEnabled = false;
+        var originalContent = button.Content;
+        button.Content = S.Get("Dashboard_ShuttingDownSteam");
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = steamExe,
+                Arguments = "-shutdown",
+                UseShellExecute = true
+            })?.Dispose();
+
+            bool exited = await Task.Run(async () =>
+            {
+                for (int i = 0; i < 30; i++)
+                {
+                    await Task.Delay(500);
+                    var procs = Process.GetProcessesByName("steam");
+                    bool any = procs.Length > 0;
+                    foreach (var p in procs) p.Dispose();
+                    if (!any) return true;
+                }
+                return false;
+            });
+
+            if (!exited)
+            {
+                button.Content = S.Get("Dashboard_ForceKilling");
+                await Task.Run(() =>
+                {
+                    foreach (var proc in Process.GetProcessesByName("steam"))
+                    {
+                        try { proc.Kill(); }
+                        catch { }
+                        finally { proc.Dispose(); }
+                    }
+                });
+                await Task.Delay(1000);
+            }
+        }
+        catch { }
+
+        button.Content = originalContent;
+        button.IsEnabled = true;
+        UpdateSteamButtons();
+    }
+
+    private async void StartSteam_Click(object sender, RoutedEventArgs e)
+    {
+        var steamPath = Services.SteamDetector.FindSteamPath();
+        if (steamPath == null) return;
+
+        var steamExe = Path.Combine(steamPath, "steam.exe");
+        if (!File.Exists(steamExe)) return;
+
+        var button = (Wpf.Ui.Controls.Button)sender;
+        button.IsEnabled = false;
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = steamExe,
+                UseShellExecute = true
+            })?.Dispose();
+        }
+        catch { }
+
+        button.IsEnabled = true;
+        UpdateSteamButtons();
     }
 
     private async void UpdateDll_Click(object sender, RoutedEventArgs e)

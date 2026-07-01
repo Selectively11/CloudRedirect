@@ -139,6 +139,12 @@
   <data name="Nav_RestartSteam" xml:space="preserve">
     <value>Restart Steam</value>
   </data>
+  <data name="Nav_CloseSteam" xml:space="preserve">
+    <value>Close Steam</value>
+  </data>
+  <data name="Nav_StartSteam" xml:space="preserve">
+    <value>Start Steam</value>
+  </data>
   <data name="Nav_ChoiceMode" xml:space="preserve">
     <value>Mode</value>
   </data>
@@ -620,6 +626,12 @@ If you skip this, saves will be stored locally in your Steam folder.</value>
   </data>
   <data name="Dashboard_RestartSteam" xml:space="preserve">
     <value>Restart Steam</value>
+  </data>
+  <data name="Dashboard_CloseSteam" xml:space="preserve">
+    <value>Close Steam</value>
+  </data>
+  <data name="Dashboard_StartSteam" xml:space="preserve">
+    <value>Start Steam</value>
   </data>
 
   <!-- DashboardPage code-behind -->
