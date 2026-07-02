@@ -86,7 +86,7 @@
 
             <ui:NavigationView.MenuItems>
                 <ui:NavigationViewItem x:Name="NavNews"
-                                        Content="News"
+                                        Content="{res:Loc Nav_News}"
                                         Icon="{ui:SymbolIcon News24}"
                                         TargetPageType="{x:Type pages:NewsPage}" />
                 <ui:NavigationViewItem Content="{res:Loc Nav_Dashboard}"
@@ -113,7 +113,7 @@
                                          TargetPageType="{x:Type pages:CleanupPage}" />
                 <ui:NavigationViewItem x:Name="NavCloud760"
                                          Icon="{ui:SymbolIcon CloudDismiss24}"
-                                         Content="760 Clean Up"
+                                         Content="{res:Loc Nav_Cloud760}"
                                          TargetPageType="{x:Type pages:Cloud760Page}" />
                 <ui:NavigationViewItem Content="{res:Loc Nav_Stats}"
                                          Icon="{ui:SymbolIcon Trophy24}"

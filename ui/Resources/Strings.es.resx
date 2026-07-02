@@ -1477,6 +1477,9 @@ Esto puede causar pérdida de datos en algunos casos.
   <data name="Settings_LanguagePortuguese" xml:space="preserve">
     <value>Português (Brasil)</value>
   </data>
+  <data name="Settings_LanguageArabic" xml:space="preserve">
+    <value>العربية</value>
+  </data>
   <data name="Settings_Sync" xml:space="preserve">
     <value>Sincronización</value>
   </data>

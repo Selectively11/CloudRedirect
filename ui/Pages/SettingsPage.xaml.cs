@@ -36,6 +36,7 @@ public partial class SettingsPage : Page
         ("Settings_LanguageEnglish", "en"),
         ("Settings_LanguageSpanish", "es"),
         ("Settings_LanguagePortuguese", "pt-BR"),
+        ("Settings_LanguageArabic", "ar"),
     ];
 
     public SettingsPage()
