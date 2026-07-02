@@ -1511,6 +1511,9 @@
   <data name="Settings_LanguageSimplifiedChinese" xml:space="preserve">
     <value>简体中文</value>
   </data>
+  <data name="Settings_LanguageArabic" xml:space="preserve">
+    <value>العربية</value>
+  </data>
   <data name="Settings_Sync" xml:space="preserve">
     <value>同步</value>
   </data>

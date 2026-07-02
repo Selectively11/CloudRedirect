@@ -30,15 +30,6 @@
   <resheader name="resmimetype">
     <value>text/microsoft-resx</value>
   </resheader>
-  <resheader name="version">
-    <value>2.0</value>
-  </resheader>
-  <resheader name="reader">
-    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </resheader>
-  <resheader name="writer">
-    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
-  </resheader>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- MainWindow                                                         -->
@@ -50,685 +41,619 @@
     <value>CloudRedirect</value>
   </data>
   <data name="Nav_News" xml:space="preserve">
-    <value>News</value>
+    <value>الأخبار</value>
   </data>
   <data name="Nav_Dashboard" xml:space="preserve">
-    <value>Dashboard</value>
+    <value>القائمة الرئيسية</value>
   </data>
   <data name="Nav_Setup" xml:space="preserve">
-    <value>Setup</value>
+    <value>تنصيب</value>
   </data>
   <data name="Nav_CloudProvider" xml:space="preserve">
-    <value>Cloud Provider</value>
+    <value>موفر الخدمة السحابية</value>
   </data>
   <data name="Nav_Apps" xml:space="preserve">
-    <value>Apps</value>
+    <value>التطبيقات</value>
   </data>
   <data name="Nav_Cleanup" xml:space="preserve">
-    <value>Clean Up</value>
+    <value>تنظيف</value>
   </data>
   <data name="Nav_Cloud760" xml:space="preserve">
-    <value>760 Clean Up</value>
+    <value>تنظيف 760</value>
   </data>
   <data name="Nav_ManifestPinning" xml:space="preserve">
-    <value>Manifest Pinning</value>
+    <value>تثبيت الـ Manifest</value>
   </data>
   <data name="Nav_Stats" xml:space="preserve">
-    <value>Achievements &amp; Playtime</value>
+    <value>الإنجازات ووقت اللعب</value>
   </data>
   <data name="Stats_Hint" xml:space="preserve">
-    <value>View current cloud achievement/playtime data for your injected apps.</value>
+    <value>عرض بيانات الإنجازات ووقت اللعب الموجودة على السحاب لتطبيقاتك.</value>
   </data>
   <data name="Stats_Refresh" xml:space="preserve">
-    <value>Refresh</value>
+    <value>تحديث</value>
   </data>
   <data name="Stats_NoData" xml:space="preserve">
-    <value>No synced stats found in the cloud yet. Launch a Lua-unlocked game with CloudRedirect active, let it sync, then refresh.</value>
+    <value>لم يتم العثور على بيانات متزامنة في السحابة بعد. قم بتشغيل لعبة مفعلة بـ Lua مع تفعيل CloudRedirect، واتركها تتزامن، ثم قم بالتحديث.</value>
   </data>
   <data name="Stats_NoCloud" xml:space="preserve">
-    <value>No cloud provider is configured. Set up Google Drive, OneDrive, or a folder in Cloud Provider settings to view synced stats.</value>
+    <value>لم يتم إعداد موفر خدمة سحابية. قم بإعداد Google Drive أو OneDrive أو مجلد في إعدادات موفر الخدمة السحابية لعرض البيانات المتزامنة.</value>
   </data>
   <data name="Stats_AppFallbackName" xml:space="preserve">
-    <value>App {0}</value>
+    <value>التطبيق {0}</value>
   </data>
   <data name="Stats_AccountHeader" xml:space="preserve">
-    <value>Account {0}</value>
+    <value>الحساب {0}</value>
   </data>
   <data name="Stats_PlaytimeForever" xml:space="preserve">
-    <value>PLAYTIME (TOTAL)</value>
+    <value>وقت اللعب (الإجمالي)</value>
   </data>
   <data name="Stats_Playtime2Weeks" xml:space="preserve">
-    <value>LAST 2 WEEKS</value>
+    <value>آخر أسبوعين</value>
   </data>
   <data name="Stats_LastPlayed" xml:space="preserve">
-    <value>LAST PLAYED</value>
+    <value>آخر مرة تم اللعب</value>
   </data>
   <data name="Stats_AchievementsHeader" xml:space="preserve">
-    <value>Achievements</value>
+    <value>الإنجازات</value>
   </data>
   <data name="Stats_StatsHeader" xml:space="preserve">
-    <value>Stats</value>
+    <value>البيانات</value>
   </data>
   <data name="Stats_Minutes" xml:space="preserve">
-    <value>{0} min</value>
+    <value>{0} دقيقة</value>
   </data>
   <data name="Stats_Hours" xml:space="preserve">
-    <value>{0} h</value>
+    <value>{0} ساعة</value>
   </data>
   <data name="Stats_NoPlaytime" xml:space="preserve">
-    <value>None</value>
+    <value>لا يوجد</value>
   </data>
   <data name="Stats_Never" xml:space="preserve">
-    <value>Never</value>
+    <value>أبدا</value>
   </data>
   <data name="Stats_Locked" xml:space="preserve">
-    <value>Locked</value>
+    <value>مقفل</value>
   </data>
   <data name="Stats_StatId" xml:space="preserve">
-    <value>Stat {0}</value>
+    <value>بيانات {0}</value>
   </data>
   <data name="Stats_AchievementBit" xml:space="preserve">
-    <value>Stat {0} · bit {1}</value>
+    <value>بيانات {0} · بت {1}</value>
   </data>
   <data name="Stats_SummaryPlaytime" xml:space="preserve">
-    <value>{0} played</value>
+    <value>تم اللعب لمدة {0}</value>
   </data>
   <data name="Stats_SummaryAchievements" xml:space="preserve">
-    <value>{0} achievements</value>
+    <value>{0} إنجازات</value>
   </data>
   <data name="Stats_SummaryStats" xml:space="preserve">
-    <value>{0} stats</value>
+    <value>{0} بيانات</value>
   </data>
   <data name="Nav_Settings" xml:space="preserve">
-    <value>Settings</value>
+    <value>الإعدادات</value>
   </data>
   <data name="Nav_RestartSteam" xml:space="preserve">
-    <value>Restart Steam</value>
+    <value>إعادة تشغيل Steam</value>
   </data>
   <data name="Nav_ChoiceMode" xml:space="preserve">
-    <value>Mode</value>
+    <value>الوضع</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- ChoiceModePage                                                      -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Choice_Title" xml:space="preserve">
-    <value>Choose Your Mode</value>
+    <value>اختر الوضع</value>
   </data>
   <data name="Choice_Description" xml:space="preserve">
-    <value>Pick how you want to use CloudRedirect. You can switch between ST Fixer and Cloud Redirect anytime.</value>
+    <value>اختر كيف تريد استخدام CloudRedirect. يمكنك التبديل بين ST Fixer و Cloud Redirect في أي وقت.</value>
   </data>
   <data name="Choice_STFixer_Title" xml:space="preserve">
-    <value>ST Fixer Mode</value>
+    <value>وضع ST Fixer</value>
   </data>
   <data name="Choice_STFixer_Description" xml:space="preserve">
-    <value>Just the core fixes. Solves saving issues with (not just) Capcom titles, fixes 'No Internet Connection' when downloading, enables manifest pinning, makes achievements work for every game that has them. Does not enable Cloud functionality.</value>
+    <value>الإصلاحات الأساسية فقط. يحل مشاكل الحفظ مع ألعاب Capcom (وليس فقط)، ويصلح خطأ &apos;لا يوجد اتصال بالإنترنت&apos; أثناء التحميل، ويفعّل تثبيت الـ Manifest، ويجعل الإنجازات تعمل لكل لعبة تدعمها. لا يفعّل وظائف السحابة.</value>
   </data>
   <data name="Choice_STFixer_Features" xml:space="preserve">
-    <value>Includes: Capcom save fix, SteamTools offline patch, DLL deploy, manifest version pinning</value>
+    <value>يشمل: إصلاح حفظ Capcom، إصلاح SteamTools دون اتصال، نشر DLL، تثبيت إصدار الـ Manifest</value>
   </data>
   <data name="Choice_CloudRedirect_Title" xml:space="preserve">
-    <value>Cloud Redirect Mode</value>
+    <value>وضع إعادة التوجيه السحابي</value>
   </data>
   <data name="Choice_CloudRedirect_Description" xml:space="preserve">
-    <value>Everything in ST Fixer, plus Cloud Save redirection. Redirects Steam Cloud for lua games to Google Drive/OneDrive/a local folder.</value>
+    <value>كل شيء في ST Fixer، بالإضافة إلى إعادة توجيه الحفظ السحابي. يعيد توجيه Steam Cloud لألعاب lua إلى Google Drive/OneDrive/مجلد محلي.</value>
   </data>
   <data name="Choice_CloudRedirect_Features" xml:space="preserve">
-    <value>All ST Fixer features + Cloud Saves to your provider of choice + Achievement and Playtime Sync</value>
+    <value>جميع ميزات ST Fixer + حفظ سحابي إلى موفر الخدمة الذي تختاره + مزامنة الإنجازات ووقت اللعب</value>
   </data>
   <data name="Choice_CurrentMode_STFixer" xml:space="preserve">
-    <value>Current mode: ST Fixer</value>
+    <value>الوضع الحالي: ST Fixer</value>
   </data>
   <data name="Choice_CurrentMode_STFixer_Desc" xml:space="preserve">
-    <value>You can switch to Cloud Redirect mode by selecting the option below. Cloud Redirect includes everything in ST Fixer plus cloud features. You can switch back anytime.</value>
+    <value>يمكنك التبديل إلى وضع إعادة التوجيه السحابي باختيار الخيار أدناه. يتضمن Cloud Redirect كل شيء في ST Fixer بالإضافة إلى ميزات السحابة. يمكنك العودة في أي وقت.</value>
   </data>
   <data name="Choice_CurrentMode_CloudRedirect" xml:space="preserve">
-    <value>Current mode: Cloud Redirect</value>
+    <value>الوضع الحالي: إعادة التوجيه السحابي</value>
   </data>
   <data name="Choice_CurrentMode_CloudRedirect_Desc" xml:space="preserve">
-    <value>All features are enabled. Cloud save interception is active.</value>
+    <value>جميع الميزات مفعلة. اعتراض الحفظ السحابي نشط.</value>
   </data>
   <data name="Choice_ThirdParty_Title" xml:space="preserve">
-    <value>Third-Party Client Mode</value>
+    <value>وضع العميل الخارجي</value>
   </data>
   <data name="Choice_ThirdParty_Description" xml:space="preserve">
-    <value>For use with OpenSteamTool, HubcapTools, or other third-party Steam clients that load CloudRedirect themselves. Only deploys the core DLL - no SteamTools patches.</value>
+    <value>لاستخدامه مع OpenSteamTool أو HubcapTools أو عملاء Steam خارجيين آخرين يقومون بتحميل CloudRedirect بأنفسهم. يتم نشر الـ DLL الأساسي فقط - بدون إصلاحات SteamTools.</value>
   </data>
   <data name="Choice_ThirdParty_Features" xml:space="preserve">
-    <value>Cloud Saves + Achievement/Playtime Sync (if supported by client) - no ST patching required</value>
+    <value>حفظ سحابي + مزامنة الإنجازات/وقت اللعب (إذا كان العميل يدعم ذلك) - لا حاجة لإصلاحات ST</value>
   </data>
   <data name="Choice_CurrentMode_ThirdParty" xml:space="preserve">
-    <value>Current mode: Third-Party Client</value>
+    <value>الوضع الحالي: عميل خارجي</value>
   </data>
   <data name="Choice_CurrentMode_ThirdParty_Desc" xml:space="preserve">
-    <value>CloudRedirect is loaded by your third-party Steam client. Only the core DLL is deployed.</value>
+    <value>يتم تحميل CloudRedirect بواسطة عميل Steam الخارجي الخاص بك. يتم نشر الـ DLL الأساسي فقط.</value>
   </data>
   <data name="Choice_FailedSaveMode" xml:space="preserve">
-    <value>Couldn't save your selection: {0}</value>
+    <value>تعذر حفظ اختيارك: {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- SetupPage XAML                                                     -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Setup_Title" xml:space="preserve">
-    <value>Setup</value>
+    <value>تنصيب</value>
   </data>
   <data name="Setup_Description" xml:space="preserve">
-    <value>Apply patches and deploy CloudRedirect to your Steam installation.</value>
+    <value>تطبيق الإصلاحات ونشر CloudRedirect في مجلد Steam الخاص بك.</value>
   </data>
   <data name="Setup_Description_STFixer" xml:space="preserve">
-    <value>Apply patches for the Capcom save fix and manifest pinning.</value>
+    <value>تطبيق إصلاحات حفظ Capcom وتثبيت الـ Manifest.</value>
   </data>
   <data name="Setup_Description_ThirdParty" xml:space="preserve">
-    <value>Deploy cloud_redirect.dll to your Steam folder. Your third-party client (OST, HubcapTools, etc.) will load it automatically - no other patches needed.</value>
+    <value>نشر cloud_redirect.dll في مجلد Steam الخاص بك. سيقوم عميلك الخارجي (OST, HubcapTools, إلخ) بتحميله تلقائياً - لا حاجة لإصلاحات أخرى.</value>
   </data>
   <data name="Setup_ConfirmDeployThirdParty" xml:space="preserve">
-    <value>This will deploy cloud_redirect.dll to your Steam directory. Your third-party client will load it on next launch. Continue?</value>
+    <value>سيؤدي هذا إلى نشر cloud_redirect.dll في دليل Steam الخاص بك. سيقوم عميلك الخارجي بتحميله عند التشغيل التالي. هل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ClientTypeHeader" xml:space="preserve">
-    <value>How does CloudRedirect get loaded?</value>
+    <value>كيف يتم تحميل CloudRedirect؟</value>
   </data>
   <data name="Setup_ClientType_ST" xml:space="preserve">
     <value>SteamTools</value>
   </data>
   <data name="Setup_ClientType_ST_Hint" xml:space="preserve">
-    <value>Full setup: patches Steam's DLLs and deploys the proxy. Use this if you don't have a third-party client.</value>
+    <value>إعداد كامل: يقوم بإصلاح ملفات DLL الخاصة بـ Steam وينشر الوكيل. استخدم هذا إذا لم يكن لديك عميل خارجي.</value>
   </data>
   <data name="Setup_ClientType_ThirdParty" xml:space="preserve">
-    <value>I have an alternative, compatible unlock solution</value>
+    <value>لدي برنامج تفعيل العاب، ومتوافق</value>
   </data>
   <data name="Setup_ClientType_NoClientWarning" xml:space="preserve">
-    <value>No compatible client detected in your Steam directory. Make sure your client is installed before launching Steam.</value>
+    <value>لم يتم اكتشاف عميل متوافق في دليل Steam الخاص بك. تأكد من تثبيت عميلك قبل تشغيل Steam.</value>
   </data>
   <data name="Setup_ShowDiagnostics" xml:space="preserve">
-    <value>Show Diagnostics</value>
+    <value>إظهار التشخيص</value>
   </data>
   <data name="Setup_ShowDiagnosticsHint" xml:space="preserve">
-    <value>Steam version, path, and individual patch controls</value>
+    <value>إصدار Steam، المسار، وعناصر التحكم في الإصلاحات الفردية</value>
   </data>
   <data name="Setup_SteamVersion" xml:space="preserve">
-    <value>Steam Version</value>
+    <value>إصدار Steam</value>
   </data>
   <data name="Setup_Checking" xml:space="preserve">
-    <value>Checking...</value>
+    <value>جارٍ الفحص...</value>
   </data>
   <data name="Setup_SteamPath" xml:space="preserve">
-    <value>Steam Path</value>
+    <value>مسار Steam</value>
   </data>
   <data name="Setup_Detecting" xml:space="preserve">
-    <value>Detecting...</value>
+    <value>جارٍ الكشف...</value>
   </data>
   <data name="Setup_Change" xml:space="preserve">
-    <value>Change</value>
+    <value>تغيير</value>
   </data>
   <data name="Setup_RunAllPatches" xml:space="preserve">
-    <value>Run All Patches</value>
+    <value>تشغيل جميع الإصلاحات</value>
   </data>
   <data name="Setup_OfflineSetupHeader" xml:space="preserve">
-    <value>SteamTools Offline Setup</value>
+    <value>إعداد SteamTools دون اتصال</value>
   </data>
   <data name="Setup_OfflineSetupDescription" xml:space="preserve">
-    <value>Patches SteamTools so it works even when their activation servers are down. Required for first-time installations.</value>
+    <value>يقوم بإصلاح SteamTools ليعمل حتى عندما تكون خوادم التفعيل معطلة. مطلوب للتثبيتات الأولى.</value>
   </data>
   <data name="Setup_OfflineSetup" xml:space="preserve">
-    <value>Offline Setup</value>
+    <value>إعداد دون اتصال</value>
   </data>
   <data name="Setup_NotChecked" xml:space="preserve">
-    <value>Not checked</value>
+    <value>لم يتم الفحص</value>
   </data>
   <data name="Setup_ApplyOfflineSetup" xml:space="preserve">
-    <value>Apply Offline Setup</value>
+    <value>تطبيق الإعداد دون اتصال</value>
   </data>
   <data name="Setup_RevertPatch" xml:space="preserve">
-    <value>Revert Patch</value>
+    <value>التراجع عن الإصلاح</value>
   </data>
   <data name="Setup_StExeHeader" xml:space="preserve">
-    <value>SteamTools.exe Patch</value>
+    <value>إصلاح SteamTools.exe</value>
   </data>
   <data name="Setup_StExeDescription" xml:space="preserve">
-    <value>Disables the SteamTools Desktop App from overwriting patched DLLs on every startup. Without this, SteamTools will undo core patches.</value>
+    <value>يعطّل تطبيق SteamTools Desktop من الكتابة فوق ملفات DLL التي تم إصلاحها عند كل تشغيل. بدون هذا، سيقوم SteamTools بالتراجع عن الإصلاحات الأساسية.</value>
   </data>
   <data name="Setup_DllDeploy" xml:space="preserve">
-    <value>DLL Deploy</value>
+    <value>نشر DLL</value>
   </data>
   <data name="Setup_PatchSteamToolsExe" xml:space="preserve">
-    <value>Patch SteamTools.exe</value>
+    <value>إصلاح SteamTools.exe</value>
   </data>
   <data name="Setup_CloudRedirectPatchHeader" xml:space="preserve">
-    <value>Cloud Redirect Patch</value>
+    <value>إصلاح إعادة التوجيه السحابي</value>
   </data>
   <data name="Setup_CloudRedirectPatchHeader_STFixer" xml:space="preserve">
-    <value>Save Fix and Manifest Pinning Patch</value>
+    <value>إصلاح الحفظ وتثبيت الـ Manifest</value>
   </data>
   <data name="Setup_CloudRedirectPatchDescription" xml:space="preserve">
-    <value>Patches SteamTools payload so lua app cloud saves are routed through the CloudRedirect system.</value>
+    <value>يقوم بإصلاح حمولة SteamTools بحيث يتم توجيه الحفظ السحابي لتطبيقات lua عبر نظام CloudRedirect.</value>
   </data>
   <data name="Setup_CloudRedirectPatchDescription_STFixer" xml:space="preserve">
-    <value>Patches SteamTools payload to fix Capcom save routing and enable manifest pinning for lua apps.</value>
+    <value>يقوم بإصلاح حمولة SteamTools لتوجيه حفظ Capcom وتمكين تثبيت الـ Manifest لتطبيقات lua.</value>
   </data>
   <data name="Setup_PatchStatus" xml:space="preserve">
-    <value>Patch Status</value>
+    <value>حالة الإصلاح</value>
   </data>
   <data name="Setup_ApplyPatch" xml:space="preserve">
-    <value>Apply Patch</value>
+    <value>تطبيق الإصلاح</value>
   </data>
   <data name="Setup_DeployHeader" xml:space="preserve">
-    <value>Deploy CloudRedirect</value>
+    <value>نشر CloudRedirect</value>
   </data>
   <data name="Setup_DeployDescription" xml:space="preserve">
-    <value>Copies core DLL to your Steam folder.</value>
+    <value>ينسخ الـ DLL الأساسي إلى مجلد Steam الخاص بك.</value>
   </data>
   <data name="Setup_DllStatus" xml:space="preserve">
-    <value>DLL Status</value>
+    <value>حالة DLL</value>
   </data>
   <data name="Setup_DeployDll" xml:space="preserve">
-    <value>Deploy DLL</value>
+    <value>نشر DLL</value>
   </data>
   <data name="Setup_UninstallDll" xml:space="preserve">
-    <value>Uninstall DLL</value>
+    <value>إلغاء تثبيت DLL</value>
   </data>
   <data name="Setup_LogOutput" xml:space="preserve">
-    <value>Log Output</value>
+    <value>مخرجات السجل</value>
   </data>
   <data name="Setup_Ready" xml:space="preserve">
-    <value>Ready.</value>
+    <value>جاهز.</value>
   </data>
 
   <!-- SetupPage code-behind -->
   <data name="Setup_SteamNotFoundManual" xml:space="preserve">
-    <value>Not found - click Change to set manually</value>
+    <value>غير موجود - انقر على &apos;تغيير&apos; لتحديده يدوياً</value>
   </data>
   <data name="Setup_SteamNotFound" xml:space="preserve">
-    <value>Steam not found</value>
+    <value>لم يتم العثور على Steam</value>
   </data>
   <data name="Setup_VersionCouldNotDetermine" xml:space="preserve">
-    <value>Could not determine Steam version</value>
+    <value>تعذر تحديد إصدار Steam</value>
   </data>
   <data name="Setup_VersionSupported" xml:space="preserve">
-    <value>{0} (supported)</value>
+    <value>{0} (مدعوم)</value>
   </data>
   <data name="Setup_VersionUnsupported" xml:space="preserve">
-    <value>{0} (UNSUPPORTED - {1} than expected {2})</value>
+    <value>{0} (غير مدعوم - أحدث من {2} المتوقع)</value>
   </data>
   <data name="Setup_DirectionNewer" xml:space="preserve">
-    <value>newer</value>
+    <value>أحدث</value>
   </data>
   <data name="Setup_DirectionOlder" xml:space="preserve">
-    <value>older</value>
+    <value>أقدم</value>
   </data>
   <data name="Setup_PatchState_Patched" xml:space="preserve">
-    <value>Patched</value>
+    <value>تم الإصلاح</value>
   </data>
   <data name="Setup_PatchState_Unpatched" xml:space="preserve">
-    <value>Not patched</value>
+    <value>لم يتم الإصلاح</value>
   </data>
   <data name="Setup_PatchState_PartiallyPatched" xml:space="preserve">
-    <value>Partially patched</value>
+    <value>تم الإصلاح جزئياً</value>
   </data>
   <data name="Setup_PatchState_NotInstalled" xml:space="preserve">
-    <value>SteamTools not installed</value>
+    <value>SteamTools غير مثبت</value>
   </data>
   <data name="Setup_PatchState_UnknownVersion" xml:space="preserve">
-    <value>Unknown version</value>
+    <value>إصدار غير معروف</value>
   </data>
   <data name="Setup_PatchState_OutOfDate" xml:space="preserve">
-    <value>Out of date</value>
+    <value>قديم</value>
   </data>
   <data name="Setup_PatchState_Unknown" xml:space="preserve">
-    <value>Unknown</value>
+    <value>غير معروف</value>
   </data>
   <data name="Setup_OfflinePatched" xml:space="preserve">
-    <value>Patched (offline mode enabled)</value>
+    <value>تم الإصلاح (الوضع دون اتصال مفعل)</value>
   </data>
   <data name="Setup_StExePatched" xml:space="preserve">
-    <value>Patched (DLL deploy disabled)</value>
+    <value>تم الإصلاح (نشر DLL معطل)</value>
   </data>
   <data name="Setup_StExeActive" xml:space="preserve">
-    <value>Active - will overwrite patched DLLs!</value>
+    <value>نشط - سيتم الكتابة فوق ملفات DLL التي تم إصلاحها!</value>
   </data>
   <data name="Setup_StExeNotFound" xml:space="preserve">
-    <value>SteamTools Desktop not found</value>
+    <value>لم يتم العثور على SteamTools Desktop</value>
   </data>
   <data name="Setup_CouldNotCheck" xml:space="preserve">
-    <value>Could not check: {0}</value>
+    <value>تعذر الفحص: {0}</value>
   </data>
   <data name="Setup_DllInstalledOutdated" xml:space="preserve">
-    <value>Installed but outdated ({0}) - update available</value>
+    <value>مثبت لكنه قديم ({0}) - تحديث متاح</value>
   </data>
   <data name="Setup_DllInstalled" xml:space="preserve">
-    <value>Installed ({0} bytes, {1})</value>
+    <value>مثبت ({0} بايت، {1})</value>
   </data>
   <data name="Setup_UpdateDll" xml:space="preserve">
-    <value>Update DLL</value>
+    <value>تحديث DLL</value>
   </data>
   <data name="Setup_Deploy" xml:space="preserve">
-    <value>Deploy</value>
+    <value>نشر</value>
   </data>
   <data name="Setup_DllNotInstalledReady" xml:space="preserve">
-    <value>Not installed - ready to deploy</value>
+    <value>غير مثبت - جاهز للنشر</value>
   </data>
   <data name="Setup_DllNotInstalledNoEmbed" xml:space="preserve">
-    <value>Not installed - DLL not embedded in this build</value>
+    <value>غير مثبت - DLL غير مضمن في هذا الإصدار</value>
   </data>
   <data name="Setup_InvalidSteamFolder" xml:space="preserve">
-    <value>Invalid Steam Folder</value>
+    <value>مجلد Steam غير صالح</value>
   </data>
   <data name="Setup_BrowseSteamFolderTitle" xml:space="preserve">
-    <value>Select Steam installation folder</value>
+    <value>اختر مجلد تثبيت Steam</value>
   </data>
   <data name="Setup_InvalidSteamFolderMessage" xml:space="preserve">
-    <value>The selected folder doesn't contain steam.exe.
-
-Please select the folder where Steam is installed.</value>
+    <value>المجلد المحدد لا يحتوي على steam.exe.\n\nالرجاء اختيار المجلد الذي تم تثبيت Steam فيه.</value>
   </data>
   <data name="Setup_PatchAppliedSuccessfully" xml:space="preserve">
-    <value>Patch applied successfully</value>
+    <value>تم تطبيق الإصلاح بنجاح</value>
   </data>
   <data name="Setup_PatchFailedSeeLog" xml:space="preserve">
-    <value>Patch failed - see log</value>
+    <value>فشل الإصلاح - راجع السجل</value>
   </data>
   <data name="Setup_FailedSeeLog" xml:space="preserve">
-    <value>Failed - see log</value>
+    <value>فشل - راجع السجل</value>
   </data>
   <data name="Setup_DeployFailed" xml:space="preserve">
-    <value>Deploy failed</value>
+    <value>فشل النشر</value>
   </data>
   <data name="Setup_NotInstalled" xml:space="preserve">
-    <value>Not installed</value>
+    <value>غير مثبت</value>
   </data>
   <data name="Setup_UninstallFailedSteam" xml:space="preserve">
-    <value>Uninstall failed - is Steam running?</value>
+    <value>فشل إلغاء التثبيت - هل Steam قيد التشغيل؟</value>
   </data>
   <data name="Setup_DllNotEmbedded" xml:space="preserve">
-    <value>Not Found</value>
+    <value>غير موجود</value>
   </data>
   <data name="Setup_DllNotEmbeddedMessage" xml:space="preserve">
-    <value>cloud_redirect.dll is not embedded in this build.
-
-Rebuild the UI after building the C++ DLL.</value>
+    <value>cloud_redirect.dll غير مضمن في هذا الإصدار.\n\nأعد بناء الواجهة بعد بناء DLL الخاص بـ C++.</value>
   </data>
   <data name="Setup_ConfirmRunAll" xml:space="preserve">
-    <value>This will apply all patches and deploy the DLL:
-
-  1. SteamTools Offline Setup
-  2. Patch SteamTools.exe
-  3. Cloud Redirect Patch
-  4. Deploy cloud_redirect.dll
-
-If Steam is running, it will be closed automatically.
-Backups will be created.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى تطبيق جميع الإصلاحات ونشر DLL:\n\n 1. إعداد SteamTools دون اتصال\n 2. إصلاح SteamTools.exe\n 3. إصلاح إعادة التوجيه السحابي\n 4. نشر cloud_redirect.dll\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\nسيتم إنشاء نسخ احتياطية.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmOfflineSetup" xml:space="preserve">
-    <value>This patches SteamTools so it works even when their activation
-servers are down.
-
-If Steam is running, it will be closed automatically.
-A backup will be created.
-
-Continue?</value>
+    <value>هذا يقوم بإصلاح SteamTools ليعمل حتى عندما تكون خوادم التفعيل\nمعطلة.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\nسيتم إنشاء نسخة احتياطية.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmRevertOffline" xml:space="preserve">
-    <value>This will revert the offline setup patch, restoring
-original SteamTools activation behavior.
-
-If Steam is running, it will be closed automatically.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى التراجع عن إصلاح الإعداد دون اتصال، مما يستعيد\nسلوك تفعيل SteamTools الأصلي.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmPatchStExe" xml:space="preserve">
-    <value>This patches SteamTools.exe to stop it from overwriting
-patched DLLs on every startup.
-
-If Steam is running, it will be closed automatically.
-A backup will be created.
-
-Continue?</value>
+    <value>هذا يقوم بإصلاح SteamTools.exe لمنعه من الكتابة فوق\nملفات DLL التي تم إصلاحها عند كل تشغيل.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\nسيتم إنشاء نسخة احتياطية.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmRevertStExe" xml:space="preserve">
-    <value>This will restore SteamTools.exe to its original state,
-allowing it to overwrite DLLs on startup again.
-
-If Steam is running, it will be closed automatically.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى استعادة SteamTools.exe إلى حالته الأصلية،\nمما يسمح له بالكتابة فوق DLLs عند التشغيل مرة أخرى.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmApplyPatch" xml:space="preserve">
-    <value>This will patch steamclient64.dll to redirect cloud RPCs.
-
-If Steam is running, it will be closed automatically.
-A backup will be created.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى إصلاح steamclient64.dll لإعادة توجيه استدعاءات RPC السحابية.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\nسيتم إنشاء نسخة احتياطية.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmRevertPatch" xml:space="preserve">
-    <value>This will revert the cloud redirect patch on
-steamclient64.dll, restoring original behavior.
-
-If Steam is running, it will be closed automatically.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى التراجع عن إصلاح إعادة التوجيه السحابي على\nsteamclient64.dll، مما يستعيد السلوك الأصلي.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmDeploy" xml:space="preserve">
-    <value>This will deploy cloud_redirect.dll to your Steam folder.
-
-If Steam is running, it will be closed automatically.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى نشر cloud_redirect.dll في مجلد Steam الخاص بك.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfirmUninstall" xml:space="preserve">
-    <value>This will delete cloud_redirect.dll from your Steam folder.
-
-If Steam is running, it will be closed automatically.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى حذف cloud_redirect.dll من مجلد Steam الخاص بك.\n\nإذا كان Steam قيد التشغيل، فسيتم إغلاقه تلقائياً.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Setup_ConfigureProviderTitle" xml:space="preserve">
-    <value>Configure Cloud Provider</value>
+    <value>إعداد موفر الخدمة السحابية</value>
   </data>
   <data name="Setup_ConfigureProviderExisting" xml:space="preserve">
-    <value>{0}
-
-Current cloud provider: {1}
-
-Would you like to review or change your cloud provider settings?</value>
+    <value>{0}\n\nموفر الخدمة السحابية الحالي: {1}\n\nهل ترغب في مراجعة أو تغيير إعدادات موفر الخدمة السحابية؟</value>
   </data>
   <data name="Setup_ConfigureProviderNew" xml:space="preserve">
-    <value>{0}
-
-Would you like to set up a cloud provider (Google Drive, OneDrive, or a network folder) to sync your saves?
-
-If you skip this, saves will be stored locally in your Steam folder.</value>
+    <value>{0}\n\nهل ترغب في إعداد موفر خدمة سحابية (Google Drive أو OneDrive أو مجلد شبكة) لمزامنة حفظك؟\n\nإذا تخطيت هذا، سيتم تخزين الحفظ محلياً في مجلد Steam الخاص بك.</value>
   </data>
   <data name="Setup_AllPatchesApplied" xml:space="preserve">
-    <value>All patches applied successfully!</value>
+    <value>تم تطبيق جميع الإصلاحات بنجاح!</value>
   </data>
   <data name="Setup_PatchingFinishedWithErrors" xml:space="preserve">
-    <value>Patching finished (some steps failed - see log).</value>
+    <value>انتهى الإصلاح (فشلت بعض الخطوات - راجع السجل).</value>
   </data>
   <data name="Setup_ConfigureProvider" xml:space="preserve">
-    <value>Configure Provider</value>
+    <value>إعداد الموفر</value>
   </data>
   <data name="Setup_UseLocalStorage" xml:space="preserve">
-    <value>Use Local Storage</value>
+    <value>استخدام التخزين المحلي</value>
   </data>
   <data name="Setup_ConfirmOfflineSetupTitle" xml:space="preserve">
-    <value>SteamTools Offline Setup</value>
+    <value>إعداد SteamTools دون اتصال</value>
   </data>
   <data name="Setup_RevertOfflineSetupTitle" xml:space="preserve">
-    <value>Revert Offline Setup</value>
+    <value>التراجع عن الإعداد دون اتصال</value>
   </data>
   <data name="Setup_PatchSteamToolsExeTitle" xml:space="preserve">
-    <value>Patch SteamTools.exe</value>
+    <value>إصلاح SteamTools.exe</value>
   </data>
   <data name="Setup_RevertStExeTitle" xml:space="preserve">
-    <value>Revert SteamTools.exe Patch</value>
+    <value>التراجع عن إصلاح SteamTools.exe</value>
   </data>
   <data name="Setup_ApplyPatchTitle" xml:space="preserve">
-    <value>Apply Patch</value>
+    <value>تطبيق الإصلاح</value>
   </data>
   <data name="Setup_RevertCloudRedirectTitle" xml:space="preserve">
-    <value>Revert Cloud Redirect Patch</value>
+    <value>التراجع عن إصلاح إعادة التوجيه السحابي</value>
   </data>
   <data name="Setup_DeployDllTitle" xml:space="preserve">
-    <value>Deploy DLL</value>
+    <value>نشر DLL</value>
   </data>
   <data name="Setup_UninstallDllTitle" xml:space="preserve">
-    <value>Uninstall DLL</value>
+    <value>إلغاء تثبيت DLL</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- DashboardPage XAML                                                 -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Dashboard_Title" xml:space="preserve">
-    <value>Dashboard</value>
+    <value>القائمة الرئيسية</value>
   </data>
   <data name="Dashboard_UpdateNow" xml:space="preserve">
-    <value>Update Now</value>
+    <value>تحديث الآن</value>
   </data>
   <data name="Dashboard_UpdateAvailable" xml:space="preserve">
-    <value>Update Available</value>
+    <value>تحديث متاح</value>
   </data>
   <data name="Dashboard_UpdateAvailableDescription" xml:space="preserve">
-    <value>A newer version of the CloudRedirect DLL is available. Please update.</value>
+    <value>إصدار أحدث من CloudRedirect DLL متاح. يرجى التحديث.</value>
   </data>
   <data name="Dashboard_CloudProvider" xml:space="preserve">
-    <value>Cloud Provider</value>
+    <value>موفر الخدمة السحابية</value>
   </data>
   <data name="Dashboard_NotConfigured" xml:space="preserve">
-    <value>Not configured</value>
+    <value>غير مهيأ</value>
   </data>
   <data name="Dashboard_SteamInstallation" xml:space="preserve">
-    <value>Steam Installation</value>
+    <value>تثبيت Steam</value>
   </data>
   <data name="Dashboard_Detecting" xml:space="preserve">
-    <value>Detecting...</value>
+    <value>جارٍ الكشف...</value>
   </data>
   <data name="Dashboard_AppsSyncing" xml:space="preserve">
-    <value>Apps Syncing</value>
+    <value>التطبيقات المتزامنة</value>
   </data>
   <data name="Dashboard_AppCountDefault" xml:space="preserve">
-    <value>0 apps configured</value>
+    <value>0 تطبيق مهيأ</value>
   </data>
   <data name="Dashboard_CloudRedirectDll" xml:space="preserve">
     <value>CloudRedirect DLL</value>
   </data>
   <data name="Dashboard_DllChecking" xml:space="preserve">
-    <value>Checking...</value>
+    <value>جارٍ الفحص...</value>
   </data>
   <data name="Dashboard_QuickActions" xml:space="preserve">
-    <value>Quick Actions</value>
+    <value>إجراءات سريعة</value>
   </data>
 
   <data name="Dashboard_OpenLogFile" xml:space="preserve">
-    <value>Show Log in Folder</value>
+    <value>إظهار السجل في المجلد</value>
   </data>
   <data name="Dashboard_RestartSteam" xml:space="preserve">
-    <value>Restart Steam</value>
+    <value>إعادة تشغيل Steam</value>
   </data>
 
   <!-- DashboardPage code-behind -->
   <data name="Dashboard_NotFound" xml:space="preserve">
-    <value>Not found</value>
+    <value>غير موجود</value>
   </data>
   <data name="Dashboard_DllNotInstalled" xml:space="preserve">
-    <value>Not installed</value>
+    <value>غير مثبت</value>
   </data>
   <data name="Dashboard_DllInstalledUpdateAvailable" xml:space="preserve">
-    <value>Installed (update available)</value>
+    <value>مثبت (تحديث متاح)</value>
   </data>
   <data name="Dashboard_DllInstalled" xml:space="preserve">
-    <value>Installed</value>
+    <value>مثبت</value>
   </data>
   <data name="Dashboard_AppCountFormat" xml:space="preserve">
-    <value>{0} app(s) with cloud data</value>
+    <value>{0} تطبيق ببيانات سحابية</value>
   </data>
   <data name="Dashboard_FolderAccessible" xml:space="preserve">
-    <value>{0} - Folder accessible</value>
+    <value>{0} - المجلد قابل للوصول</value>
   </data>
   <data name="Dashboard_FolderNotFound" xml:space="preserve">
-    <value>{0} - Folder not found</value>
+    <value>{0} - المجلد غير موجود</value>
   </data>
   <data name="Dashboard_NoSyncFolder" xml:space="preserve">
-    <value>{0} - No sync folder configured</value>
+    <value>{0} - لم يتم إعداد مجلد مزامنة</value>
   </data>
   <data name="Dashboard_Authenticated" xml:space="preserve">
-    <value>{0} - Authenticated</value>
+    <value>{0} - تمت المصادقة</value>
   </data>
   <data name="Dashboard_AuthStatus" xml:space="preserve">
     <value>{0} - {1}</value>
   </data>
   <data name="Dashboard_NoTokenPath" xml:space="preserve">
-    <value>{0} - No token path configured</value>
+    <value>{0} - لم يتم إعداد مسار الرمز المميز</value>
   </data>
   <data name="Dashboard_LogNotFound" xml:space="preserve">
-    <value>Log file not found. Start Steam with CloudRedirect installed first.</value>
+    <value>ملف السجل غير موجود. قم بتشغيل Steam مع تثبيت CloudRedirect أولاً.</value>
   </data>
   <data name="Dashboard_ClosingSteam" xml:space="preserve">
-    <value>Closing Steam...</value>
+    <value>جارٍ إغلاق Steam...</value>
   </data>
   <data name="Dashboard_Updating" xml:space="preserve">
-    <value>Updating...</value>
+    <value>جارٍ التحديث...</value>
   </data>
   <data name="Dashboard_UpdateFailed" xml:space="preserve">
-    <value>Update failed</value>
+    <value>فشل التحديث</value>
   </data>
   <data name="Dashboard_DllInstalledUpdated" xml:space="preserve">
-    <value>Installed (updated)</value>
+    <value>مثبت (مُحدّث)</value>
   </data>
   <data name="Dashboard_DllUpdatedTitle" xml:space="preserve">
-    <value>DLL Updated</value>
+    <value>تم تحديث DLL</value>
   </data>
   <data name="Dashboard_DllUpdatedRestartPrompt" xml:space="preserve">
-    <value>cloud_redirect.dll has been updated.
-
-Restart Steam now?</value>
+    <value>تم تحديث cloud_redirect.dll.\n\nهل تريد إعادة تشغيل Steam الآن؟</value>
   </data>
   <data name="Dashboard_FailedUpdateDll" xml:space="preserve">
-    <value>Failed to update DLL: {0}</value>
+    <value>فشل تحديث DLL: {0}</value>
   </data>
   <data name="Dashboard_RestartSteamPrompt" xml:space="preserve">
-    <value>This will shut down Steam and restart it.
-Continue?</value>
+    <value>سيؤدي هذا إلى إيقاف Steam وإعادة تشغيله.\nهل تريد المتابعة؟</value>
   </data>
   <data name="Dashboard_ShuttingDownSteam" xml:space="preserve">
-    <value>Shutting down Steam...</value>
+    <value>جارٍ إيقاف Steam...</value>
   </data>
   <data name="Dashboard_SteamStillRunning" xml:space="preserve">
-    <value>Steam still running</value>
+    <value>Steam لا يزال قيد التشغيل</value>
   </data>
   <data name="Dashboard_SteamStillRunningPrompt" xml:space="preserve">
-    <value>Steam did not shut down within 15 seconds.
-Force-kill it?</value>
+    <value>لم يتم إيقاف Steam خلال 15 ثانية.\nهل تريد إنهاءه قسراً؟</value>
   </data>
   <data name="Dashboard_ForceKilling" xml:space="preserve">
-    <value>Force-killing Steam...</value>
+    <value>جارٍ إنهاء Steam قسراً...</value>
   </data>
   <data name="Dashboard_StartingSteam" xml:space="preserve">
-    <value>Starting Steam...</value>
+    <value>جارٍ تشغيل Steam...</value>
   </data>
   <data name="Dashboard_FailedRestartSteam" xml:space="preserve">
-    <value>Failed to restart Steam: {0}</value>
+    <value>فشل إعادة تشغيل Steam: {0}</value>
   </data>
   <data name="Dashboard_SteamExeNotFound" xml:space="preserve">
-    <value>steam.exe not found.</value>
+    <value>steam.exe غير موجود.</value>
   </data>
   <data name="Dashboard_CouldNotFindSteam" xml:space="preserve">
-    <value>Could not find Steam installation.</value>
+    <value>تعذر العثور على تثبيت Steam.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- CloudProviderPage XAML                                             -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="CloudProvider_Title" xml:space="preserve">
-    <value>Cloud Provider</value>
+    <value>موفر الخدمة السحابية</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure your Steam Cloud provider. Google Drive/OneDrive/Local Folder only for now.</value>
+    <value>قم بإعداد موفر Steam Cloud الخاص بك. Google Drive/OneDrive/مجلد محلي فقط حالياً.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
-    <value>Provider</value>
+    <value>الموفر</value>
   </data>
   <data name="CloudProvider_GoogleDrive" xml:space="preserve">
     <value>Google Drive</value>
@@ -737,220 +662,197 @@ Force-kill it?</value>
     <value>OneDrive</value>
   </data>
   <data name="CloudProvider_FolderMappedDrive" xml:space="preserve">
-    <value>Folder / Mapped Drive</value>
+    <value>مجلد / محرك أقراص مُعيّن</value>
   </data>
   <data name="CloudProvider_LocalOnly" xml:space="preserve">
-    <value>Local only (no cloud sync)</value>
+    <value>محلي فقط (بدون مزامنة سحابية)</value>
   </data>
   <data name="CloudProvider_TokenFilePath" xml:space="preserve">
-    <value>Token File Path</value>
+    <value>مسار ملف الرمز المميز</value>
   </data>
   <data name="CloudProvider_TokenPlaceholder" xml:space="preserve">
-    <value>Path to OAuth tokens file</value>
+    <value>مسار ملف رموز OAuth</value>
   </data>
   <data name="CloudProvider_Browse" xml:space="preserve">
-    <value>Browse</value>
+    <value>تصفح</value>
   </data>
   <data name="CloudProvider_Authentication" xml:space="preserve">
-    <value>Authentication</value>
+    <value>المصادقة</value>
   </data>
   <data name="CloudProvider_AuthenticationStatus" xml:space="preserve">
-    <value>Authentication Status</value>
+    <value>حالة المصادقة</value>
   </data>
   <data name="CloudProvider_NoTokensLoaded" xml:space="preserve">
-    <value>No tokens loaded</value>
+    <value>لم يتم تحميل أي رموز</value>
   </data>
   <data name="CloudProvider_SignIn" xml:space="preserve">
-    <value>Sign In</value>
+    <value>تسجيل الدخول</value>
   </data>
   <data name="CloudProvider_Cancel" xml:space="preserve">
-    <value>Cancel</value>
+    <value>إلغاء</value>
   </data>
 
   <!-- CloudProviderPage code-behind -->
   <data name="CloudProvider_NoConfigFound" xml:space="preserve">
-    <value>No config.json found - using defaults</value>
+    <value>لم يتم العثور على config.json - استخدام الإعدادات الافتراضية</value>
   </data>
   <data name="CloudProvider_ErrorReadingConfig" xml:space="preserve">
-    <value>Error reading config: {0}</value>
+    <value>خطأ في قراءة الإعدادات: {0}</value>
   </data>
   <data name="CloudProvider_SyncFolderPath" xml:space="preserve">
-    <value>Sync Folder Path</value>
+    <value>مسار مجلد المزامنة</value>
   </data>
   <data name="CloudProvider_SyncFolderPlaceholder" xml:space="preserve">
-    <value>Path to sync folder (e.g. Z:\CloudRedirect)</value>
+    <value>مسار مجلد المزامنة (مثال: Z:\\CloudRedirect)</value>
   </data>
   <data name="CloudProvider_SyncFolderHint" xml:space="preserve">
-    <value>Choose any folder - including a mapped network drive, USB drive, or NAS share.</value>
+    <value>اختر أي مجلد - بما في ذلك محرك أقراص شبكة مُعيّن أو محرك USB أو مشاركة NAS.</value>
   </data>
   <data name="CloudProvider_LocalStoragePath" xml:space="preserve">
-    <value>Local Storage Path</value>
+    <value>مسار التخزين المحلي</value>
   </data>
   <data name="CloudProvider_LocalStorageHint" xml:space="preserve">
-    <value>Saves are stored locally in your Steam folder. No cloud sync.</value>
+    <value>يتم تخزين الحفظ محلياً في مجلد Steam الخاص بك. لا مزامنة سحابية.</value>
   </data>
   <data name="CloudProvider_SelectSyncFolder" xml:space="preserve">
-    <value>Select sync folder</value>
+    <value>اختر مجلد المزامنة</value>
   </data>
   <data name="CloudProvider_SelectTokenFile" xml:space="preserve">
-    <value>Select OAuth Token File</value>
+    <value>اختر ملف رمز OAuth</value>
   </data>
   <data name="CloudProvider_MissingPath" xml:space="preserve">
-    <value>Missing Path</value>
+    <value>المسار مفقود</value>
   </data>
   <data name="CloudProvider_MissingPathMessage" xml:space="preserve">
-    <value>Please set a token file path first.</value>
+    <value>يرجى تعيين مسار ملف الرمز المميز أولاً.</value>
   </data>
   <data name="CloudProvider_FailedSaveConfig" xml:space="preserve">
-    <value>Failed to save config: {0}</value>
+    <value>فشل حفظ الإعدادات: {0}</value>
   </data>
   <data name="CloudProvider_LocalModeStored" xml:space="preserve">
-    <value>Local mode - saves stored in: {0}</value>
+    <value>الوضع المحلي - الحفظ مخزّن في: {0}</value>
   </data>
   <data name="CloudProvider_LocalModeNoSync" xml:space="preserve">
-    <value>Local mode - no cloud sync</value>
+    <value>الوضع المحلي - لا مزامنة سحابية</value>
   </data>
   <data name="CloudProvider_NoSyncFolder" xml:space="preserve">
-    <value>No sync folder specified</value>
+    <value>لم يتم تحديد مجلد مزامنة</value>
   </data>
   <data name="CloudProvider_FolderAccessible" xml:space="preserve">
-    <value>Folder accessible: {0}</value>
+    <value>المجلد قابل للوصول: {0}</value>
   </data>
   <data name="CloudProvider_FolderNotFound" xml:space="preserve">
-    <value>Folder not found: {0}</value>
+    <value>المجلد غير موجود: {0}</value>
   </data>
   <data name="CloudProvider_NoTokenFilePath" xml:space="preserve">
-    <value>No token file path specified</value>
+    <value>لم يتم تحديد مسار ملف الرمز المميز</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- AppsPage XAML                                                      -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Apps_Title" xml:space="preserve">
-    <value>Apps</value>
+    <value>التطبيقات</value>
   </data>
   <data name="Apps_Description" xml:space="preserve">
-    <value>Cloud save data for your injected apps.</value>
+    <value>بيانات الحفظ السحابي لتطبيقاتك المحقونة.</value>
   </data>
   <data name="Apps_RestoreSaves" xml:space="preserve">
-    <value>Restore Saves</value>
+    <value>استعادة الحفظ</value>
   </data>
   <data name="Apps_Files" xml:space="preserve">
-    <value>files</value>
+    <value>ملف</value>
   </data>
   <data name="Apps_ChangeNumber" xml:space="preserve">
     <value>CN:</value>
   </data>
   <data name="Apps_DeleteTooltip" xml:space="preserve">
-    <value>Delete all saves for this app</value>
+    <value>حذف جميع الحفظ لهذا التطبيق</value>
   </data>
   <data name="Apps_Back" xml:space="preserve">
-    <value>Back</value>
+    <value>رجوع</value>
   </data>
   <data name="Apps_Refresh" xml:space="preserve">
-    <value>Refresh</value>
+    <value>تحديث</value>
   </data>
   <data name="Apps_RestoreDescription" xml:space="preserve">
-    <value>Restore files from a previous delete backup. Each delete creates an immutable, timestamped backup. Restoring copies files back without modifying the backup.</value>
+    <value>استعادة الملفات من نسخة احتياطية سابقة للحذف. كل عملية حذف تنشئ نسخة احتياطية غير قابلة للتغيير ومؤرخة. الاستعادة تنسخ الملفات مرة أخرى دون تعديل النسخة الاحتياطية.</value>
   </data>
   <data name="Apps_LoadingBackups" xml:space="preserve">
-    <value>Loading backups...</value>
+    <value>جارٍ تحميل النسخ الاحتياطية...</value>
   </data>
 
   <!-- AppsPage code-behind -->
   <data name="Apps_DeleteAllSavesTitle" xml:space="preserve">
-    <value>Delete All Saves</value>
+    <value>حذف جميع الحفظ</value>
   </data>
   <data name="Apps_DeletePromptHeader" xml:space="preserve">
-    <value>Delete all save data for {0} ({1})?
-
-</value>
+    <value>حذف جميع بيانات الحفظ لـ {0} ({1})؟\n\n</value>
   </data>
   <data name="Apps_DeletePromptWillDelete" xml:space="preserve">
-    <value>This will </value>
+    <value>سيؤدي هذا إلى </value>
   </data>
   <data name="Apps_DeletePromptDelete" xml:space="preserve">
-    <value>delete</value>
+    <value>حذف</value>
   </data>
   <data name="Apps_DeletePromptLocalStorage" xml:space="preserve">
-    <value>  - CloudRedirect local storage: {0} file(s) ({1})
-</value>
+    <value> - التخزين المحلي لـ CloudRedirect: {0} ملف (ملفات) ({1})\n</value>
   </data>
   <data name="Apps_DeletePromptCloudCopies" xml:space="preserve">
-    <value>Cloud copies on {0}</value>
+    <value>النسخ السحابية على {0}</value>
   </data>
   <data name="Apps_DeletePromptUserdata" xml:space="preserve">
-    <value>  - Steam userdata: {0}
-</value>
+    <value> - بيانات مستخدم Steam: {0}\n</value>
   </data>
   <data name="Apps_DeletePromptGameSaves" xml:space="preserve">
-    <value>  - Game saves: {0}
-</value>
+    <value> - حفظ اللعبة: {0}\n</value>
   </data>
   <data name="Apps_DeletePromptSkipped" xml:space="preserve">
-    <value>
-  (Skipped {0} path(s) that could not be resolved: {1})
-</value>
+    <value>\n (تم تخطي {0} مسار (مسارات) تعذر حلها: {1})\n</value>
   </data>
   <data name="Apps_DeletePromptWarning" xml:space="preserve">
-    <value>This will delete your saves.</value>
+    <value>سيؤدي هذا إلى حذف حفظك.</value>
   </data>
   <data name="Apps_DeletePromptExplanation" xml:space="preserve">
-    <value>Local saves will be backed up, but restoring them is complex. You would have to disable cloud storage for the game in Steam, restore the backup, and then launch the game. If you continue, your cloud saves will be lost. Those are not backed up.</value>
+    <value>سيتم عمل نسخة احتياطية من الحفظ المحلي، لكن استعادتها معقدة. سيتعين عليك تعطيل التخزين السحابي للعبة في Steam، واستعادة النسخة الاحتياطية، ثم تشغيل اللعبة. إذا تابعت، فسيتم فقدان حفظك السحابي. تلك لا يتم عمل نسخة احتياطية منها.</value>
   </data>
   <data name="Apps_DeletePromptConsequence" xml:space="preserve">
-    <value>If you continue, the game will behave as if you never played it. You will start the game from the beginning on next launch.</value>
+    <value>إذا تابعت، ستتصرف اللعبة كما لو أنك لم تلعبها أبداً. ستبدأ اللعبة من البداية عند التشغيل التالي.</value>
   </data>
   <data name="Apps_DeletePromptBeSure" xml:space="preserve">
-    <value>Be Sure.</value>
+    <value>كن متأكداً.</value>
   </data>
   <data name="Apps_FinalConfirmTitle" xml:space="preserve">
-    <value>Final Confirmation</value>
+    <value>التأكيد النهائي</value>
   </data>
   <data name="Apps_FinalConfirmMessage" xml:space="preserve">
-    <value>This will delete all save data for {0} ({1}).
-
-Local saves will be backed up, but cloud copies will be permanently lost. Restoring saves is tricky.
-
-Are you sure?</value>
+    <value>سيؤدي هذا إلى حذف جميع بيانات الحفظ لـ {0} ({1}).\n\nسيتم عمل نسخة احتياطية من الحفظ المحلي، لكن النسخ السحابية ستفقد نهائياً. استعادة الحفظ صعبة.\n\nهل أنت متأكد؟</value>
   </data>
   <data name="Apps_PartialDeleteTitle" xml:space="preserve">
-    <value>Partial Delete</value>
+    <value>حذف جزئي</value>
   </data>
   <data name="Apps_PartialDeleteMessage" xml:space="preserve">
-    <value>Some data could not be deleted:
-
-{0}
-
-Local backup saved to:
-{1}
-
-You can restore from the Restore Saves panel.</value>
+    <value>تعذر حذف بعض البيانات:\n\n{0}\n\nالنسخة الاحتياطية المحلية محفوظة في:\n{1}\n\nيمكنك الاستعادة من لوحة استعادة الحفظ.</value>
   </data>
   <data name="Apps_DeletedTitle" xml:space="preserve">
-    <value>Deleted</value>
+    <value>تم الحذف</value>
   </data>
   <data name="Apps_DeletedMessage" xml:space="preserve">
-    <value>All save data for {0} ({1}) has been deleted.
-
-Backup saved to:
-{2}
-
-You can restore from the Restore Saves panel.</value>
+    <value>تم حذف جميع بيانات الحفظ لـ {0} ({1}).\n\nالنسخة الاحتياطية محفوظة في:\n{2}\n\nيمكنك الاستعادة من لوحة استعادة الحفظ.</value>
   </data>
   <data name="Apps_DeleteFailedTitle" xml:space="preserve">
-    <value>Delete Failed</value>
+    <value>فشل الحذف</value>
   </data>
 
   <!-- AppsPage orphan-blob scan + prune -->
   <data name="Apps_PruneTooltip" xml:space="preserve">
-    <value>Delete orphan cloud blobs no longer referenced by this app</value>
+    <value>حذف البيانات السحابية اليتيمة التي لم يعد هذا التطبيق يشير إليها</value>
   </data>
   <data name="Apps_ScanForOrphans" xml:space="preserve">
-    <value>Scan Cloud for Orphans</value>
+    <value>مسح السحابة بحثاً عن البيانات اليتيمة</value>
   </data>
   <data name="Apps_ScanOrphansExplainTitle" xml:space="preserve">
-    <value>Scan Cloud for Orphans</value>
+    <value>مسح السحابة بحثاً عن البيانات اليتيمة</value>
   </data>
   <data name="Apps_ScanOrphansExplainMessage" xml:space="preserve">
     <value>An "orphan" is a save file in your cloud storage that no app on this PC still references - left behind when a save was renamed, an app was uninstalled, or a sync was interrupted. They take up space and can shadow newer saves on conflict.
@@ -960,139 +862,125 @@ This scan only reads your cloud listings; nothing is deleted. After the scan, ea
 Steam must be closed during the scan so an in-flight upload can't be misread as an orphan. Continue?</value>
   </data>
   <data name="Apps_ScanningOrphansFormat" xml:space="preserve">
-    <value>Scanning... ({0}/{1})</value>
+    <value>جارٍ المسح... ({0}/{1})</value>
   </data>
   <data name="Apps_ScanLocalOnlyTitle" xml:space="preserve">
-    <value>No Cloud Provider</value>
+    <value>لا يوجد موفر خدمة سحابية</value>
   </data>
   <data name="Apps_ScanLocalOnlyMessage" xml:space="preserve">
-    <value>CloudRedirect is configured for local-only storage. There is no cloud to scan for orphan blobs.</value>
+    <value>تم إعداد CloudRedirect للتخزين المحلي فقط. لا توجد سحابة لمسحها بحثاً عن البيانات اليتيمة.</value>
   </data>
   <data name="Apps_ScanFailedTitle" xml:space="preserve">
-    <value>Scan Failed</value>
+    <value>فشل المسح</value>
   </data>
   <data name="Apps_ScanCompleteCleanFormat" xml:space="preserve">
-    <value>Scanned {0} app(s) - no orphan cloud blobs found.</value>
+    <value>تم مسح {0} تطبيق (تطبيقات) - لم يتم العثور على بيانات سحابية يتيمة.</value>
   </data>
   <data name="Apps_ScanCompleteFoundFormat" xml:space="preserve">
-    <value>Found {0} orphan cloud blob(s) across {1} app(s).</value>
+    <value>تم العثور على {0} بيانات سحابية يتيمة عبر {1} تطبيق (تطبيقات).</value>
   </data>
   <data name="Apps_ScanCompletePartialFormat" xml:space="preserve">
-    <value>{0} app(s) could not be verified (listing incomplete).</value>
+    <value>تعذر التحقق من {0} تطبيق (تطبيقات) (القائمة غير مكتملة).</value>
   </data>
   <data name="Apps_OrphanSummaryFormat" xml:space="preserve">
-    <value>{0} unreferenced cloud blob(s)</value>
+    <value>{0} بيانات سحابية غير مرجعية</value>
   </data>
   <data name="Apps_PruneAll" xml:space="preserve">
-    <value>Prune All</value>
+    <value>تنظيف الكل</value>
   </data>
   <data name="Apps_ReviewOrphans" xml:space="preserve">
-    <value>Review Orphans</value>
+    <value>مراجعة البيانات اليتيمة</value>
   </data>
   <data name="Apps_CollapseOrphans" xml:space="preserve">
-    <value>Collapse</value>
+    <value>طي</value>
   </data>
   <data name="Apps_PruneScanningTitle" xml:space="preserve">
-    <value>Scanning cloud blobs...</value>
+    <value>جارٍ مسح البيانات السحابية...</value>
   </data>
   <data name="Apps_PruneButton" xml:space="preserve">
-    <value>Prune</value>
+    <value>تنظيف</value>
   </data>
   <data name="Apps_PruneButtonScanning" xml:space="preserve">
-    <value>Scanning...</value>
+    <value>جارٍ المسح...</value>
   </data>
   <data name="Apps_PruneButtonPruning" xml:space="preserve">
-    <value>Pruning...</value>
+    <value>جارٍ التنظيف...</value>
   </data>
   <data name="Apps_PruneLocalOnlyTitle" xml:space="preserve">
-    <value>No Cloud Provider</value>
+    <value>لا يوجد موفر خدمة سحابية</value>
   </data>
   <data name="Apps_PruneLocalOnlyMessage" xml:space="preserve">
-    <value>CloudRedirect is configured for local-only storage. There is no cloud provider to prune orphan blobs from.</value>
+    <value>تم إعداد CloudRedirect للتخزين المحلي فقط. لا يوجد موفر خدمة سحابية لتنظيف البيانات اليتيمة منه.</value>
   </data>
   <data name="Apps_PruneNoOrphansTitle" xml:space="preserve">
-    <value>No Orphan Blobs</value>
+    <value>لا توجد بيانات يتيمة</value>
   </data>
   <data name="Apps_PruneNoOrphansMessageFormat" xml:space="preserve">
-    <value>All {0} cloud blob(s) for {1} are referenced by the local save index. Nothing to prune.</value>
+    <value>جميع البيانات السحابية {0} لـ {1} مشار إليها بواسطة فهرس الحفظ المحلي. لا شيء لتنظيفه.</value>
   </data>
   <data name="Apps_PruneListingIncompleteTitle" xml:space="preserve">
-    <value>Cloud Listing Incomplete</value>
+    <value>القائمة السحابية غير مكتملة</value>
   </data>
   <data name="Apps_PruneListingIncompleteMessage" xml:space="preserve">
-    <value>Could not retrieve a complete list of cloud blobs. Pruning on partial data would risk deleting legitimate saves, so the operation has been aborted. Try again when your connection to the cloud provider is stable.
-
-Details: {0}</value>
+    <value>تعذر استرجاع قائمة كاملة بالبيانات السحابية. التنظيف على بيانات جزئية قد يعرض حفظاً شرعياً للحذف، لذلك تم إحباط العملية. حاول مرة أخرى عندما يكون اتصالك بموفر الخدمة السحابية مستقراً.\n\nالتفاصيل: {0}</value>
   </data>
   <data name="Apps_PruneConfirmTitle" xml:space="preserve">
-    <value>Prune Orphan Cloud Blobs</value>
+    <value>تنظيف البيانات السحابية اليتيمة</value>
   </data>
   <data name="Apps_PruneConfirmHeaderFormat" xml:space="preserve">
-    <value>Delete {0} orphan cloud blob(s) for {1} ({2})?
-
-</value>
+    <value>حذف {0} بيانات سحابية يتيمة لـ {1} ({2})؟\n\n</value>
   </data>
   <data name="Apps_PruneConfirmExplanation" xml:space="preserve">
-    <value>These blobs exist in your cloud provider ({0}) but are NOT referenced by the local save index (file_tokens.dat). They were left behind by a prior session, a failed delete, or a manual override, and will never be downloaded or cleaned up by the normal sync path.
-
-</value>
+    <value>هذه البيانات موجودة في موفر الخدمة السحابية ({0}) لكنها غير مشار إليها بواسطة فهرس الحفظ المحلي (file_tokens.dat). تُركت من جلسة سابقة، أو حذف فاشل، أو تجاوز يدوي، ولن يتم تنزيلها أو تنظيفها أبداً بواسطة مسار المزامنة العادي.\n\n</value>
   </data>
   <data name="Apps_PruneConfirmPreviewHeader" xml:space="preserve">
-    <value>Files to delete:
-</value>
+    <value>الملفات المراد حذفها:\n</value>
   </data>
   <data name="Apps_PruneConfirmMoreFormat" xml:space="preserve">
-    <value>  ...and {0} more
-</value>
+    <value> ...و{0} أخرى\n</value>
   </data>
   <data name="Apps_PruneConfirmWarning" xml:space="preserve">
-    <value>This operation cannot be undone. Local saves will NOT be affected.</value>
+    <value>لا يمكن التراجع عن هذه العملية. الحفظ المحلي لن يتأثر.</value>
   </data>
   <data name="Apps_PruneFinalConfirmTitle" xml:space="preserve">
-    <value>Confirm Prune</value>
+    <value>تأكيد التنظيف</value>
   </data>
   <data name="Apps_PruneFinalConfirmMessageFormat" xml:space="preserve">
-    <value>Permanently delete {0} orphan cloud blob(s) for {1}? This cannot be undone.</value>
+    <value>حذف {0} بيانات سحابية يتيمة لـ {1} بشكل دائم؟ لا يمكن التراجع عن هذا.</value>
   </data>
   <data name="Apps_PruneCompleteTitle" xml:space="preserve">
-    <value>Prune Complete</value>
+    <value>اكتمل التنظيف</value>
   </data>
   <data name="Apps_PruneCompleteMessageFormat" xml:space="preserve">
-    <value>Deleted {0} orphan cloud blob(s) for {1}.</value>
+    <value>تم حذف {0} بيانات سحابية يتيمة لـ {1}.</value>
   </data>
   <data name="Apps_PrunePartialTitle" xml:space="preserve">
-    <value>Prune Partially Complete</value>
+    <value>التنظيف اكتمل جزئياً</value>
   </data>
   <data name="Apps_PrunePartialMessageFormat" xml:space="preserve">
-    <value>Deleted {0} of {1} orphan cloud blob(s) for {2}. {3} file(s) could not be deleted:
-
-{4}
-
-Details: {5}</value>
+    <value>تم حذف {0} من {1} بيانات سحابية يتيمة لـ {2}. {3} ملف (ملفات) تعذر حذفها:\n\n{4}\n\nالتفاصيل: {5}</value>
   </data>
   <data name="Apps_PruneFailedTitle" xml:space="preserve">
-    <value>Prune Failed</value>
+    <value>فشل التنظيف</value>
   </data>
   <data name="Apps_PruneFailedMessageFormat" xml:space="preserve">
-    <value>Could not delete any of the {0} orphan blob(s) for {1}.
-
-Details: {2}</value>
+    <value>تعذر حذف أي من البيانات اليتيمة البالغ عددها {0} لـ {1}.\n\nالتفاصيل: {2}</value>
   </data>
 
   <data name="Apps_SteamNotFound" xml:space="preserve">
-    <value>Steam not found</value>
+    <value>لم يتم العثور على Steam</value>
   </data>
   <data name="Apps_NoDeleteBackups" xml:space="preserve">
-    <value>No delete backups found.</value>
+    <value>لم يتم العثور على نسخ احتياطية للحذف.</value>
   </data>
   <data name="Apps_BackupCountFormat" xml:space="preserve">
-    <value>{0} backup(s) found</value>
+    <value>تم العثور على {0} نسخة احتياطية</value>
   </data>
   <data name="Apps_FailedLoadBackups" xml:space="preserve">
-    <value>Failed to load backups: {0}</value>
+    <value>فشل تحميل النسخ الاحتياطية: {0}</value>
   </data>
   <data name="Apps_RestoreSavesExperimentalTitle" xml:space="preserve">
-    <value>Restore Saves (Experimental)</value>
+    <value>استعادة الحفظ (تجريبي)</value>
   </data>
   <data name="Apps_RestoreConfirmMessage" xml:space="preserve">
     <value>Restore save data from backup at {0}?
@@ -1110,310 +998,282 @@ This feature is experimental. Existing files at original locations will be skipp
 The backup itself is never modified or deleted.</value>
   </data>
   <data name="Apps_Restoring" xml:space="preserve">
-    <value>Restoring...</value>
+    <value>جارٍ الاستعادة...</value>
   </data>
   <data name="Apps_Restore" xml:space="preserve">
-    <value>Restore</value>
+    <value>استعادة</value>
   </data>
   <data name="Apps_RestoreCompleteTitle" xml:space="preserve">
-    <value>Restore Complete</value>
+    <value>اكتملت الاستعادة</value>
   </data>
   <data name="Apps_RestoredFormat" xml:space="preserve">
-    <value>Restored {0} file(s).</value>
+    <value>تمت استعادة {0} ملف (ملفات).</value>
   </data>
   <data name="Apps_RestoredRemotecacheFormat" xml:space="preserve">
-    <value> {0} remotecache(s).</value>
+    <value> {0} ذاكرة تخزين مؤقت عن بُعد.</value>
   </data>
   <data name="Apps_SkippedFormat" xml:space="preserve">
-    <value>
-Skipped {0} file(s) (already exist at original location).</value>
+    <value>\nتم تخطي {0} ملف (ملفات) (موجودة بالفعل في الموقع الأصلي).</value>
   </data>
   <data name="Apps_ErrorsFormat" xml:space="preserve">
-    <value>
-
-{0} error(s):
-{1}</value>
+    <value>\n\n{0} خطأ (أخطاء):\n{1}</value>
   </data>
   <data name="Apps_RestoreFailedTitle" xml:space="preserve">
-    <value>Restore Failed</value>
+    <value>فشلت الاستعادة</value>
   </data>
   <data name="Apps_AppFallbackName" xml:space="preserve">
-    <value>App {0}</value>
+    <value>التطبيق {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- CleanupPage XAML                                                   -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Cleanup_Title" xml:space="preserve">
-    <value>Clean Up</value>
+    <value>تنظيف</value>
   </data>
   <data name="Cleanup_Description" xml:space="preserve">
-    <value>SteamTools redirected the cloud saves of all Lua apps through app 760, polluting each Lua app's /&lt;appid&gt;/remote/ folder with all the files that SteamTools synced to 760. Scan to see which apps are affected, then select files to remove.</value>
+    <value>قام SteamTools بإعادة توجيه الحفظ السحابي لجميع تطبيقات Lua عبر التطبيق 760، مما لوّث مجلد /&lt;appid&gt;/remote/ لكل تطبيق Lua بجميع الملفات التي قام SteamTools بمزامنتها مع 760. امسح لترى أي التطبيقات متأثرة، ثم اختر الملفات المراد إزالتها.</value>
   </data>
   <data name="Cleanup_OstBanner_Title" xml:space="preserve">
-    <value>OpenSteamTool detected</value>
+    <value>تم اكتشاف OpenSteamTool</value>
   </data>
   <data name="Cleanup_OstBanner_Description" xml:space="preserve">
-    <value>OpenSteamTool does not route cloud saves through app 760. This page is for cleaning up files left by a prior SteamTools install.</value>
+    <value>OpenSteamTool لا يوجّه الحفظ السحابي من خلال التطبيق 760. هذه الصفحة لتنظيف الملفات التي تركتها نسخة SteamTools سابقة.</value>
   </data>
   <data name="Cleanup_ScanForContamination" xml:space="preserve">
-    <value>Scan for Contamination</value>
+    <value>مسح بحثاً عن التلوث</value>
   </data>
   <data name="Cleanup_RestoreFromBackup" xml:space="preserve">
-    <value>Restore from Backup</value>
+    <value>استعادة من النسخة الاحتياطية</value>
   </data>
   <data name="Cleanup_UndoBannerDescription" xml:space="preserve">
-    <value>The backup is safe - click Undo to restore all files to their original locations.</value>
+    <value>النسخة الاحتياطية آمنة - انقر على &apos;تراجع&apos; لاستعادة جميع الملفات إلى مواقعها الأصلية.</value>
   </data>
   <data name="Cleanup_Undo" xml:space="preserve">
-    <value>Undo</value>
+    <value>تراجع</value>
   </data>
   <data name="Cleanup_Dismiss" xml:space="preserve">
-    <value>Dismiss</value>
+    <value>رفض</value>
   </data>
   <data name="Cleanup_ScanningApps" xml:space="preserve">
-    <value>Scanning apps...</value>
+    <value>جارٍ مسح التطبيقات...</value>
   </data>
   <data name="Cleanup_DangerZone" xml:space="preserve">
-    <value>Danger Zone</value>
+    <value>منطقة الخطر</value>
   </data>
   <data name="Cleanup_CleanAllSuspectFiles" xml:space="preserve">
-    <value>Clean All Suspect Files</value>
+    <value>تنظيف جميع الملفات المشبوهة</value>
   </data>
   <data name="Cleanup_Back" xml:space="preserve">
-    <value>Back</value>
+    <value>رجوع</value>
   </data>
   <data name="Cleanup_RefreshBackups" xml:space="preserve">
-    <value>Refresh Backups</value>
+    <value>تحديث النسخ الاحتياطية</value>
   </data>
   <data name="Cleanup_RestoreDescription" xml:space="preserve">
-    <value>Restore files from a previous clean up backup. Each clean up run creates an immutable, timestamped backup. Restoring copies files back without modifying the backup.</value>
+    <value>استعادة الملفات من نسخة احتياطية سابقة للتنظيف. كل عملية تنظيف تنشئ نسخة احتياطية غير قابلة للتغيير ومؤرخة. الاستعادة تنسخ الملفات مرة أخرى دون تعديل النسخة الاحتياطية.</value>
   </data>
   <data name="Cleanup_LoadingBackups" xml:space="preserve">
-    <value>Loading backups...</value>
+    <value>جارٍ تحميل النسخ الاحتياطية...</value>
   </data>
 
   <!-- CleanupPage code-behind -->
   <data name="Cleanup_SteamNotFound" xml:space="preserve">
-    <value>Steam not found</value>
+    <value>لم يتم العثور على Steam</value>
   </data>
   <data name="Cleanup_NoNamespaceApps" xml:space="preserve">
-    <value>No namespace apps with files found.</value>
+    <value>لم يتم العثور على تطبيقات مساحة اسم تحتوي على ملفات.</value>
   </data>
   <data name="Cleanup_ScanStatusFormat" xml:space="preserve">
-    <value>{0} apps scanned, {1} suspect files across {2} apps</value>
+    <value>تم مسح {0} تطبيق، {1} ملف مشبوه عبر {2} تطبيق</value>
   </data>
   <data name="Cleanup_NukeDescriptionFormat" xml:space="preserve">
-    <value>Remove all {0} suspect files ({1}) across {2} app(s) in one shot. Everything is backed up and can be restored from the Restore tab.</value>
+    <value>إزالة جميع الملفات المشبوهة البالغ عددها {0} ({1}) عبر {2} تطبيق دفعة واحدة. كل شيء مدعوم بنسخة احتياطية ويمكن استعادته من علامة التبويب &apos;استعادة&apos;.</value>
   </data>
   <data name="Cleanup_ScanFailed" xml:space="preserve">
-    <value>Scan failed: {0}</value>
+    <value>فشل المسح: {0}</value>
   </data>
   <data name="Cleanup_Cleaning" xml:space="preserve">
-    <value>Cleaning...</value>
+    <value>جارٍ التنظيف...</value>
   </data>
   <data name="Cleanup_ConfirmCleanAllTitle" xml:space="preserve">
-    <value>Clean All Suspect Files</value>
+    <value>تنظيف جميع الملفات المشبوهة</value>
   </data>
   <data name="Cleanup_ConfirmCleanAllMessage" xml:space="preserve">
-    <value>This will move {0} suspect file(s) ({1}) across {2} app(s) to the backup folder.
-
-Backup location: cloud_redirect/cleanup_tab_backup/
-
-Everything can be restored from the Restore tab.
-
-Are you sure?</value>
+    <value>سيؤدي هذا إلى نقل {0} ملف (ملفات) مشبوهة ({1}) عبر {2} تطبيق (تطبيقات) إلى مجلد النسخ الاحتياطية.\n\nموقع النسخ الاحتياطية: cloud_redirect/cleanup_tab_backup/\n\nيمكن استعادة كل شيء من علامة التبويب &apos;استعادة&apos;.\n\nهل أنت متأكد؟</value>
   </data>
   <data name="Cleanup_CleanupCompleteTitle" xml:space="preserve">
-    <value>Clean Up Complete</value>
+    <value>اكتمل التنظيف</value>
   </data>
   <data name="Cleanup_CleanupCompleteMessage" xml:space="preserve">
-    <value>Moved {0} file(s) to backup.
-You can restore them from the Restore tab if needed.</value>
+    <value>تم نقل {0} ملف (ملفات) إلى النسخة الاحتياطية.\nيمكنك استعادتها من علامة التبويب &apos;استعادة&apos; إذا لزم الأمر.</value>
   </data>
   <data name="Cleanup_CleanupFailedTitle" xml:space="preserve">
-    <value>Clean Up Failed</value>
+    <value>فشل التنظيف</value>
   </data>
   <data name="Cleanup_CleanedBannerFormat" xml:space="preserve">
-    <value>Cleaned {0} file(s) to backup.</value>
+    <value>تم تنظيف {0} ملف (ملفات) إلى النسخة الاحتياطية.</value>
   </data>
   <data name="Cleanup_BackToScan" xml:space="preserve">
-    <value>Back to Scan</value>
+    <value>العودة إلى المسح</value>
   </data>
   <data name="Cleanup_NoBackupsFound" xml:space="preserve">
-    <value>No backups found.</value>
+    <value>لم يتم العثور على نسخ احتياطية.</value>
   </data>
   <data name="Cleanup_BackupCountFormat" xml:space="preserve">
-    <value>{0} backup(s) found</value>
+    <value>تم العثور على {0} نسخة احتياطية</value>
   </data>
   <data name="Cleanup_FailedLoadBackups" xml:space="preserve">
-    <value>Failed to load backups: {0}</value>
+    <value>فشل تحميل النسخ الاحتياطية: {0}</value>
   </data>
   <data name="Cleanup_RestoreFromBackupTitle" xml:space="preserve">
-    <value>Restore from Backup</value>
+    <value>استعادة من النسخة الاحتياطية</value>
   </data>
   <data name="Cleanup_RestoreConfirmMessage" xml:space="preserve">
-    <value>This will copy files from the backup at {0} back to their original locations.
-
-Account: {1}
-Files: {2}
-Apps: {3}
-
-Existing files at original locations will be SKIPPED.
-The backup itself is never modified or deleted.
-
-Continue?</value>
+    <value>سيؤدي هذا إلى نسخ الملفات من النسخة الاحتياطية في {0} إلى مواقعها الأصلية.\n\nالحساب: {1}\nالملفات: {2}\nالتطبيقات: {3}\n\nالملفات الموجودة في المواقع الأصلية سيتم تخطيها.\nالنسخة الاحتياطية نفسها لا يتم تعديلها أو حذفها أبداً.\n\nهل تريد المتابعة؟</value>
   </data>
   <data name="Cleanup_RestoreCompleteTitle" xml:space="preserve">
-    <value>Restore Complete</value>
+    <value>اكتملت الاستعادة</value>
   </data>
   <data name="Cleanup_RestoredFormat" xml:space="preserve">
-    <value>Restored {0} file(s), {1} remotecache(s).</value>
+    <value>تمت استعادة {0} ملف (ملفات)، {1} ذاكرة تخزين مؤقت عن بُعد.</value>
   </data>
   <data name="Cleanup_SkippedFormat" xml:space="preserve">
-    <value>
-Skipped {0} file(s) (already exist at original location).</value>
+    <value>\nتم تخطي {0} ملف (ملفات) (موجودة بالفعل في الموقع الأصلي).</value>
   </data>
   <data name="Cleanup_ErrorsFormat" xml:space="preserve">
-    <value>
-
-{0} error(s) occurred:
-{1}</value>
+    <value>\n\nحدث {0} خطأ (أخطاء):\n{1}</value>
   </data>
   <data name="Cleanup_RestoreFailedTitle" xml:space="preserve">
-    <value>Restore Failed</value>
+    <value>فشلت الاستعادة</value>
   </data>
   <data name="Cleanup_UndoFailedTitle" xml:space="preserve">
-    <value>Undo Failed</value>
+    <value>فشل التراجع</value>
   </data>
   <data name="Cleanup_UndoSteamNotFound" xml:space="preserve">
-    <value>Steam not found.</value>
+    <value>لم يتم العثور على Steam.</value>
   </data>
   <data name="Cleanup_UndoNoBackupFound" xml:space="preserve">
-    <value>Could not find the backup from the last clean up. Use Restore from Backup to find it manually.</value>
+    <value>تعذر العثور على النسخة الاحتياطية من آخر عملية تنظيف. استخدم &apos;استعادة من النسخة الاحتياطية&apos; للعثور عليها يدوياً.</value>
   </data>
   <data name="Cleanup_UndoCompleteTitle" xml:space="preserve">
-    <value>Undo Complete</value>
+    <value>اكتمل التراجع</value>
   </data>
 
   <!-- Cleanup file classification badges -->
   <data name="Cleanup_Badge_CrossApp" xml:space="preserve">
-    <value>cross-app</value>
+    <value>عبر التطبيقات</value>
   </data>
   <data name="Cleanup_Badge_WrongAppId" xml:space="preserve">
-    <value>wrong appid</value>
+    <value>معرف تطبيق خاطئ</value>
   </data>
   <data name="Cleanup_Badge_Mangled" xml:space="preserve">
-    <value>mangled</value>
+    <value>مشوه</value>
   </data>
   <data name="Cleanup_Badge_Orphan" xml:space="preserve">
-    <value>orphan</value>
+    <value>يتيم</value>
   </data>
   <data name="Cleanup_Badge_Legit" xml:space="preserve">
-    <value>legit</value>
+    <value>شرعي</value>
   </data>
   <data name="Cleanup_Badge_Unknown" xml:space="preserve">
-    <value>unknown</value>
+    <value>غير معروف</value>
   </data>
 
   <!-- Cleanup file list -->
   <data name="Cleanup_SuspectFiles" xml:space="preserve">
-    <value>Suspect Files</value>
+    <value>الملفات المشبوهة</value>
   </data>
   <data name="Cleanup_Unknown" xml:space="preserve">
-    <value>Unknown</value>
+    <value>غير معروف</value>
   </data>
   <data name="Cleanup_Legitimate" xml:space="preserve">
-    <value>Legitimate</value>
+    <value>شرعي</value>
   </data>
   <data name="Cleanup_GroupHeaderFormat" xml:space="preserve">
     <value>{0} ({1})</value>
   </data>
   <data name="Cleanup_Clean" xml:space="preserve">
-    <value>clean</value>
+    <value>نظيف</value>
   </data>
   <data name="Cleanup_Suspect" xml:space="preserve">
-    <value>{0} suspect</value>
+    <value>{0} مشبوه</value>
   </data>
   <data name="Cleanup_FilesCount" xml:space="preserve">
-    <value>{0} files</value>
+    <value>{0} ملف</value>
   </data>
   <data name="Cleanup_ReviewFiles" xml:space="preserve">
-    <value>Review Files</value>
+    <value>مراجعة الملفات</value>
   </data>
   <data name="Cleanup_ViewFiles" xml:space="preserve">
-    <value>View Files</value>
+    <value>عرض الملفات</value>
   </data>
   <data name="Cleanup_Collapse" xml:space="preserve">
-    <value>Collapse</value>
+    <value>طي</value>
   </data>
   <data name="Cleanup_SelectAllSuspect" xml:space="preserve">
-    <value>Select All Suspect</value>
+    <value>تحديد كل المشبوه</value>
   </data>
   <data name="Cleanup_DeselectAll" xml:space="preserve">
-    <value>Deselect All</value>
+    <value>إلغاء تحديد الكل</value>
   </data>
   <data name="Cleanup_CleanSelected" xml:space="preserve">
-    <value>Clean Selected</value>
+    <value>تنظيف المحدد</value>
   </data>
   <data name="Cleanup_NothingSelectedTitle" xml:space="preserve">
-    <value>Nothing Selected</value>
+    <value>لم يتم تحديد شيء</value>
   </data>
   <data name="Cleanup_NothingSelectedMessage" xml:space="preserve">
-    <value>Select files to remove by checking the boxes.</value>
+    <value>اختر الملفات المراد إزالتها عن طريق تحديد المربعات.</value>
   </data>
   <data name="Cleanup_ConfirmCleanupTitle" xml:space="preserve">
-    <value>Confirm Clean Up</value>
+    <value>تأكيد التنظيف</value>
   </data>
   <data name="Cleanup_ConfirmCleanupMessage" xml:space="preserve">
-    <value>This will move {0} file(s) ({1}) to the backup folder.
-
-Backup location: cloud_redirect/cleanup_tab_backup/{2}/
-
-Files can be restored from the Restore tab. Continue?</value>
+    <value>سيؤدي هذا إلى نقل {0} ملف (ملفات) ({1}) إلى مجلد النسخ الاحتياطية.\n\nموقع النسخ الاحتياطية: cloud_redirect/cleanup_tab_backup/{2}/\n\nيمكن استعادة الملفات من علامة التبويب &apos;استعادة&apos;. هل تريد المتابعة؟</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- SettingsPage XAML                                                  -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_Title" xml:space="preserve">
-    <value>Settings</value>
+    <value>الإعدادات</value>
   </data>
   <data name="Settings_Updates" xml:space="preserve">
-    <value>Updates</value>
+    <value>التحديثات</value>
   </data>
   <data name="Settings_CheckForUpdates" xml:space="preserve">
-    <value>Check for Updates</value>
+    <value>التحقق من وجود تحديثات</value>
   </data>
   <data name="Settings_CheckForUpdatesHint" xml:space="preserve">
-    <value>Click to check for a newer version.</value>
+    <value>انقر للتحقق من وجود إصدار أحدث.</value>
   </data>
   <data name="Settings_Check" xml:space="preserve">
-    <value>Check</value>
+    <value>فحص</value>
   </data>
   <data name="Settings_Download" xml:space="preserve">
-    <value>Download</value>
+    <value>تنزيل</value>
   </data>
   <data name="Settings_DangerZone" xml:space="preserve">
-    <value>Danger Zone</value>
+    <value>منطقة الخطر</value>
   </data>
   <data name="Settings_ResetCacheTitle" xml:space="preserve">
-    <value>Reset Local CloudRedirect Cache</value>
+    <value>إعادة تعيين ذاكرة التخزين المؤقت المحلية لـ CloudRedirect</value>
   </data>
   <data name="Settings_ResetCacheDescription" xml:space="preserve">
-    <value>Deletes CloudRedirect local cache. This only removes the cache and forces the cloud provider to resync.</value>
+    <value>يحذف ذاكرة التخزين المؤقت المحلية لـ CloudRedirect. هذا يزيل فقط ذاكرة التخزين المؤقت ويجبر موفر الخدمة السحابية على إعادة المزامنة.</value>
   </data>
   <data name="Settings_Reset" xml:space="preserve">
-    <value>Reset</value>
+    <value>إعادة تعيين</value>
   </data>
   <data name="Settings_SwitchMode" xml:space="preserve">
-    <value>Switch Mode</value>
+    <value>تبديل الوضع</value>
   </data>
   <data name="Settings_SwitchModeTitle" xml:space="preserve">
-    <value>App Mode</value>
+    <value>وضع التطبيق</value>
   </data>
   <data name="Settings_SwitchModeHint" xml:space="preserve">
-    <value>Choose between ST Fixer (core fixes only) and Cloud Redirect (adds cloud save redirection).</value>
+    <value>اختر بين ST Fixer (إصلاحات أساسية فقط) و Cloud Redirect (يضيف إعادة توجيه الحفظ السحابي).</value>
   </data>
   <data name="Settings_ModeStFixer" xml:space="preserve">
     <value>ST Fixer</value>
@@ -1422,16 +1282,16 @@ Files can be restored from the Restore tab. Continue?</value>
     <value>Cloud Redirect</value>
   </data>
   <data name="Settings_ModeThirdParty" xml:space="preserve">
-    <value>Third-Party Client</value>
+    <value>عميل خارجي</value>
   </data>
   <data name="Settings_About" xml:space="preserve">
-    <value>About</value>
+    <value>حول</value>
   </data>
   <data name="Settings_CloudRedirect" xml:space="preserve">
     <value>CloudRedirect</value>
   </data>
   <data name="Settings_AboutDescription" xml:space="preserve">
-    <value>Cloud saves for non-owned Steam games</value>
+    <value>حفظ سحابي لألعاب Steam غير المملوكة</value>
   </data>
   <data name="Settings_GitHub" xml:space="preserve">
     <value>GitHub</value>
@@ -1442,117 +1302,115 @@ Files can be restored from the Restore tab. Continue?</value>
     <value>{0}.{1}.{2}</value>
   </data>
   <data name="Settings_Checking" xml:space="preserve">
-    <value>Checking...</value>
+    <value>جارٍ الفحص...</value>
   </data>
   <data name="Settings_ContactingGitHub" xml:space="preserve">
-    <value>Contacting GitHub...</value>
+    <value>جارٍ الاتصال بـ GitHub...</value>
   </data>
   <data name="Settings_UpdateAvailableFormat" xml:space="preserve">
-    <value>Update Available: {0}</value>
+    <value>تحديث متاح: {0}</value>
   </data>
   <data name="Settings_NewerVersionAvailable" xml:space="preserve">
-    <value>A newer version is available. You are running v{0}.</value>
+    <value>إصدار أحدث متاح. أنت تستخدم الإصدار v{0}.</value>
   </data>
   <data name="Settings_UpToDate" xml:space="preserve">
-    <value>Up to Date</value>
+    <value>مُحدّث</value>
   </data>
   <data name="Settings_LatestVersionFormat" xml:space="preserve">
-    <value>You are running the latest version (v{0}).</value>
+    <value>أنت تستخدم أحدث إصدار (v{0}).</value>
   </data>
   <data name="Settings_LatestReleaseFormat" xml:space="preserve">
-    <value>Latest Release: {0}</value>
+    <value>أحدث إصدار: {0}</value>
   </data>
   <data name="Settings_CouldNotCompare" xml:space="preserve">
-    <value>Could not compare versions automatically.</value>
+    <value>تعذرت مقارنة الإصدارات تلقائياً.</value>
   </data>
   <data name="Settings_FailedToCheck" xml:space="preserve">
-    <value>Failed to check: {0}</value>
+    <value>فشل الفحص: {0}</value>
   </data>
   <data name="Settings_ConfirmResetTitle" xml:space="preserve">
-    <value>Confirm Reset</value>
+    <value>تأكيد إعادة التعيين</value>
   </data>
   <data name="Settings_ConfirmResetMessage" xml:space="preserve">
-    <value>This will delete the CloudRedirect local cache and force the cloud provider to resync.
-
-Are you sure?</value>
+    <value>سيؤدي هذا إلى حذف ذاكرة التخزين المؤقت المحلية لـ CloudRedirect وإجبار موفر الخدمة السحابية على إعادة المزامنة.\n\nهل أنت متأكد؟</value>
   </data>
   <data name="Settings_Done" xml:space="preserve">
-    <value>Done</value>
+    <value>تم</value>
   </data>
   <data name="Settings_ResetDoneMessage" xml:space="preserve">
-    <value>Local cache has been reset. The cloud provider will resync on next launch.</value>
+    <value>تم إعادة تعيين ذاكرة التخزين المؤقت المحلية. سيعيد موفر الخدمة السحابية المزامنة عند التشغيل التالي.</value>
   </data>
   <data name="Settings_FailedReset" xml:space="preserve">
-    <value>Failed to reset: {0}</value>
+    <value>فشل إعادة التعيين: {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- DisclaimerWindow XAML                                              -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Disclaimer_WindowTitle" xml:space="preserve">
-    <value>Change Mode?</value>
+    <value>تغيير الوضع؟</value>
   </data>
   <data name="Disclaimer_Heading" xml:space="preserve">
-    <value>Life is about choices.</value>
+    <value>الحياة عبارة عن خيارات.</value>
   </data>
   <data name="Disclaimer_Intro" xml:space="preserve">
-    <value>There used to be a scary screen here. That screen is gone now. Life is about choices. I mean, life is really about other people but that's a bit heavy for a warning screen. A former warning screen, even.</value>
+    <value>كانت هناك شاشة مخيفة هنا. تلك الشاشة قد ولت الآن. الحياة عبارة عن خيارات. أعني، الحياة حقاً تتعلق بالأشخاص الآخرين، لكن هذا ثقيل بعض الشيء لشاشة تحذير. حتى أنها كانت شاشة تحذير سابقة.</value>
   </data>
   <data name="Disclaimer_HowItWorks" xml:space="preserve">
-    <value>Cloud Redirect does very silly things that results in Steam Cloud operations being redirected towards a provider of your choice. If that provider is Google Drive specifically, you have access to Google Drive file versioning. You can pull down older versions of saves.</value>
+    <value>يقوم Cloud Redirect بأشياء سخيفة جداً تؤدي إلى إعادة توجيه عمليات Steam Cloud نحو موفر الخدمة الذي تختاره. إذا كان هذا الموفر هو Google Drive تحديداً، فلديك إمكانية الوصول إلى إصدارات الملفات في Google Drive. يمكنك سحب الإصدارات الأقدم من الحفظ.</value>
   </data>
   <data name="Disclaimer_TrackRecord" xml:space="preserve">
-    <value>In practice, this makes Cloud Redirect mode very low risk. I've had maybe...three? reported incidents of data loss in a release build ever. Two were in extremely early versions and I was able to recover the data for the users. One was more recent, caused by a component that does not exist anymore and a network failure at the worst possible time &amp; was not reported to me until days later, resulted in an hour of lost progress. I would have been able to recover the data, but the user progressed past that point before I was sent logs.</value>
+    <value>عملياً، هذا يجعل وضع Cloud Redirect منخفض المخاطر جداً. ربما كان لدي... ثلاثة؟ حوادث موثقة لفقدان البيانات في إصدارات الإصدار. اثنان كانا في إصدارات مبكرة جداً وتمكنت من استعادة البيانات للمستخدمين. واحد كان أكثر حداثة، سببه مكون لم يعد موجوداً وفشل في الشبكة في أسوأ وقت ممكن ولم يتم الإبلاغ عنه لي إلا بعد أيام، مما أدى إلى فقدان ساعة من التقدم. كنت سأتمكن من استعادة البيانات، لكن المستخدم تخطى تلك النقطة قبل أن يتم إرسال السجلات إلي.</value>
   </data>
   <data name="Disclaimer_ChoiceHeading" xml:space="preserve">
-    <value>Time to make a choice.</value>
+    <value>حان وقت الاختيار.</value>
   </data>
   <data name="Disclaimer_ChoiceIntegrity" xml:space="preserve">
-    <value>If you are worried about the integrity of your on disk saves most of all, this may not be the tool for you. It's been fine for me and for many others, but it may not suit you.</value>
+    <value>إذا كنت قلقاً بشأن سلامة حفظك على القرص قبل كل شيء، فقد لا تكون هذه الأداة مناسبة لك. لقد كانت جيدة بالنسبة لي وللكثيرين غيري، لكنها قد لا تناسبك.</value>
   </data>
   <data name="Disclaimer_ChoiceBackup" xml:space="preserve">
-    <value>If your failure scenario is 'reinstalling Windows and forgetting to backup all my saves/hardware failure/game crashes and corrupts save', CR can help.</value>
+    <value>إذا كان سيناريو الفشل لديك هو &apos;إعادة تثبيت Windows ونسيان عمل نسخة احتياطية لجميع حفظي/فشل الأجهزة/تعطل اللعبة وإتلاف الحفظ&apos;، يمكن لـ CR المساعدة.</value>
   </data>
   <data name="Disclaimer_ChoiceMultiPC" xml:space="preserve">
-    <value>If you want to play a game across two (or more) different PCs, CR is the best way to do that. It's more reliable than anything else.</value>
+    <value>إذا كنت تريد لعب لعبة عبر جهازي كمبيوتر (أو أكثر) مختلفين، فإن CR هو أفضل طريقة للقيام بذلك. إنه أكثر موثوقية من أي شيء آخر.</value>
   </data>
   <data name="Disclaimer_Closing" xml:space="preserve">
-    <value>Make your choice. No judgement.</value>
+    <value>اختر. بدون إصدار أحكام.</value>
   </data>
   <data name="Disclaimer_Cancel" xml:space="preserve">
-    <value>Not for me</value>
+    <value>ليس لي</value>
   </data>
   <data name="Disclaimer_AcceptButton" xml:space="preserve">
-    <value>Enable Cloud Redirect Mode?</value>
+    <value>تفعيل وضع إعادة التوجيه السحابي؟</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Dialog.cs                                                          -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Dialog_OK" xml:space="preserve">
-    <value>OK</value>
+    <value>موافق</value>
   </data>
   <data name="Dialog_Yes" xml:space="preserve">
-    <value>Yes</value>
+    <value>نعم</value>
   </data>
   <data name="Dialog_No" xml:space="preserve">
-    <value>No</value>
+    <value>لا</value>
   </data>
   <data name="Dialog_YesCountdownFormat" xml:space="preserve">
-    <value>Yes ({0})</value>
+    <value>نعم ({0})</value>
   </data>
   <data name="Dialog_YesDeleteEverything" xml:space="preserve">
-    <value>Yes - DELETE EVERYTHING</value>
+    <value>نعم - احذف كل شيء</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- SteamDetector.cs                                                   -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Steam_IsRunningTitle" xml:space="preserve">
-    <value>Steam Is Running</value>
+    <value>Steam قيد التشغيل</value>
   </data>
   <data name="Steam_IsRunningMessage" xml:space="preserve">
-    <value>Steam must be closed before continuing. Please close Steam and try again.</value>
+    <value>يجب إغلاق Steam قبل المتابعة. يرجى إغلاق Steam والمحاولة مرة أخرى.</value>
   </data>
 
   <!-- CloudConfig.DisplayName -->
@@ -1563,124 +1421,123 @@ Are you sure?</value>
     <value>OneDrive</value>
   </data>
   <data name="Provider_FolderNetworkDrive" xml:space="preserve">
-    <value>Folder / Network Drive</value>
+    <value>مجلد / محرك أقراص شبكة</value>
   </data>
   <data name="Provider_LocalOnly" xml:space="preserve">
-    <value>Local only</value>
+    <value>محلي فقط</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- BackupListBuilder.cs                                               -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Backup_UnknownApp" xml:space="preserve">
-    <value>Unknown App</value>
+    <value>تطبيق غير معروف</value>
   </data>
   <data name="Backup_AppIdFormat" xml:space="preserve">
-    <value>AppID {0}</value>
+    <value>معرف التطبيق {0}</value>
   </data>
   <data name="Backup_Legacy" xml:space="preserve">
-    <value>legacy</value>
+    <value>قديم</value>
   </data>
   <data name="Backup_Recent" xml:space="preserve">
-    <value>recent</value>
+    <value>حديث</value>
   </data>
   <data name="Backup_FileCountFormat" xml:space="preserve">
-    <value>{0} file(s)</value>
+    <value>{0} ملف (ملفات)</value>
   </data>
   <data name="Backup_OperationsFormat" xml:space="preserve">
-    <value>{0} op(s)</value>
+    <value>{0} عملية (عمليات)</value>
   </data>
   <data name="Backup_OtherAppsFormat" xml:space="preserve">
-    <value>(+ {0} other app{1})</value>
+    <value>(+ {0} تطبيق آخر)</value>
   </data>
   <data name="Backup_Preview" xml:space="preserve">
-    <value>Preview</value>
+    <value>معاينة</value>
   </data>
   <data name="Backup_HidePreview" xml:space="preserve">
-    <value>Hide Preview</value>
+    <value>إخفاء المعاينة</value>
   </data>
   <data name="Backup_Loading" xml:space="preserve">
-    <value>Loading...</value>
+    <value>جارٍ التحميل...</value>
   </data>
   <data name="Backup_NoFilesOnDisk" xml:space="preserve">
-    <value>No backup files found on disk</value>
+    <value>لم يتم العثور على ملفات نسخ احتياطية على القرص</value>
   </data>
 
   <!-- Shared preview/restore text -->
   <data name="Preview_SummaryFormat" xml:space="preserve">
-    <value>Preview: {0} file(s) would be restored, {1} skipped (already exist), {2} remotecache(s)</value>
+    <value>المعاينة: سيتم استعادة {0} ملف (ملفات)، {1} تم تخطيها (موجودة بالفعل)، {2} ذاكرة تخزين مؤقت عن بُعد</value>
   </data>
   <data name="Preview_Failed" xml:space="preserve">
-    <value>Preview failed</value>
+    <value>فشلت المعاينة</value>
   </data>
   <data name="Preview_ErrorsHeader" xml:space="preserve">
-    <value>Errors:
-{0}</value>
+    <value>الأخطاء:\n{0}</value>
   </data>
   <data name="Preview_FailedTitle" xml:space="preserve">
-    <value>Preview Failed</value>
+    <value>فشلت المعاينة</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- EmbeddedDll.cs                                                     -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="EmbeddedDll_NotEmbedded" xml:space="preserve">
-    <value>cloud_redirect.dll is not embedded in this build</value>
+    <value>cloud_redirect.dll غير مضمن في هذا الإصدار</value>
   </data>
   <data name="EmbeddedDll_InUse" xml:space="preserve">
-    <value>cloud_redirect.dll is in use (close Steam first)</value>
+    <value>cloud_redirect.dll قيد الاستخدام (أغلق Steam أولاً)</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Common / Shared                                                    -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Common_Info" xml:space="preserve">
-    <value>Info</value>
+    <value>معلومات</value>
   </data>
   <data name="Common_Error" xml:space="preserve">
-    <value>Error</value>
+    <value>خطأ</value>
   </data>
   <data name="Common_UpdateFailed" xml:space="preserve">
-    <value>Update Failed</value>
+    <value>فشل التحديث</value>
   </data>
 
   <!-- OAuthService browser pages (user-facing HTML) -->
   <data name="OAuth_AuthSuccessTitle" xml:space="preserve">
-    <value>Authorization Successful</value>
+    <value>تم التفويض بنجاح</value>
   </data>
   <data name="OAuth_AuthSuccessBody" xml:space="preserve">
-    <value>You can close this tab and return to CloudRedirect.</value>
+    <value>يمكنك إغلاق علامة التبويب هذه والعودة إلى CloudRedirect.</value>
   </data>
   <data name="OAuth_AuthFailedTitle" xml:space="preserve">
-    <value>Authorization Failed</value>
+    <value>فشل التفويض</value>
   </data>
   <data name="OAuth_AuthFailedBody" xml:space="preserve">
-    <value>Please close this tab and try again.</value>
+    <value>يرجى إغلاق علامة التبويب هذه والمحاولة مرة أخرى.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Language Selector (SettingsPage)                                   -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_Language" xml:space="preserve">
-    <value>Language</value>
+    <value>اللغة</value>
   </data>
   <data name="Settings_LanguageHint" xml:space="preserve">
-    <value>Select your preferred language. Changes take effect after restart.</value>
+    <value>اختر لغتك المفضلة. تصبح التغييرات سارية المفعول بعد إعادة التشغيل.</value>
   </data>
   <data name="Settings_RestartRequired" xml:space="preserve">
-    <value>Restart required to change language.</value>
+    <value>إعادة التشغيل مطلوبة لتغيير اللغة.</value>
   </data>
   <data name="Settings_RestartNow" xml:space="preserve">
-    <value>Restart Now</value>
+    <value>أعد التشغيل الآن</value>
   </data>
   <data name="Settings_FailedSaveLanguage" xml:space="preserve">
-    <value>Couldn't save language preference: {0}</value>
+    <value>تعذر حفظ تفضيل اللغة: {0}</value>
   </data>
   <data name="Settings_FailedSaveSync" xml:space="preserve">
-    <value>Couldn't save sync settings: {0}</value>
+    <value>تعذر حفظ إعدادات المزامنة: {0}</value>
   </data>
   <data name="Settings_SystemDefault" xml:space="preserve">
-    <value>System Default</value>
+    <value>إعدادات النظام الافتراضية</value>
   </data>
   <data name="Settings_LanguageEnglish" xml:space="preserve">
     <value>English</value>
@@ -1698,338 +1555,337 @@ Are you sure?</value>
     <value>العربية</value>
   </data>
   <data name="Settings_Sync" xml:space="preserve">
-    <value>Sync</value>
+    <value>المزامنة</value>
   </data>
   <data name="Settings_SyncHint" xml:space="preserve">
-    <value>These settings control what data is synced between your PCs via the cloud provider. Changes take effect after restarting Steam.</value>
+    <value>تتحكم هذه الإعدادات في البيانات التي تتم مزامنتها بين أجهزة الكمبيوتر الخاصة بك عبر موفر الخدمة السحابية. تصبح التغييرات سارية المفعول بعد إعادة تشغيل Steam.</value>
   </data>
   <data name="Settings_SyncAchievements" xml:space="preserve">
-    <value>Sync Achievements</value>
+    <value>مزامنة الإنجازات</value>
   </data>
   <data name="Settings_SyncAchievementsHint" xml:space="preserve">
-    <value>Upload and merge achievement progress for lua apps across PCs.</value>
+    <value>رفع ودمج تقدم الإنجازات لتطبيقات lua عبر أجهزة الكمبيوتر.</value>
   </data>
   <data name="Settings_SyncPlaytime" xml:space="preserve">
-    <value>Sync Playtime</value>
+    <value>مزامنة وقت اللعب</value>
   </data>
   <data name="Settings_SyncPlaytimeHint" xml:space="preserve">
-    <value>Upload and merge playtime data for lua apps across PCs.</value>
+    <value>رفع ودمج بيانات وقت اللعب لتطبيقات lua عبر أجهزة الكمبيوتر.</value>
   </data>
   <data name="CloudProvider_UploadInFlight" xml:space="preserve">
-    <value>Concurrent Upload Size</value>
+    <value>حجم الرفع المتزامن</value>
   </data>
   <data name="CloudProvider_UploadInFlightHint" xml:space="preserve">
-    <value>Controls the maximum file size of concurrent uploads. Increasing WILL NOT speed up loads, but increasing it can make multiple large saves fail to upload. Changes are not recommended. Only change if you know what you are doing.</value>
+    <value>يتحكم في الحجم الأقصى للملفات للرفع المتزامن. الزيادة لن تسرّع التحميل، لكنها قد تتسبب في فشل رفع ملفات حفظ كبيرة متعددة. لا يُنصح بالتغيير. غيّر فقط إذا كنت تعرف ما تفعله.</value>
   </data>
   <data name="CloudProvider_UploadInFlightValue" xml:space="preserve">
-    <value>{0} MB</value>
+    <value>{0} ميغابايت</value>
   </data>
   <data name="CloudProvider_UploadInFlightConservative" xml:space="preserve">
-    <value>Safe (24)</value>
+    <value>آمن (24)</value>
   </data>
   <data name="CloudProvider_UploadInFlightBalanced" xml:space="preserve">
-    <value>Balanced (44)</value>
+    <value>متوازن (44)</value>
   </data>
   <data name="CloudProvider_UploadInFlightAggressive" xml:space="preserve">
-    <value>Aggressive (64)</value>
+    <value>عدواني (64)</value>
   </data>
   <data name="Settings_SyncLuas" xml:space="preserve">
-    <value>Sync Lua Files</value>
+    <value>مزامنة ملفات Lua</value>
   </data>
   <data name="Settings_SyncLuasHint" xml:space="preserve">
-    <value>Sync lua files themselves between PCs so you don't have to install them again.</value>
+    <value>مزامنة ملفات lua نفسها بين أجهزة الكمبيوتر حتى لا تضطر إلى تثبيتها مرة أخرى.</value>
   </data>
   <data name="Settings_AutoUpdateDll" xml:space="preserve">
-    <value>Auto-Update DLL</value>
+    <value>التحديث التلقائي لـ DLL</value>
   </data>
   <data name="Settings_AutoUpdateDllHint" xml:space="preserve">
-    <value>Automatically check for and install newer versions of the CloudRedirect DLL when Steam launches. The update takes effect on the next Steam restart.</value>
+    <value>التحقق تلقائياً وتثبيت الإصدارات الأحدث من CloudRedirect DLL عند تشغيل Steam. يصبح التحديث سارياً عند إعادة تشغيل Steam التالية.</value>
   </data>
   <data name="Settings_Extra" xml:space="preserve">
-    <value>Quality of Life</value>
+    <value>ميزات تحسين تجربة المستخدم</value>
   </data>
   <data name="Settings_ExtraHint" xml:space="preserve">
-    <value>Optional extras that aren't part of cloud sync.</value>
+    <value>إضافات اختيارية ليست جزءاً من المزامنة السحابية.</value>
   </data>
   <data name="Settings_ShowNonSteamGame" xml:space="preserve">
-    <value>Show Lua Game in Status</value>
+    <value>إظهار لعبة Lua في الحالة</value>
   </data>
   <data name="Settings_ShowNonSteamGameHint" xml:space="preserve">
-    <value>When playing a game unlocked by a Lua, show it as your Steam status instead of appearing online but not actively in a game.</value>
+    <value>عند لعب لعبة مفتوحة بواسطة Lua، أظهرها كحالة Steam الخاصة بك بدلاً من الظهور كمتصل ولكن ليس في لعبة.</value>
   </data>
   <data name="Settings_Experimental" xml:space="preserve">
-    <value>Experimental Features</value>
+    <value>ميزات تجريبية</value>
   </data>
   <data name="Settings_ExperimentalHint" xml:space="preserve">
-    <value>PLACEHOLDER LOREM IPSUM</value>
+    <value>نص مؤقت</value>
   </data>
   <data name="Settings_GetAchievementData" xml:space="preserve">
-    <value>Make Achievements Work</value>
+    <value>اجعل الإنجازات تعمل</value>
   </data>
   <data name="Settings_GetAchievementDataHint" xml:space="preserve">
-    <value>Grab achievement data from Steam, makes achievements appear for games that ST itself does not get achievement data for.</value>
+    <value>احصل على بيانات الإنجازات من Steam، مما يجعل الإنجازات تظهر للألعاب التي لا يحصل ST نفسه على بيانات إنجازات لها.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Cloud Redirect Toggle                                               -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_CloudRedirectEnabled" xml:space="preserve">
-    <value>Enable Cloud Save Redirection</value>
+    <value>تفعيل إعادة توجيه الحفظ السحابي</value>
   </data>
   <data name="Settings_CloudRedirectEnabledHint" xml:space="preserve">
-    <value>When enabled, cloud saves for lua apps are intercepted and stored locally (and optionally synced to your cloud provider). When disabled, only manifest pinning and patches are active. Changes take effect after restarting Steam.</value>
+    <value>عند التفعيل، يتم اعتراض الحفظ السحابي لتطبيقات lua وتخزينه محلياً (ومزامنته اختيارياً مع موفر الخدمة السحابية الخاص بك). عند التعطيل، يكون تثبيت الـ Manifest والإصلاحات فقط نشطة. تصبح التغييرات سارية المفعول بعد إعادة تشغيل Steam.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Manifest Pinning                                                    -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_ManifestPinning" xml:space="preserve">
-    <value>Manifest Pinning</value>
+    <value>تثبيت الـ Manifest</value>
   </data>
   <data name="Settings_ManifestPinningHint" xml:space="preserve">
-    <value>Control whether lua apps can be pinned to specific versions. Per-app pins can be configured in the config file at the Steam folder. Changes take effect after restarting Steam.</value>
+    <value>التحكم فيما إذا كان يمكن تثبيت تطبيقات lua على إصدارات محددة. يمكن إعداد التثبيت لكل تطبيق في ملف الإعدادات في مجلد Steam. تصبح التغييرات سارية المفعول بعد إعادة تشغيل Steam.</value>
   </data>
   <data name="Settings_ManifestPinningEnabled" xml:space="preserve">
-    <value>Enable Manifest Pinning</value>
+    <value>تفعيل تثبيت الـ Manifest</value>
   </data>
   <data name="Settings_ManifestPinningEnabledHint" xml:space="preserve">
-    <value>When enabled, lua apps can be locked to specific versions.</value>
+    <value>عند التفعيل، يمكن قفل تطبيقات lua على إصدارات محددة.</value>
   </data>
   <data name="Settings_AutoComment" xml:space="preserve">
-    <value>Auto Comment SetManifestID</value>
+    <value>التعليق التلقائي على SetManifestID</value>
   </data>
   <data name="Settings_AutoCommentHint" xml:space="preserve">
-    <value>When enabled, the SetManifestID specified in the lua will be treated as if it were commented out. If disabled, the SetManifestID will be respected, meaning your game will be locked to the version specified in the lua. This setting never modifies lua files on disk.</value>
+    <value>عند التفعيل، سيتم التعامل مع SetManifestID المحدد في lua كما لو كان معلقاً. إذا تم التعطيل، سيتم احترام SetManifestID، مما يعني أن لعبتك ستُقفل على الإصدار المحدد في lua. هذا الإعداد لا يعدل أبداً ملفات lua على القرص.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Per-app Manifest Pins                                               -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Pin_PerAppTitle" xml:space="preserve">
-    <value>Lua apps</value>
+    <value>تطبيقات Lua</value>
   </data>
   <data name="Pin_PerAppHint" xml:space="preserve">
-    <value>These are your lua games/apps. Enable the app below to pin it to the version specified in the lua. When auto comment is on, only apps enabled here will be pinned. Changes take effect after restarting Steam.</value>
+    <value>هذه هي ألعاب/تطبيقات lua الخاصة بك. فعّل التطبيق أدناه لتثبيته على الإصدار المحدد في lua. عندما يكون التعليق التلقائي مفعلاً، سيتم تثبيت التطبيقات المفعّلة هنا فقط. تصبح التغييرات سارية المفعول بعد إعادة تشغيل Steam.</value>
   </data>
   <data name="Pin_AppId" xml:space="preserve">
-    <value>App ID</value>
+    <value>معرف التطبيق</value>
   </data>
   <data name="Pin_DepotId" xml:space="preserve">
-    <value>Depot ID</value>
+    <value>معرف المستودع</value>
   </data>
   <data name="Pin_ManifestId" xml:space="preserve">
-    <value>Manifest ID</value>
+    <value>معرف الـ Manifest</value>
   </data>
   <data name="Pin_Add" xml:space="preserve">
-    <value>Add</value>
+    <value>إضافة</value>
   </data>
   <data name="Pin_Remove" xml:space="preserve">
-    <value>Remove</value>
+    <value>إزالة</value>
   </data>
   <data name="Pin_NoEntries" xml:space="preserve">
-    <value>No lua files with setManifestid found.</value>
+    <value>لم يتم العثور على ملفات lua تحتوي على setManifestid.</value>
   </data>
   <data name="Pin_AppFallbackName" xml:space="preserve">
-    <value>App {0}</value>
+    <value>التطبيق {0}</value>
   </data>
   <data name="Pin_FailedSavePinConfig" xml:space="preserve">
-    <value>Couldn't save pin configuration: {0}</value>
+    <value>تعذر حفظ إعدادات التثبيت: {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Search                                                              -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Search_Placeholder" xml:space="preserve">
-    <value>Search by name or app ID...</value>
+    <value>ابحث بالاسم أو معرف التطبيق...</value>
   </data>
 
   <!-- ═══════════════════════ Parental Controls ═════════════════════════ -->
   <data name="Settings_Parental" xml:space="preserve">
-    <value>Steam Family</value>
+    <value>العائلة (Steam Family)</value>
   </data>
   <data name="Settings_ParentalHint" xml:space="preserve">
-    <value>Disable Steam Family restrictions</value>
+    <value>تعطيل قيود العائلة (Steam Family)</value>
   </data>
   <data name="Settings_ParentalIgnorePlaytime" xml:space="preserve">
-    <value>Ignore Playtime Restrictions</value>
+    <value>تجاهل قيود وقت اللعب</value>
   </data>
   <data name="Settings_ParentalIgnorePlaytimeHint" xml:space="preserve">
-    <value>Disables playtime restrictions. Reports time up until the set limit but not beyond it.</value>
+    <value>يعطل قيود وقت اللعب. يبلغ عن الوقت حتى الحد المحدد ولكن ليس بعده.</value>
   </data>
   <data name="Settings_ParentalBypassPlaytime" xml:space="preserve">
-    <value>Disable Family Restrictions</value>
+    <value>تعطيل قيود العائلة</value>
   </data>
   <data name="Settings_ParentalBypassPlaytimeHint" xml:space="preserve">
-    <value>No client-side family restrictions are enforced.</value>
+    <value>لا يتم تطبيق أي قيود عائلة من جانب العميل.</value>
   </data>
   <!-- ═══════════════════════ App Update Banner ═════════════════════════ -->
   <data name="AppUpdate_Skip" xml:space="preserve">
-    <value>Skip</value>
+    <value>تخطي</value>
   </data>
   <data name="AppUpdate_UpdateNow" xml:space="preserve">
-    <value>Update Now</value>
+    <value>تحديث الآن</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- News Page                                                           -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="News_WhatsNew" xml:space="preserve">
-    <value>What's new?</value>
+    <value>ما الجديد؟</value>
   </data>
   <data name="News_AchievementSync_Title" xml:space="preserve">
-    <value>Achievement and Playtime Sync</value>
+    <value>مزامنة الإنجازات ووقت اللعب</value>
   </data>
   <data name="News_AchievementSync_Description" xml:space="preserve">
-    <value>Achievements and Playtime can now be synced to the cloud! Cross-device play is supported. Works through the normal Steam systems. Enable in Settings if you are interested. Note that this feature is experimental!</value>
+    <value>يمكن الآن مزامنة الإنجازات ووقت اللعب مع السحابة! اللعب عبر الأجهزة مدعوم. يعمل من خلال أنظمة Steam العادية. فعّله في الإعدادات إذا كنت مهتماً. لاحظ أن هذه الميزة تجريبية!</value>
   </data>
   <data name="News_SchemaFetching_Title" xml:space="preserve">
-    <value>Achievement Schema Fetching for SteamTools</value>
+    <value>جلب مخطط الإنجازات لـ SteamTools</value>
   </data>
   <data name="News_SchemaFetching_Description" xml:space="preserve">
-    <value>CR can now fetch achievement schemas, so games that previously did not display achievements will now display them!</value>
+    <value>يمكن لـ CR الآن جلب مخططات الإنجازات، لذا فإن الألعاب التي لم تكن تعرض الإنجازات سابقاً ستعرضها الآن!</value>
   </data>
   <data name="News_ShowLuaGame_Title" xml:space="preserve">
-    <value>Show Lua Game in Status</value>
+    <value>إظهار لعبة Lua في الحالة</value>
   </data>
   <data name="News_ShowLuaGame_Description" xml:space="preserve">
-    <value>Lua apps can now appear in your Steam status. They appear as a non-Steam game with the correct game name. This change is on by default, disable in Settings if you don't want it.</value>
+    <value>يمكن لتطبيقات Lua الآن الظهور في حالة Steam الخاصة بك. تظهر كلعبة غير تابعة لـ Steam مع اسم اللعبة الصحيح. هذا التغيير مفعل افتراضياً، قم بتعطيله في الإعدادات إذا كنت لا تريده.</value>
   </data>
   <data name="News_760CleanUp_Title" xml:space="preserve">
-    <value>760 Clean Up</value>
+    <value>تنظيف 760</value>
   </data>
   <data name="News_760CleanUp_Description" xml:space="preserve">
-    <value>There is a new (experimental) tool that can delete the saves that SteamTools uploaded to AppID 760. Read the release notes on Github for more information.</value>
+    <value>توجد أداة جديدة (تجريبية) يمكنها حذف الحفظ الذي رفعه SteamTools إلى AppID 760. اقرأ ملاحظات الإصدار على Github لمزيد من المعلومات.</value>
   </data>
   <data name="News_AndMore_Title" xml:space="preserve">
-    <value>...and more!</value>
+    <value>...والمزيد!</value>
   </data>
   <data name="News_AndMore_Description" xml:space="preserve">
-    <value>Bug fixes, Google Drive performance improvements, preparation work for future updates, unannounced features sprinkled throughout the CR UI. Fun for all!</value>
+    <value>إصلاحات الأخطاء، تحسينات أداء Google Drive، أعمال تحضيرية للتحديثات المستقبلية، ميزات غير معلنة موزعة في جميع أنحاء واجهة CR. ممتع للجميع!</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Setup Page                                                          -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Setup_ManifestEndpoint" xml:space="preserve">
-    <value>Manifest Endpoint</value>
+    <value>نقطة نهاية الـ Manifest</value>
   </data>
   <data name="Setup_ManifestEndpoint_Description" xml:space="preserve">
-    <value>Override the manifest download URL and User-Agent used by SteamTools. Leave empty to use the default.</value>
+    <value>تجاوز رابط تحميل الـ Manifest و User-Agent المستخدمين بواسطة SteamTools. اتركه فارغاً لاستخدام الافتراضي.</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Cloud Provider & Stats                                              -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="CloudProvider_Authenticated" xml:space="preserve">
-    <value>Authenticated</value>
+    <value>تمت المصادقة</value>
   </data>
   <data name="Stats_LoadingFromCloud" xml:space="preserve">
-    <value>Loading data from cloud...</value>
+    <value>جارٍ تحميل البيانات من السحابة...</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- Settings - Quality of Life                                          -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Settings_AutoUpdate" xml:space="preserve">
-    <value>Auto Update</value>
+    <value>التحديث التلقائي</value>
   </data>
   <data name="Settings_AutoUpdate_Description" xml:space="preserve">
-    <value>Automatically download latest version of the Cloud Redirect DLL on Steam startup</value>
+    <value>تنزيل أحدث إصدار من Cloud Redirect DLL تلقائياً عند تشغيل Steam</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- 760 Clean Up Page                                                   -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="Cloud760_Title" xml:space="preserve">
-    <value>760 Clean Up</value>
+    <value>تنظيف 760</value>
   </data>
   <data name="Cloud760_Description" xml:space="preserve">
-    <value>View and delete the saves SteamTools wrote to 760 (Steam Screenshots). This will stop SteamTools from redownloading those saves when run without CloudRedirect patches, preventing SteamTools from contaminating the userdata of each injected game.</value>
+    <value>عرض وحذف الحفظ الذي كتبه SteamTools إلى 760 (لقطات شاشة Steam). سيؤدي هذا إلى منع SteamTools من إعادة تنزيل هذا الحفظ عند تشغيله بدون إصلاحات CloudRedirect، مما يمنع SteamTools من تلويث بيانات المستخدم لكل لعبة محقونة.</value>
   </data>
   <data name="Cloud760_Connect" xml:space="preserve">
-    <value>Connect</value>
+    <value>اتصال</value>
   </data>
   <data name="Cloud760_Refresh" xml:space="preserve">
-    <value>Refresh</value>
+    <value>تحديث</value>
   </data>
   <data name="Cloud760_NoFilesYet" xml:space="preserve">
-    <value>No files yet</value>
+    <value>لا توجد ملفات بعد</value>
   </data>
   <data name="Cloud760_NoFilesYet_Description" xml:space="preserve">
-    <value>Connect to load your AppID 760 cloud files. If nothing shows up, open the Steam console, run </value>
+    <value>اتصل لتحميل ملفاتك السحابية لـ AppID 760. إذا لم يظهر شيء، افتح وحدة تحكم Steam، قم بتشغيل </value>
   </data>
   <data name="Cloud760_ThenRefresh" xml:space="preserve">
-    <value>, then Refresh.</value>
+    <value>، ثم حدّث.</value>
   </data>
   <data name="Cloud760_OpenConsole" xml:space="preserve">
-    <value>Open Console</value>
+    <value>فتح وحدة التحكم</value>
   </data>
   <data name="Cloud760_CopyCommand" xml:space="preserve">
-    <value>Copy Command</value>
+    <value>نسخ الأمر</value>
   </data>
   <data name="Cloud760_SelectAll" xml:space="preserve">
-    <value>Select All</value>
+    <value>تحديد الكل</value>
   </data>
   <data name="Cloud760_Clear" xml:space="preserve">
-    <value>Clear</value>
+    <value>مسح</value>
   </data>
   <data name="Cloud760_DeleteCloudFiles" xml:space="preserve">
-    <value>Delete cloud files</value>
+    <value>حذف الملفات السحابية</value>
   </data>
   <data name="Cloud760_DeleteWarning" xml:space="preserve">
-    <value>Removing files here is permanent and cannot be undone.</value>
+    <value>إزالة الملفات هنا دائمة ولا يمكن التراجع عنها.</value>
   </data>
   <data name="Cloud760_DeleteSelected" xml:space="preserve">
-    <value>Delete Selected</value>
+    <value>حذف المحدد</value>
   </data>
   <data name="Cloud760_DeleteAll" xml:space="preserve">
-    <value>Delete All</value>
+    <value>حذف الكل</value>
   </data>
   <data name="Cloud760_FilesSelected" xml:space="preserve">
-    <value>{0} of {1} selected</value>
+    <value>{0} من {1} محدد</value>
   </data>
   <data name="Cloud760_FilesCount" xml:space="preserve">
-    <value>{0} file(s)</value>
+    <value>{0} ملف (ملفات)</value>
   </data>
   <data name="Cloud760_ConsoleOpened" xml:space="preserve">
-    <value>Steam console opened. Run 'cloud_sync_up {0}' there, then Connect.</value>
+    <value>تم فتح وحدة تحكم Steam. قم بتشغيل &apos;cloud_sync_up {0}&apos; هناك، ثم اتصل.</value>
   </data>
   <data name="Cloud760_CommandCopied" xml:space="preserve">
-    <value>Copied 'cloud_sync_up {0}' to clipboard. Paste it into the Steam console.</value>
+    <value>تم نسخ &apos;cloud_sync_up {0}&apos; إلى الحافظة. الصقه في وحدة تحكم Steam.</value>
   </data>
   <data name="Cloud760_Connecting" xml:space="preserve">
-    <value>Connecting to Steam Cloud as AppID {0}...</value>
+    <value>جارٍ الاتصال بـ Steam Cloud كـ AppID {0}...</value>
   </data>
   <data name="Cloud760_QuotaUsed" xml:space="preserve">
-    <value>{0} / {1} used</value>
+    <value>{0} / {1} مستخدم</value>
   </data>
   <data name="Cloud760_ConnectedNoFiles" xml:space="preserve">
-    <value>Connected to AppID {0}, but no cloud files were found.</value>
+    <value>متصل بـ AppID {0}، لكن لم يتم العثور على ملفات سحابية.</value>
   </data>
   <data name="Cloud760_Refreshing" xml:space="preserve">
-    <value>Refreshing...</value>
+    <value>جارٍ التحديث...</value>
   </data>
   <data name="Cloud760_LoadedFiles" xml:space="preserve">
-    <value>Loaded {0} file(s) for AppID {1}.</value>
+    <value>تم تحميل {0} ملف (ملفات) لـ AppID {1}.</value>
   </data>
   <data name="Cloud760_DeletingFiles" xml:space="preserve">
-    <value>Deleting {0} file(s)...</value>
+    <value>جارٍ حذف {0} ملف (ملفات)...</value>
   </data>
   <data name="Cloud760_DeletedFiles" xml:space="preserve">
-    <value>Deleted {0} file(s)</value>
+    <value>تم حذف {0} ملف (ملفات)</value>
   </data>
   <data name="Cloud760_DeletedFilesFailed" xml:space="preserve">
-    <value>Deleted {0} file(s), {1} failed.</value>
+    <value>تم حذف {0} ملف (ملفات)، {1} فشلت.</value>
   </data>
   <data name="Cloud760_Error" xml:space="preserve">
-    <value>Error: {0}</value>
+    <value>خطأ: {0}</value>
   </data>
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- OAuth / Authentication                                              -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="OAuth_Authenticated" xml:space="preserve">
-    <value>Authenticated.</value>
+    <value>تمت المصادقة.</value>
   </data>
 
-</root>
