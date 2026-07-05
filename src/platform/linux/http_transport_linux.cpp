@@ -30,6 +30,7 @@ typedef int CURLoption;
 #define CURLOPT_CONNECTTIMEOUT 78
 #define CURLOPT_USERAGENT      10018
 #define CURLOPT_FOLLOWLOCATION 52
+#define CURLOPT_MAXREDIRS      68
 #define CURLOPT_HEADERFUNCTION 20079
 #define CURLOPT_HEADERDATA     10029
 #define CURLINFO_RESPONSE_CODE 0x200002
@@ -160,7 +161,8 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
                                        const std::string& url, const std::string& body,
                                        const std::vector<std::string>& hdrs,
                                        long timeout, bool captureHeaders,
-                                       std::string* outLocation) {
+                                       std::string* outLocation,
+                                       bool followRedirects = false) {
     HttpUtil::HttpResp resp;
 
     if (!InitCurl()) {
@@ -197,7 +199,14 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
     g_curl.easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
     g_curl.easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
     g_curl.easy_setopt(curl, CURLOPT_USERAGENT, "CloudRedirect/1.0");
-    g_curl.easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    // Only follow redirects when the caller sends no auth header (token must
+    // never be forwarded to a redirect target). OneDrive personal chains
+    // 302s (graph -> microsoftpersonalcontent -> sharepoint CDN), so a single
+    // manual hop is not enough; WinHTTP on Windows follows the tail of the
+    // chain automatically and this mirrors that behavior.
+    g_curl.easy_setopt(curl, CURLOPT_FOLLOWLOCATION, followRedirects ? 1L : 0L);
+    if (followRedirects)
+        g_curl.easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
 
     if (captureHeaders) {
         g_curl.easy_setopt(curl, CURLOPT_HEADERFUNCTION, (void*)HeaderCallback);
@@ -277,7 +286,8 @@ public:
         std::string location;
         auto resp = CurlRequest(m_logTag, "GET", url, {}, hdrs, 30L, true, &location);
         if (resp.status >= 300 && resp.status < 400 && !location.empty())
-            return CurlRequest(m_logTag, "GET", location, {}, {}, 60L, false, nullptr);
+            return CurlRequest(m_logTag, "GET", location, {}, {}, 60L, false, nullptr,
+                               /*followRedirects=*/true);
         return resp;
     }
 
