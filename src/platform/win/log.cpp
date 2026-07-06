@@ -37,26 +37,21 @@ static void WriteRecord(const char* data, size_t len) {
     fflush(g_file);
 }
 
-// Check file size and rotate if needed (caller must hold g_mutex)
-static void RotateIfNeeded() {
+// Check file size and truncate if needed (caller must hold g_mutex)
+static void TruncateIfNeeded() {
     if (!g_file) return;
     long pos = ftell(g_file);
     if (pos < 0 || pos < MAX_LOG_SIZE) return;
 
     fclose(g_file);
 
-    // Rename current log to .old (overwrite any previous .old). Both paths
-    // route through FileUtil::Utf8ToPath so non-ASCII Steam install paths
-    // (e.g. "C:\Users\Владимир\Steam\cloud_redirect.log") rotate correctly.
+    // Delete and reopen (no old-file rotation).
     auto logPathFs = FileUtil::Utf8ToPath(g_logPath);
-    auto oldPathFs = FileUtil::Utf8ToPath(g_logPath + ".old");
-    if (!oldPathFs.empty()) _wremove(oldPathFs.c_str());
-    if (!logPathFs.empty() && !oldPathFs.empty())
-        _wrename(logPathFs.c_str(), oldPathFs.c_str());
+    if (!logPathFs.empty()) _wremove(logPathFs.c_str());
 
     g_file = OpenLog(g_logPath);
     if (g_file) {
-        const char banner[] = "=== Log rotated (previous log saved as .old) ===\n";
+        const char banner[] = "=== Log truncated (size limit reached) ===\n";
         WriteRecord(banner, sizeof(banner) - 1);
     }
 }
@@ -92,8 +87,8 @@ void Write(const char* fmt, ...) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_file) return;
 
-    RotateIfNeeded();
-    if (!g_file) return; // rotation may have failed
+    TruncateIfNeeded();
+    if (!g_file) return;
 
     // Build the full record into one buffer and emit with a single fwrite.
     char stack[STACK_BUF];

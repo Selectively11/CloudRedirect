@@ -9,6 +9,8 @@
 
 static FILE* g_logFile = nullptr;
 static std::mutex g_logMutex;
+static std::string g_logPath;
+static constexpr long MAX_LOG_SIZE = 10 * 1024 * 1024;
 
 void Log::Init()
 {
@@ -22,6 +24,7 @@ void Log::Init()
 
     char path[512];
     snprintf(path, sizeof(path), "%s/cloud_redirect.log", base.c_str());
+    g_logPath = path;
 
     g_logFile = fopen(path, "a");
     if (g_logFile) {
@@ -46,9 +49,24 @@ void Log::Shutdown()
     }
 }
 
+static void TruncateIfNeeded() {
+    if (!g_logFile) return;
+    long pos = ftell(g_logFile);
+    if (pos < 0 || pos < MAX_LOG_SIZE) return;
+    fclose(g_logFile);
+    if (!g_logPath.empty()) remove(g_logPath.c_str());
+    g_logFile = fopen(g_logPath.c_str(), "a");
+    if (g_logFile) {
+        fprintf(g_logFile, "=== Log truncated (size limit reached) ===\n");
+        fflush(g_logFile);
+    }
+}
+
 static void LogWrite(const char* level, const char* fmt, va_list args)
 {
     std::lock_guard<std::mutex> lock(g_logMutex);
+
+    TruncateIfNeeded();
 
     time_t now = time(nullptr);
     struct tm tm;
