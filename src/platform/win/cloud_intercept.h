@@ -36,6 +36,9 @@ void InstallManifestPinHook();
 void InstallReleaseStateNop();
 void InstallGamesPlayedHook();
 
+// Redirect manifest endpoint URL in the payload at runtime.
+void InstallManifestEndpointOverride();
+
 // compute payload base and set up cave replacement buffer globals
 void SetSendPktAddr(void* recvPktGlobalAddr);
 

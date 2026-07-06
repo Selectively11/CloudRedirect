@@ -346,6 +346,7 @@ static void RunAutoResolver() {
 }
 
 static std::string g_steamPath;
+static std::string g_manifestEndpoint;
 static RecvPktFn g_originalRecvPkt = nullptr;
 static void** g_recvPktSlot = nullptr;            // address of the patched RecvPkt vtable slot, for shutdown restore
 static std::atomic<void*> g_cmInterface{nullptr};  // real CCMInterface* (found via CSteamEngine)
@@ -4570,6 +4571,22 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
             LOG("[NS] WARNING: Could not resolve %%APPDATA%%, falling back to steam folder for config");
         }
     }
+    // Read manifest endpoint from settings.json (same directory as config.json).
+    {
+        std::string settingsDir = configPath.substr(0, configPath.rfind('\\') + 1);
+        std::string settingsPath = settingsDir + "settings.json";
+        std::ifstream sf(FileUtil::Utf8ToPath(settingsPath));
+        if (sf) {
+            std::string sStr((std::istreambuf_iterator<char>(sf)), {});
+            sf.close();
+            auto sj = Json::Parse(sStr);
+            if (sj["manifest_endpoint"].type == Json::Type::String)
+                g_manifestEndpoint = sj["manifest_endpoint"].str();
+            if (!g_manifestEndpoint.empty())
+                LOG("[ManifestEP] Configured: %s", g_manifestEndpoint.c_str());
+        }
+    }
+
     std::ifstream configFile(FileUtil::Utf8ToPath(configPath));
     if (configFile) {
         std::string configStr((std::istreambuf_iterator<char>(configFile)), {});
@@ -5137,6 +5154,262 @@ void InstallReleaseStateNop() {
 
     g_releaseStatePatched.store(true, std::memory_order_release);
     LOG("[RelState] Patched to return ERELEASESTATE_RELEASED (4)");
+}
+
+// ── Manifest endpoint override (runtime code patch) ────────────────────
+
+static void* g_manifestStringsPage = nullptr;
+static uint8_t* g_manifestUrlLeaAddr = nullptr;
+static uint8_t  g_manifestUrlLeaOrig[4] = {};
+static uint8_t* g_manifestP8bAddr = nullptr;
+static uint8_t  g_manifestP8bOrig[51] = {};
+static std::atomic<bool> g_manifestEndpointPatched{false};
+
+static const uint8_t kP8bSig[] = {
+    0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00,
+    0x33, 0xC9,
+    0xE8, 0x00, 0x00, 0x00, 0x00,
+    0x48, 0x8B, 0xD8,
+    0x4C, 0x8B, 0xC0,
+    0xBA, 0x27, 0x27, 0x00, 0x00,
+};
+static const uint8_t kP8bMask[] = {
+    0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF,
+    0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+
+void InstallManifestEndpointOverride() {
+    if (g_manifestEndpoint.empty()) {
+        LOG("[ManifestEP] No endpoint configured, skipping");
+        return;
+    }
+    if (!g_payloadBase) {
+        LOG("[ManifestEP] Payload base unknown, skipping");
+        return;
+    }
+
+    // Hardcoded section layout (page 0 not mapped, no PE header access).
+    static constexpr uintptr_t kTextRva   = 0x1000;
+    static constexpr size_t    kTextSize  = 0x178000;
+    static constexpr uintptr_t kRdataRva  = 0x179000;
+    static constexpr size_t    kRdataSize = 0x54000;
+
+    uintptr_t textBase = g_payloadBase + kTextRva;
+    size_t textSize = kTextSize;
+    uintptr_t rdataBase = g_payloadBase + kRdataRva;
+    size_t rdataSize = kRdataSize;
+
+    __try {
+        volatile uint8_t probe = *reinterpret_cast<uint8_t*>(textBase);
+        (void)probe;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestEP] .text base not readable at %p", (void*)textBase);
+        return;
+    }
+
+    uintptr_t p8bAddr = 0;
+    __try {
+        const auto* p = reinterpret_cast<const uint8_t*>(textBase);
+        for (size_t i = 0; i + sizeof(kP8bSig) <= textSize; ++i) {
+            bool match = true;
+            for (size_t j = 0; j < sizeof(kP8bSig); ++j) {
+                if ((p[i + j] & kP8bMask[j]) != (kP8bSig[j] & kP8bMask[j])) {
+                    match = false; break;
+                }
+            }
+            if (match) { p8bAddr = textBase + i; break; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (!p8bAddr) {
+        LOG("[ManifestEP] P8b signature not found in payload .text"); return;
+    }
+    LOG("[ManifestEP] P8b at %p (payload+0x%llX)",
+        (void*)p8bAddr, (unsigned long long)(p8bAddr - g_payloadBase));
+
+    // URL lea rdx,[rip+xx] is 355 bytes before P8b (function+108 vs +463).
+    uintptr_t urlLeaAddr = p8bAddr - 355;
+    __try {
+        if (*(uint8_t*)urlLeaAddr != 0x48 || *(uint8_t*)(urlLeaAddr + 1) != 0x8D ||
+            *(uint8_t*)(urlLeaAddr + 2) != 0x15) {
+            LOG("[ManifestEP] URL lea not found at expected offset (got %02X %02X %02X)",
+                *(uint8_t*)urlLeaAddr, *(uint8_t*)(urlLeaAddr + 1), *(uint8_t*)(urlLeaAddr + 2));
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestEP] Access violation reading URL lea at %p", (void*)urlLeaAddr);
+        return;
+    }
+
+    int32_t origUrlDisp = *(int32_t*)(urlLeaAddr + 3);
+    uintptr_t origUrlTarget = urlLeaAddr + 7 + origUrlDisp;
+    if (origUrlTarget < rdataBase || origUrlTarget >= rdataBase + rdataSize) {
+        LOG("[ManifestEP] URL lea target %p outside expected .rdata range, proceeding anyway",
+            (void*)origUrlTarget);
+    }
+    const char* origUrl = nullptr;
+    __try {
+        origUrl = reinterpret_cast<const char*>(origUrlTarget);
+        if (strncmp(origUrl, "http", 4) != 0) {
+            LOG("[ManifestEP] URL lea target doesn't start with 'http': %.32s", origUrl);
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestEP] Access violation reading URL target at %p", (void*)origUrlTarget);
+        return;
+    }
+    LOG("[ManifestEP] Original URL: %.64s", origUrl);
+
+    // Allocate a page within ±2GB for RIP-relative addressing.
+    uintptr_t allocHint = g_payloadBase;
+    g_manifestStringsPage = nullptr;
+    for (int attempt = 0; attempt < 256 && !g_manifestStringsPage; ++attempt) {
+        uintptr_t tryAddr = allocHint + (uintptr_t)attempt * 0x10000;
+        g_manifestStringsPage = VirtualAlloc((void*)tryAddr, 4096,
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    }
+    if (!g_manifestStringsPage) {
+        for (int attempt = 1; attempt < 256 && !g_manifestStringsPage; ++attempt) {
+            uintptr_t tryAddr = allocHint - (uintptr_t)attempt * 0x10000;
+            if (tryAddr < 0x10000) break;
+            g_manifestStringsPage = VirtualAlloc((void*)tryAddr, 4096,
+                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        }
+    }
+    if (!g_manifestStringsPage) {
+        LOG("[ManifestEP] VirtualAlloc failed for string page"); return;
+    }
+
+    char* urlSlot = (char*)g_manifestStringsPage;
+    char* uaSlot = (char*)g_manifestStringsPage + 512;
+    strncpy(urlSlot, g_manifestEndpoint.c_str(), 255);
+    urlSlot[255] = '\0';
+    strncpy(uaSlot, "OpenSteamTool/1.0", 63);
+    uaSlot[63] = '\0';
+
+    int64_t urlDispCheck = (int64_t)(uintptr_t)urlSlot - (int64_t)(urlLeaAddr + 7);
+    if (urlDispCheck < INT32_MIN || urlDispCheck > INT32_MAX) {
+        LOG("[ManifestEP] URL displacement out of range (%lld)", urlDispCheck);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t urlDisp = (int32_t)urlDispCheck;
+
+    // Resolve setopt target from unpatched P8b+25: mov rcx,rdi; call setopt
+    uint8_t* afterSig = (uint8_t*)(p8bAddr + 25);
+    if (afterSig[0] != 0x48 || afterSig[1] != 0x8B || afterSig[2] != 0xCF) {
+        LOG("[ManifestEP] Expected 'mov rcx,rdi' at P8b+25, got %02X %02X %02X",
+            afterSig[0], afterSig[1], afterSig[2]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    if (afterSig[3] != 0xE8) {
+        LOG("[ManifestEP] Expected 'call' at P8b+28, got %02X", afterSig[3]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t origSetoptRel = *(int32_t*)(afterSig + 4);
+    uintptr_t setoptTarget = (uintptr_t)(afterSig + 8) + origSetoptRel;
+
+    int64_t uaDispCheck = (int64_t)(uintptr_t)uaSlot - (int64_t)(p8bAddr + 7);
+    if (uaDispCheck < INT32_MIN || uaDispCheck > INT32_MAX) {
+        LOG("[ManifestEP] UA displacement out of range (%lld)", uaDispCheck);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t uaDisp = (int32_t)uaDispCheck;
+
+    int64_t setoptNewRel = (int64_t)setoptTarget - (int64_t)(p8bAddr + 20);
+    if (setoptNewRel < INT32_MIN || setoptNewRel > INT32_MAX) {
+        LOG("[ManifestEP] setopt call displacement out of range (%lld)", setoptNewRel);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+
+    // Resolve perform target from P8b+33: mov rcx,rdi; call perform
+    uint8_t* performSite = (uint8_t*)(p8bAddr + 33);
+    if (performSite[0] != 0x48 || performSite[1] != 0x8B || performSite[2] != 0xCF) {
+        LOG("[ManifestEP] Expected 'mov rcx,rdi' at P8b+33, got %02X %02X %02X",
+            performSite[0], performSite[1], performSite[2]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    if (performSite[3] != 0xE8) {
+        LOG("[ManifestEP] Expected 'call' at P8b+36, got %02X", performSite[3]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t origPerformRel = *(int32_t*)(performSite + 4);
+    uintptr_t performTarget = (uintptr_t)(p8bAddr + 41) + origPerformRel;
+
+    int64_t performNewRel = (int64_t)performTarget - (int64_t)(p8bAddr + 28);
+    if (performNewRel < INT32_MIN || performNewRel > INT32_MAX) {
+        LOG("[ManifestEP] perform call displacement out of range (%lld)", performNewRel);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+
+    // 51-byte replacement: lea r8→UA, setopt(USERAGENT), perform, mov esi eax, NOPs
+    uint8_t p8bRepl[51];
+    p8bRepl[0] = 0x4C; p8bRepl[1] = 0x8D; p8bRepl[2] = 0x05;
+    memcpy(p8bRepl + 3, &uaDisp, 4);
+    p8bRepl[7] = 0xBA; p8bRepl[8] = 0x22; p8bRepl[9] = 0x27;
+    p8bRepl[10] = 0x00; p8bRepl[11] = 0x00;
+    p8bRepl[12] = 0x48; p8bRepl[13] = 0x8B; p8bRepl[14] = 0xCF;
+    p8bRepl[15] = 0xE8;
+    int32_t setoptRel32 = (int32_t)setoptNewRel;
+    memcpy(p8bRepl + 16, &setoptRel32, 4);
+    p8bRepl[20] = 0x48; p8bRepl[21] = 0x8B; p8bRepl[22] = 0xCF;
+    p8bRepl[23] = 0xE8;
+    int32_t performRel32 = (int32_t)performNewRel;
+    memcpy(p8bRepl + 24, &performRel32, 4);
+    p8bRepl[28] = 0x8B; p8bRepl[29] = 0xF0;
+    memset(p8bRepl + 30, 0x90, 21);
+
+    g_manifestUrlLeaAddr = (uint8_t*)(urlLeaAddr + 3);
+    memcpy(g_manifestUrlLeaOrig, g_manifestUrlLeaAddr, 4);
+    DWORD oldProt;
+    if (!VirtualProtect(g_manifestUrlLeaAddr, 4, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[ManifestEP] VirtualProtect failed for URL lea (%u)", GetLastError());
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    memcpy(g_manifestUrlLeaAddr, &urlDisp, 4);
+    VirtualProtect(g_manifestUrlLeaAddr, 4, oldProt, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_manifestUrlLeaAddr, 4);
+
+    g_manifestP8bAddr = (uint8_t*)p8bAddr;
+    memcpy(g_manifestP8bOrig, g_manifestP8bAddr, 51);
+    if (!VirtualProtect(g_manifestP8bAddr, 51, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[ManifestEP] VirtualProtect failed for P8b rewrite (%u)", GetLastError());
+        DWORD tmp;
+        VirtualProtect(g_manifestUrlLeaAddr, 4, PAGE_EXECUTE_READWRITE, &tmp);
+        memcpy(g_manifestUrlLeaAddr, g_manifestUrlLeaOrig, 4);
+        VirtualProtect(g_manifestUrlLeaAddr, 4, tmp, &tmp);
+        FlushInstructionCache(GetCurrentProcess(), g_manifestUrlLeaAddr, 4);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    memcpy(g_manifestP8bAddr, p8bRepl, 51);
+    VirtualProtect(g_manifestP8bAddr, 51, oldProt, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_manifestP8bAddr, 51);
+
+    g_manifestEndpointPatched.store(true, std::memory_order_release);
+    LOG("[ManifestEP] Redirected to %s (UA: OpenSteamTool/1.0)", g_manifestEndpoint.c_str());
 }
 
 // ── BAsyncSend inline detour (GamesPlayed rewriting) ───────────────────
@@ -6550,6 +6823,27 @@ static void ShutdownImpl() {
         }
         g_basOriginal = nullptr;
         g_basOrigAddr = nullptr;
+    }
+
+    if (g_manifestEndpointPatched.load(std::memory_order_acquire)) {
+        DWORD oldProt;
+        if (g_manifestP8bAddr &&
+            VirtualProtect(g_manifestP8bAddr, 51, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            memcpy(g_manifestP8bAddr, g_manifestP8bOrig, 51);
+            VirtualProtect(g_manifestP8bAddr, 51, oldProt, &oldProt);
+            FlushInstructionCache(GetCurrentProcess(), g_manifestP8bAddr, 51);
+        }
+        if (g_manifestUrlLeaAddr &&
+            VirtualProtect(g_manifestUrlLeaAddr, 4, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            memcpy(g_manifestUrlLeaAddr, g_manifestUrlLeaOrig, 4);
+            VirtualProtect(g_manifestUrlLeaAddr, 4, oldProt, &oldProt);
+            FlushInstructionCache(GetCurrentProcess(), g_manifestUrlLeaAddr, 4);
+        }
+        if (g_manifestStringsPage) {
+            VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+            g_manifestStringsPage = nullptr;
+        }
+        g_manifestEndpointPatched.store(false, std::memory_order_release);
     }
 
     // Restore GetEffectiveReleaseState prologue

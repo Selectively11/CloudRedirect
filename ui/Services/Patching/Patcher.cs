@@ -378,8 +378,6 @@ namespace CloudRedirect.Services.Patching
             if (resolved == null)
                 return PatchState.UnknownVersion;
 
-            resolved = AppendManifestEndpointPatches(payload, resolved);
-
             var (_, applied, skipped, errors) = CheckPatches(payload, resolved);
 
             if (errors.Count > 0)
@@ -441,6 +439,19 @@ namespace CloudRedirect.Services.Patching
                 if (payload == null)
                     return result.Fail(plErr);
 
+                if (HasOldP8Patches(payload))
+                {
+                    Log("  Detected stale P8 manifest patches — redeploying clean payload..");
+                    cachePath = DeployEmbeddedPayload();
+                    if (cachePath == null)
+                        return result.Fail("Could not redeploy clean payload.");
+                    var (fresh, freshIv, freshErr) = ReadAndDecryptPayload(cachePath);
+                    if (fresh == null)
+                        return result.Fail(freshErr);
+                    payload = fresh;
+                    iv = freshIv;
+                }
+
                 var resolvedSetup = ResolveSetupPatchOffsets(payload);
                 if (resolvedSetup == null || resolvedSetup.Length == 0)
                 {
@@ -465,9 +476,6 @@ namespace CloudRedirect.Services.Patching
                     if (resolvedSetup == null || resolvedSetup.Length == 0)
                         return result.Fail("Could not identify activation patch locations in payload - unsupported version?");
                 }
-
-                // Append manifest endpoint patches if configured.
-                resolvedSetup = AppendManifestEndpointPatches(payload, resolvedSetup);
 
                 var (patchedPayload, plApplied, plSkipped, plErrors) = ApplyPatches(payload, resolvedSetup);
                 if (plErrors.Count > 0)
@@ -563,8 +571,6 @@ namespace CloudRedirect.Services.Patching
                 var resolvedSetup = ResolveSetupPatchOffsets(payload);
                 if (resolvedSetup == null)
                     return result.Fail("Could not identify patch locations in payload");
-
-                resolvedSetup = AppendManifestEndpointPatches(payload, resolvedSetup);
 
                 var (revertedPayload, plReverted, plSkipped, plErrors) = UnapplyPatches(payload, resolvedSetup);
                 if (plErrors.Count > 0)
@@ -981,6 +987,21 @@ namespace CloudRedirect.Services.Patching
                 tStart, tEnd, 0, 0, _verbose ? _log : null);
         }
 
+        // The GMRC URL "http://gmrc.wudrm.com/manifest/\0Referer" lives in .rdata.
+        // Old P8 patches overwrote this with a custom URL; if missing, stale.
+        static readonly byte[] GmrcUrlAnchor = {
+            0x68, 0x74, 0x74, 0x70, 0x3A, 0x2F, 0x2F, 0x67,  // "http://g"
+            0x6D, 0x72, 0x63, 0x2E, 0x77, 0x75, 0x64, 0x72,  // "mrc.wudr"
+            0x6D, 0x2E, 0x63, 0x6F, 0x6D, 0x2F, 0x6D, 0x61,  // "m.com/ma"
+            0x6E, 0x69, 0x66, 0x65, 0x73, 0x74, 0x2F, 0x00,  // "nifest/\0"
+            0x52, 0x65, 0x66, 0x65, 0x72, 0x65, 0x72,         // "Referer"
+        };
+
+        bool HasOldP8Patches(byte[] payload)
+        {
+            return Signatures.ScanForBytes(payload, 0, payload.Length, GmrcUrlAnchor) < 0;
+        }
+
         bool ResolvePayloadSections(byte[] payload, out PeSection[] sections,
             out int tStart, out int tEnd, out int gStart, out int gEnd)
         {
@@ -1112,52 +1133,6 @@ namespace CloudRedirect.Services.Patching
             Log("  V2 setup defs failed, trying V1 fallback...");
             return Signatures.ResolvePatternGroup(payload, Signatures.PayloadSetupDefsV1,
                 tStart, tEnd, gStart, gEnd, _verbose ? _log : null);
-        }
-
-        PatchEntry[] AppendManifestEndpointPatches(byte[] payload, PatchEntry[] existing)
-        {
-            var (ep, ua) = ReadManifestEndpointSetting();
-            if (string.IsNullOrWhiteSpace(ep) || string.IsNullOrWhiteSpace(ua))
-                return existing;
-
-            if (!ResolvePayloadSections(payload, out var sections, out int tStart, out int tEnd, out _, out _))
-                return existing;
-
-            var extra = Signatures.BuildManifestEndpointPatches(
-                payload, ep!.Trim(), ua!.Trim(),
-                tStart, tEnd, 0, payload.Length,
-                sections, _verbose ? _log : null);
-
-            if (extra == null) return existing;
-
-            var combined = new PatchEntry[existing.Length + extra.Length];
-            existing.CopyTo(combined, 0);
-            extra.CopyTo(combined, existing.Length);
-            return combined;
-        }
-
-        static (string? endpoint, string? userAgent) ReadManifestEndpointSetting()
-        {
-            try
-            {
-                var configDir = System.IO.Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "CloudRedirect");
-                var path = System.IO.Path.Combine(configDir, "settings.json");
-                if (!System.IO.File.Exists(path)) return (null, null);
-                var json = System.IO.File.ReadAllText(path);
-                using var doc = System.Text.Json.JsonDocument.Parse(json);
-                string? ep = null, ua2 = null;
-                if (doc.RootElement.TryGetProperty("manifest_endpoint", out var epVal) &&
-                    epVal.ValueKind == System.Text.Json.JsonValueKind.String)
-                    ep = epVal.GetString();
-                if (doc.RootElement.TryGetProperty("manifest_user_agent", out var uaVal) &&
-                    uaVal.ValueKind == System.Text.Json.JsonValueKind.String)
-                    ua2 = uaVal.GetString();
-                return (ep, ua2);
-            }
-            catch { }
-            return (null, null);
         }
 
         CloudRedirectResolveResult ResolveCloudRedirectPatchOffsets(byte[] payload)
@@ -1346,6 +1321,19 @@ namespace CloudRedirect.Services.Patching
                 var (payload, iv, plErr) = ReadAndDecryptPayload(cachePath);
                 if (payload == null)
                     return result.Fail(plErr);
+
+                if (HasOldP8Patches(payload))
+                {
+                    Log("  Detected stale P8 manifest patches — redeploying clean payload..");
+                    cachePath = DeployEmbeddedPayload();
+                    if (cachePath == null)
+                        return result.Fail("Could not redeploy clean payload.");
+                    var (fresh, freshIv, freshErr) = ReadAndDecryptPayload(cachePath);
+                    if (fresh == null)
+                        return result.Fail(freshErr);
+                    payload = fresh;
+                    iv = freshIv;
+                }
 
                 var resolvedPayload = ResolvePayloadPatchOffsets(payload);
                 byte[] afterP123 = payload;
