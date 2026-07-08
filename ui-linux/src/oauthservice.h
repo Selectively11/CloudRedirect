@@ -20,6 +20,7 @@ signals:
     void authSucceeded(const QString &provider);
     void authFailed(const QString &provider, const QString &error);
     void statusMessage(const QString &msg);
+    void browserFailed(const QString &url);
 
 private slots:
     void onNewConnection();

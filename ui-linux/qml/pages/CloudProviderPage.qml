@@ -56,14 +56,22 @@ Page {
         target: oauth
         function onStatusMessage(msg) {
             statusText.text = msg
+            authUrlBox.visible = false
         }
         function onAuthSucceeded(provider) {
             statusText.text = "Authentication successful!"
+            authUrlBox.visible = false
             backend.refreshStatus()
             refreshAuthState()
         }
         function onAuthFailed(provider, error) {
             statusText.text = "Error: " + error
+            authUrlBox.visible = false
+        }
+        function onBrowserFailed(url) {
+            statusText.text = "Could not open browser. Copy the URL below and paste it in your browser:"
+            authUrlField.text = url
+            authUrlBox.visible = true
         }
     }
     
@@ -255,6 +263,32 @@ Page {
                 Layout.leftMargin: 20
                 Layout.rightMargin: 20
                 opacity: 0.7
+            }
+
+            RowLayout {
+                id: authUrlBox
+                visible: false
+                Layout.fillWidth: true
+                Layout.leftMargin: 20
+                Layout.rightMargin: 20
+                spacing: 8
+
+                TextField {
+                    id: authUrlField
+                    readOnly: true
+                    selectByMouse: true
+                    Layout.fillWidth: true
+                    font.pointSize: 8
+                }
+
+                Button {
+                    text: "Copy"
+                    onClicked: {
+                        authUrlField.selectAll()
+                        authUrlField.copy()
+                        authUrlField.deselect()
+                    }
+                }
             }
 
             Item { Layout.fillHeight: true }

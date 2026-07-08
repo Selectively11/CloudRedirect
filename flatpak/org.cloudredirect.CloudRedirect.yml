@@ -20,9 +20,9 @@ finish-args:
   - --socket=fallback-x11
   - --device=dri
 
-  # DBus access for desktop integration and notifications
+  # DBus access for desktop integration
   - --talk-name=org.freedesktop.Notifications
-  # Flatpak management for self-updates
+  - --talk-name=org.freedesktop.portal.Desktop
   - --talk-name=org.freedesktop.Flatpak
 
 modules:

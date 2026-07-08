@@ -243,7 +243,10 @@ void OAuthService::startAuth(const QString &provider, const QString &tokenPath)
 
     qDebug() << "[OAuth] Auth URL:" << authUrl.toString();
     emit statusMessage("Opening browser for authorization...");
-    QDesktopServices::openUrl(authUrl);
+    if (!QDesktopServices::openUrl(authUrl)) {
+        qWarning() << "[OAuth] Failed to open browser, emitting URL for manual copy";
+        emit browserFailed(authUrl.toString());
+    }
 }
 
 void OAuthService::onNewConnection()
