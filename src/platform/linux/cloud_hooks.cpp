@@ -3,9 +3,7 @@
 #include "stats_hooks.h"
 #include "gamesplayed_hook.h"
 #include "live_playtime.h"
-#include "achievement_inject.h"
-#include "schema_fetch.h"
-#include "recvpkt_hook.h"
+
 #include "stats_store.h"
 #include "stats_handlers.h"
 #include "metadata_sync.h"
@@ -267,12 +265,7 @@ void CloudHooks::InstallGamesPlayedObserver(uintptr_t steamclientBase, size_t st
     if (LivePlaytime::Resolve(steamclientBase, steamclientSize, g_parseFromArray))
         LivePlaytime::InstallUserCapture();
 
-    AchievementInject::Resolve(steamclientBase, steamclientSize, &SerializeBodyTL);
-    SchemaFetch::Resolve(steamclientBase, steamclientSize, g_parseFromArray);
 
-    // Inbound CM observer: captures our schema-fetch 819 replies and writes the
-    // schema .bin (mirror of the Windows RecvPktMonitorHook).
-    RecvPktHook::Install(steamclientBase, steamclientSize);
 }
 
 static std::optional<CloudIntercept::RpcResult> DispatchCloudRpc(
@@ -587,8 +580,6 @@ extern "C" int hook_BYieldingSend(void* pThis, const char* methodName, void* req
     // Drain queued stats work on the network thread (no-op when stats disabled).
     if (g_statsSyncEnabled.load(std::memory_order_relaxed)) {
         LivePlaytime::DrainOnNetThread();
-        AchievementInject::DrainOnNetThread();
-        SchemaFetch::DrainOnNetThread();
     }
 
     // Native stats / playtime service methods (Player.*) ride this same path.
@@ -920,8 +911,6 @@ extern "C" bool hook_IsCloudEnabledForApp(void* pThis, unsigned int appId)
 
 void CloudHooks::BeginShutdown() {
     g_shuttingDown.store(true, std::memory_order_release);
-    SchemaFetch::Shutdown();
-    RecvPktHook::Remove();
     GamesPlayedHook::Remove();
     LivePlaytime::RemoveUserCapture();
     for (int i = 0; i < 300 && g_hookRefCount.load(std::memory_order_acquire) > 0; ++i)

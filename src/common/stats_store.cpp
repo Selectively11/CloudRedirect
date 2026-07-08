@@ -779,6 +779,138 @@ static bool ImportNativeStats(uint32_t appId, AppStats& out) {
     return importedStats > 0 || !out.schema.empty();
 }
 
+// Writes UserGameStats .bin for SLSsteam's NO_CONNECTION fallback.
+// Format: cache { crc; PendingChanges; <statId> { data; AchievementTimes { <bit>=ts } } }
+
+namespace {
+
+class BkvWriter {
+public:
+    void BeginSection(const char* name) {
+        m_buf.push_back(BKV_SECTION);
+        WriteCStr(name);
+    }
+    void EndSection() { m_buf.push_back(BKV_END); }
+
+    void WriteInt(const char* name, uint32_t val) {
+        m_buf.push_back(BKV_INT);
+        WriteCStr(name);
+        WriteU32(val);
+    }
+
+    const std::vector<uint8_t>& Data() const { return m_buf; }
+
+private:
+    void WriteCStr(const char* s) {
+        while (*s) m_buf.push_back(static_cast<uint8_t>(*s++));
+        m_buf.push_back(0);
+    }
+    void WriteU32(uint32_t v) {
+        m_buf.push_back(v & 0xFF);
+        m_buf.push_back((v >> 8) & 0xFF);
+        m_buf.push_back((v >> 16) & 0xFF);
+        m_buf.push_back((v >> 24) & 0xFF);
+    }
+
+    std::vector<uint8_t> m_buf;
+};
+
+} // anon namespace
+
+// Caller holds g_mutex.
+static bool ExportNativeStats(uint32_t appId, const AppStats& stats) {
+    if (g_steamPath.empty() || !g_accountIdProvider) return false;
+    uint32_t accountId = g_accountIdProvider();
+    if (accountId == 0) return false;
+
+    if (stats.stats.empty() && stats.achievements.empty()) return false;
+
+    std::unordered_map<uint32_t, const AchievementBlock*> achMap;
+    for (const auto& a : stats.achievements)
+        achMap[a.statId] = &a;
+
+    std::unordered_set<uint32_t> emittedAch;
+
+    BkvWriter bkv;
+    bkv.BeginSection("cache");
+    bkv.WriteInt("crc", stats.crcStats);
+    bkv.WriteInt("PendingChanges", 0);
+
+    for (const auto& s : stats.stats) {
+        char statName[16];
+        snprintf(statName, sizeof(statName), "%u", s.statId);
+
+        bkv.BeginSection(statName);
+        bkv.WriteInt("data", s.value);
+
+        auto achIt = achMap.find(s.statId);
+        if (achIt != achMap.end()) {
+            emittedAch.insert(s.statId);
+            const AchievementBlock& blk = *achIt->second;
+            bkv.BeginSection("AchievementTimes");
+            for (uint32_t bit = 0; bit < 32; bit++) {
+                if (blk.unlockTimes[bit] != 0) {
+                    char bitName[8];
+                    snprintf(bitName, sizeof(bitName), "%u", bit);
+                    bkv.WriteInt(bitName, blk.unlockTimes[bit]);
+                }
+            }
+            bkv.EndSection(); // AchievementTimes
+        }
+        bkv.EndSection(); // stat section
+    }
+
+    // Orphan AchievementBlocks (no matching StatEntry, e.g. cross-device merge).
+    for (const auto& a : stats.achievements) {
+        if (emittedAch.count(a.statId)) continue;
+        char statName[16];
+        snprintf(statName, sizeof(statName), "%u", a.statId);
+        bkv.BeginSection(statName);
+        bkv.WriteInt("data", a.bits);  // bitfield is the stat value for achievement stats
+        bkv.BeginSection("AchievementTimes");
+        for (uint32_t bit = 0; bit < 32; bit++) {
+            if (a.unlockTimes[bit] != 0) {
+                char bitName[8];
+                snprintf(bitName, sizeof(bitName), "%u", bit);
+                bkv.WriteInt(bitName, a.unlockTimes[bit]);
+            }
+        }
+        bkv.EndSection(); // AchievementTimes
+        bkv.EndSection(); // stat section
+    }
+
+    bkv.EndSection(); // cache
+    bkv.EndSection(); // root terminator
+
+    fs::path statsDir = FileUtil::Utf8ToPath(g_steamPath) / "appcache" / "stats";
+    std::error_code ec;
+    fs::create_directories(statsDir, ec);
+
+    fs::path statsPath = statsDir /
+        ("UserGameStats_" + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin");
+    std::ofstream f(statsPath, std::ios::binary | std::ios::trunc);
+    if (!f.good()) {
+        LOG("[Stats] ExportNativeStats app=%u: failed to open %s",
+            appId, statsPath.string().c_str());
+        return false;
+    }
+    f.write(reinterpret_cast<const char*>(bkv.Data().data()), bkv.Data().size());
+    f.close();
+
+    // Schema too, if available (Steam needs it for achievement names/icons).
+    if (!stats.schema.empty()) {
+        fs::path schemaPath = statsDir /
+            ("UserGameStatsSchema_" + std::to_string(appId) + ".bin");
+        std::ofstream sf(schemaPath, std::ios::binary | std::ios::trunc);
+        if (sf.good())
+            sf.write(reinterpret_cast<const char*>(stats.schema.data()), stats.schema.size());
+    }
+
+    LOG("[Stats] ExportNativeStats app=%u: wrote %zu bytes (%zu stats, %zu ach blocks)",
+        appId, bkv.Data().size(), stats.stats.size(), stats.achievements.size());
+    return true;
+}
+
 // Parse the JSON document (stats/achievements/playtime) into `out`.
 // Does NOT touch the separate on-disk schema blob.
 static bool ParseAppStatsJson(const std::string& content, AppStats& out) {
@@ -1421,7 +1553,7 @@ void CaptureNativeUnlocks(uint32_t appId) {
     if (changed) PushAccountBlobIfDirty();
 }
 
-// Core seed/lookup. Caller MUST hold g_mutex. Returns a live cache reference.
+// Caller MUST hold g_mutex.
 static AppStats& GetOrCreateLocked(uint32_t appId) {
     auto it = g_cache.find(appId);
     if (it != g_cache.end()) {
@@ -1701,6 +1833,16 @@ void SeedApps(const std::vector<uint32_t>& appIds) {
         if (appId == 0) continue;
         GetOrCreate(appId);  // merges cached cloud blob + imports native + loads local
     }
+    // Write .bin files for SLSsteam's NO_CONNECTION fallback.
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (uint32_t appId : appIds) {
+            if (appId == 0) continue;
+            auto it = g_cache.find(appId);
+            if (it != g_cache.end())
+                ExportNativeStats(appId, it->second);
+        }
+    }
     // SeedApps also materializes imported native stats; flush the account blob
     // once so newly-seeded local stats reach the cloud.
     PushAccountBlobIfDirty();
@@ -1823,6 +1965,8 @@ std::vector<uint32_t> RefreshFromCloud(const std::vector<uint32_t>& appIds) {
             if (achChanged || statChanged)
                 cur.crcStats = ComputeCrcLocked(cur);
             WriteAppStats(appId, cur, false);
+            if (achChanged || statChanged)
+                ExportNativeStats(appId, cur);
             changed.push_back(appId);
             LOG("[Stats] Cloud advanced app %u: forever %u -> %u (win=%u mac=%u linux=%u) ach=%d stat=%d",
                 appId, before.minutesForever, cur.playtime.minutesForever,
@@ -2007,6 +2151,7 @@ static bool EndSessionLocked(uint32_t appId) {
     g_dirty[appId] = true;
     SaveAppStats(appId, stats);   // updates account blob + dirty flag
     g_dirty[appId] = false;
+    ExportNativeStats(appId, stats);
     LOG("[Stats] Session ended for app %u: +%u min (total %u)",
         appId, minutes, stats.playtime.minutesForever);
     return true;

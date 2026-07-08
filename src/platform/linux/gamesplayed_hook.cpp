@@ -1,7 +1,5 @@
 #include "gamesplayed_hook.h"
 #include "stats_handlers.h"
-#include "achievement_inject.h"
-#include "schema_fetch.h"
 #include "metadata_sync.h"
 #include "log.h"
 
@@ -24,8 +22,6 @@ static constexpr uint32_t EMSG_GAMES_PLAYED_NO_DATABLOB   = 715;
 static constexpr uint32_t EMSG_GAMES_PLAYED_WITH_DATABLOB = 5410;
 // CMsgClientStoreUserStats2 -- sent when a game unlocks an achievement / sets a stat.
 static constexpr uint32_t EMSG_STORE_USER_STATS2         = 5466;
-// CMsgClientGetUserStats -- the legacy achievement-fetch request (we serve 819).
-static constexpr uint32_t EMSG_GET_USER_STATS            = 818;
 
 // Serialize a protobuf message object to raw bytes; installed by the platform
 // layer so this file stays free of the protobuf-helper plumbing.
@@ -77,23 +73,12 @@ static const uint8_t  kSigMask[] = {
 };
 static constexpr size_t kSigLen = sizeof(kSigBytes);
 
-// Hook: runs on Steam's network thread. Returns 1 to BLOCK the send (we are
-// the server for this message), 0 to let it pass through normally.
+// Hook: runs on Steam's network thread. Pure observer -- never blocks sends.
 extern "C" int GamesPlayedHook_OnSend(int cmInterface, void* msg) {
-    int block = 0;
+    (void)cmInterface;
     g_inFlight.fetch_add(1, std::memory_order_acquire);
     if (!g_shuttingDown.load(std::memory_order_acquire) && msg && g_serializeBody) {
         uint32_t emsg = *(uint32_t*)((uint8_t*)msg + OFF_EMSG) & EMSG_MASK;
-
-        // Capture session/conn state for proactive schema fetch on every outbound msg
-        SchemaFetch::CaptureFromOutbound(emsg, msg, (void*)(uintptr_t)cmInterface);
-
-        // Legacy achievement fetch: queue a 819 response and block the 818
-        // from reaching Valve so our injected 819 is the sole server response.
-        if (emsg == EMSG_GET_USER_STATS &&
-            MetadataSync::syncAchievements.load(std::memory_order_relaxed)) {
-            block = AchievementInject::ObserveOutbound(emsg, msg, (void*)(uintptr_t)cmInterface);
-        }
 
         bool isGamesPlayed = (emsg == EMSG_GAMES_PLAYED ||
                               emsg == EMSG_GAMES_PLAYED_NO_DATABLOB ||
@@ -121,12 +106,11 @@ extern "C" int GamesPlayedHook_OnSend(int cmInterface, void* msg) {
         }
     }
     g_inFlight.fetch_sub(1, std::memory_order_release);
-    return block;
+    return 0;
 }
 
-// Hand-written 32-bit trampoline, built at runtime to patch absolute targets.
-// The stolen instructions load esi=a1/eax=a2 from the stack, so they run first.
-// OnSend returns 0 (pass through) or 1 (block send, return success to caller).
+// 32-bit trampoline. Stolen insns load esi/eax first, then call OnSend.
+// OnSend always returns 0; block path is dead but structurally kept.
 //
 //   <STOLEN_LEN stolen bytes>          ; sub esp,1Ch; mov esi,[esp+30]=a1; mov eax,[esp+34]=a2
 //   pushad                            ; 60
@@ -281,9 +265,5 @@ void Remove() {
 
     g_installed.store(false, std::memory_order_release);
 }
-
-// Resolved CCMInterface::Send entry. Valid after Install(); other modules reuse
-// this instead of re-scanning, since the detour clobbers the post-prologue bytes.
-void* GetSendFunc() { return g_funcStart; }
 
 } // namespace GamesPlayedHook

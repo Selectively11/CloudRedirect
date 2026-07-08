@@ -145,8 +145,6 @@ uint32_t SetAchievement(uint32_t appId, uint32_t statId, uint32_t bit, uint32_t 
 void SetSchema(uint32_t appId, const uint8_t* data, size_t len);
 std::vector<uint8_t> GetSchema(uint32_t appId);
 
-// Re-read Steam's native blob, merge new unlocks/stat values, push if changed.
-// Called when an achievement-store message is seen on the wire.
 void CaptureNativeUnlocks(uint32_t appId);
 
 // Playtime tracking
