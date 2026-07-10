@@ -35,6 +35,8 @@ static std::string DetectSteamPath() {
     if (std::filesystem::is_directory(path)) return path;
     path = home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam/";
     if (std::filesystem::is_directory(path)) return path;
+    path = home + "/.steam/debian-installation/";
+    if (std::filesystem::is_directory(path)) return path;
     path = home + "/.steam/steam/";
     if (std::filesystem::is_directory(path)) return path;
     return home + "/.local/share/Steam/";
