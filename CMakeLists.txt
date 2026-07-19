@@ -74,6 +74,7 @@ set(COMMON_SOURCES
     src/common/cli.cpp
     src/common/cloud_provider_base.cpp
     src/common/autocloud_scan.cpp
+    src/common/custom_autocloud.cpp
     src/common/steam_kv_injector.cpp
     src/common/parental_bypass.cpp
     src/common/metadata_sync.cpp
@@ -214,6 +215,24 @@ endif()
 # ── Tests ───────────────────────────────────────────────────────────────
 
 enable_testing()
+
+add_executable(custom_autocloud_tests
+    src/common/custom_autocloud_tests.cpp
+    src/common/custom_autocloud.cpp
+    src/common/json.cpp
+)
+target_include_directories(custom_autocloud_tests PRIVATE src/common)
+target_compile_definitions(custom_autocloud_tests PRIVATE CLOUDREDIRECT_TESTING)
+if(WIN32)
+    target_include_directories(custom_autocloud_tests PRIVATE src/platform/win)
+    target_sources(custom_autocloud_tests PRIVATE src/platform/win/log.cpp)
+    target_link_libraries(custom_autocloud_tests PRIVATE Shell32)
+else()
+    target_include_directories(custom_autocloud_tests PRIVATE src/platform/linux)
+    target_sources(custom_autocloud_tests PRIVATE src/platform/linux/log.cpp)
+    target_link_libraries(custom_autocloud_tests PRIVATE pthread)
+endif()
+add_test(NAME custom_autocloud_tests COMMAND custom_autocloud_tests)
 
 if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
     add_compile_definitions(CR_RELEASE_VERSION="${CR_RELEASE_VERSION}")

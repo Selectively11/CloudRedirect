@@ -5569,14 +5569,13 @@ static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
 
             void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
             if (bodyObj) {
-                // Observe games-played for playtime session tracking (gated by sync_playtime).
-                if (MetadataSync::PlaytimeEnabled()) {
-                    auto observeBytes = SerializeBodyToBytes(bodyObj);
-                    if (!observeBytes.empty()) {
-                        LOG("[Stats] GamesPlayed observed (emsg=%u, %zu bytes) -> session tracking",
-                            emsg, observeBytes.size());
-                        StatsHandlers::ObserveGamesPlayed(observeBytes.data(), observeBytes.size());
-                    }
+                // Observe unconditionally: custom AutoCloud uses the same lifecycle even
+                // when optional playtime synchronization is disabled.
+                auto observeBytes = SerializeBodyToBytes(bodyObj);
+                if (!observeBytes.empty()) {
+                    LOG("[Stats] GamesPlayed observed (emsg=%u, %zu bytes) -> session tracking",
+                        emsg, observeBytes.size());
+                    StatsHandlers::ObserveGamesPlayed(observeBytes.data(), observeBytes.size());
                 }
                 // Non-Steam-game spoof (hard-gated to ST clients).
                 if (g_showNonSteamGame.load(std::memory_order_relaxed) &&

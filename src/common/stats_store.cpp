@@ -1,4 +1,7 @@
 #include "stats_store.h"
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include "json.h"
 #include "vdf.h"
 #include "log.h"

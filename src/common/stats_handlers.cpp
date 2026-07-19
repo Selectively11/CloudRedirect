@@ -3,6 +3,7 @@
 #include "metadata_sync.h"
 #include "protobuf.h"
 #include "log.h"
+#include "custom_autocloud.h"
 
 #include <cstring>
 #include <mutex>
@@ -306,6 +307,7 @@ void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
     auto fields = PB::Parse(body, bodyLen);
 
     std::unordered_set<uint32_t> currentApps;
+    std::unordered_set<uint32_t> allApps;
 
     for (auto& f : fields) {
         if (f.fieldNum == 1 && f.wireType == PB::LengthDelimited) {
@@ -314,6 +316,7 @@ void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
             if (gameIdField) {
                 uint64_t gameId = gameIdField->varintVal;
                 uint32_t appId = (uint32_t)(gameId & 0xFFFFFF);
+                if (appId != 0) allApps.insert(appId);
                 // Only track namespace/lua apps. Real owned games keep their
                 // server-side playtime; we must never record or sync theirs.
                 if (appId != 0 && IsNamespaceApp(appId)) {
@@ -322,6 +325,8 @@ void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
             }
         }
     }
+    CustomAutoCloud::ObserveGamesPlayed(allApps);
+    if (!MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) return;
 
     std::lock_guard<std::mutex> lock(g_sessionMutex);
 

@@ -1,4 +1,5 @@
 #include "autocloud_scan.h"
+#include "custom_autocloud.h"
 #include "autocloud_util.h"
 #include "file_util.h"
 #include "log.h"
@@ -629,6 +630,10 @@ ScanResult GetFileList(const std::string& steamPath,
 
     auto rules = LoadAutoCloudRules(steamPath, appId, effectivePlatform);
     if (rules.empty()) {
+        rules = CustomAutoCloud::GetRules(appId);
+        if (!rules.empty()) LOG("[CustomAutoCloud] app %u using %zu custom rule(s)", appId, rules.size());
+    }
+    if (rules.empty()) {
         LOG("GetAutoCloudFileList: no appinfo UFS save rules for app %u", appId);
         outResult.complete = true; // no rules = nothing to scan, trivially complete
         return outResult;
@@ -1112,7 +1117,8 @@ ScanResult GetFileList(const std::string& steamPath,
 std::vector<AutoCloudUtil::AutoCloudRuleNative> GetRules(
     const std::string& steamPath, uint32_t appId, uint32_t accountId) {
     (void)accountId;
-    return LoadAutoCloudRules(steamPath, appId, AutoCloudEffectivePlatform::Current);
+    auto rules = LoadAutoCloudRules(steamPath, appId, AutoCloudEffectivePlatform::Current);
+    return rules.empty() ? CustomAutoCloud::GetRules(appId) : rules;
 }
 
 // GetRootOverrides - exposes raw rootoverrides for cross-platform mapping

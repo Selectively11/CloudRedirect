@@ -2,6 +2,7 @@
 #include "metadata_sync.h"
 #include "autocloud_scan.h"
 #include "autocloud_util.h"
+#include "custom_autocloud.h"
 #include "batch_tracker.h"
 #include "cloud_intercept.h"
 #include "local_storage.h"
@@ -546,6 +547,7 @@ static std::string GetMachineName() {
 
 // Returns the blob-store file list; Steam compares vs. remotecache.vdf.
 RpcResult HandleGetChangelist(uint32_t appId, const std::vector<PB::Field>& reqBody) {
+    CustomAutoCloud::ObserveSteamRpc(appId);
     SetRpcCrashContext("GetChangelist:entry", "Cloud.GetAppFileChangelist#1", appId);
     auto* cnField = PB::FindField(reqBody, 2);
     uint64_t clientChangeNumber = cnField ? cnField->varintVal : 0;

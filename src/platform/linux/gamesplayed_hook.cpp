@@ -85,7 +85,7 @@ extern "C" int GamesPlayedHook_OnSend(int cmInterface, void* msg) {
                               emsg == EMSG_GAMES_PLAYED_WITH_DATABLOB);
         bool isStoreStats = (emsg == EMSG_STORE_USER_STATS2);
 
-        if ((isGamesPlayed && MetadataSync::syncPlaytime.load(std::memory_order_relaxed)) ||
+        if (isGamesPlayed ||
             (isStoreStats && MetadataSync::syncAchievements.load(std::memory_order_relaxed))) {
             void* bodyObj = *(void**)((uint8_t*)msg + OFF_BODY);
             if (bodyObj) {
