@@ -713,7 +713,7 @@
     <value>云存储提供商</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>配置您的 Steam 云提供商。目前仅支持 Google Drive/OneDrive/本地文件夹。</value>
+    <value>配置您的 Steam 云提供商。支持 Google Drive、OneDrive、Cloudflare R2、通用 S3 提供商或本地文件夹。</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>提供商</value>
@@ -726,6 +726,117 @@
   </data>
   <data name="CloudProvider_FolderMappedDrive" xml:space="preserve">
     <value>文件夹 / 映射驱动器</value>
+  </data>
+  <data name="CloudProvider_R2" xml:space="preserve">
+    <value>Cloudflare R2</value>
+  </data>
+  <data name="CloudProvider_R2CredFilePath" xml:space="preserve">
+    <value>凭据文件路径</value>
+  </data>
+  <data name="CloudProvider_R2CredPlaceholder" xml:space="preserve">
+    <value>R2 凭据 JSON 文件的路径</value>
+  </data>
+  <data name="CloudProvider_R2CredHint" xml:space="preserve">
+    <value>包含 account_id、access_key_id、secret_access_key 和 bucket 字段的 JSON 文件。</value>
+  </data>
+  <data name="CloudProvider_R2CredTitle" xml:space="preserve">
+    <value>R2 凭据</value>
+  </data>
+  <data name="CloudProvider_R2CredDescription" xml:space="preserve">
+    <value>输入您的 Cloudflare R2 API 凭据。您可以在 Cloudflare 控制面板的 R2 > 管理 R2 API 令牌 中生成这些凭据。</value>
+  </data>
+  <data name="CloudProvider_R2AccountId" xml:space="preserve">
+    <value>账户 ID</value>
+  </data>
+  <data name="CloudProvider_R2AccessKeyId" xml:space="preserve">
+    <value>Access Key ID</value>
+  </data>
+  <data name="CloudProvider_R2SecretKey" xml:space="preserve">
+    <value>Secret Access Key</value>
+  </data>
+  <data name="CloudProvider_R2Bucket" xml:space="preserve">
+    <value>存储桶</value>
+  </data>
+  <data name="CloudProvider_R2Advanced" xml:space="preserve">
+    <value>高级</value>
+  </data>
+  <data name="CloudProvider_R2KeyPrefix" xml:space="preserve">
+    <value>键前缀（可选）</value>
+  </data>
+  <data name="CloudProvider_R2Endpoint" xml:space="preserve">
+    <value>端点（可选）</value>
+  </data>
+  <data name="CloudProvider_R2SaveCreds" xml:space="preserve">
+    <value>保存凭据</value>
+  </data>
+  <data name="CloudProvider_R2CredSaved" xml:space="preserve">
+    <value>凭据保存成功</value>
+  </data>
+  <data name="CloudProvider_R2CredFound" xml:space="preserve">
+    <value>凭据已配置</value>
+  </data>
+  <data name="CloudProvider_R2CredMissing" xml:space="preserve">
+    <value>凭据未配置</value>
+  </data>
+  <data name="CloudProvider_R2CredInvalid" xml:space="preserve">
+    <value>凭据文件缺少必需字段</value>
+  </data>
+  <data name="CloudProvider_R2FieldsRequired" xml:space="preserve">
+    <value>所有字段均为必填</value>
+  </data>
+  <data name="CloudProvider_S3" xml:space="preserve">
+    <value>S3 兼容</value>
+  </data>
+  <data name="CloudProvider_S3CredTitle" xml:space="preserve">
+    <value>S3 兼容凭据</value>
+  </data>
+  <data name="CloudProvider_S3CredDescription" xml:space="preserve">
+    <value>添加您的 S3 兼容提供商</value>
+  </data>
+  <data name="CloudProvider_S3AccessKeyId" xml:space="preserve">
+    <value>Access Key ID</value>
+  </data>
+  <data name="CloudProvider_S3SecretKey" xml:space="preserve">
+    <value>Secret Access Key</value>
+  </data>
+  <data name="CloudProvider_S3Bucket" xml:space="preserve">
+    <value>存储桶</value>
+  </data>
+  <data name="CloudProvider_S3Endpoint" xml:space="preserve">
+    <value>端点</value>
+  </data>
+  <data name="CloudProvider_S3Region" xml:space="preserve">
+    <value>区域</value>
+  </data>
+  <data name="CloudProvider_S3KeyPrefix" xml:space="preserve">
+    <value>键前缀（可选）</value>
+  </data>
+  <data name="CloudProvider_S3SignPayload" xml:space="preserve">
+    <value>签名请求负载（SHA-256 正文哈希）</value>
+  </data>
+  <data name="CloudProvider_S3AllowInsecureHttp" xml:space="preserve">
+    <value>允许纯 HTTP 端点（不安全）</value>
+  </data>
+  <data name="CloudProvider_S3AllowInsecureTls" xml:space="preserve">
+    <value>跳过 TLS 证书验证（不安全）</value>
+  </data>
+  <data name="CloudProvider_S3CaCertPath" xml:space="preserve">
+    <value>CA 证书路径（可选）</value>
+  </data>
+  <data name="CloudProvider_S3CredSaved" xml:space="preserve">
+    <value>凭据保存成功</value>
+  </data>
+  <data name="CloudProvider_S3CredFound" xml:space="preserve">
+    <value>凭据已配置</value>
+  </data>
+  <data name="CloudProvider_S3CredMissing" xml:space="preserve">
+    <value>凭据未配置</value>
+  </data>
+  <data name="CloudProvider_S3CredInvalid" xml:space="preserve">
+    <value>凭据文件缺少必需字段</value>
+  </data>
+  <data name="CloudProvider_S3FieldsRequired" xml:space="preserve">
+    <value>Access Key ID、Secret Access Key、存储桶、端点和区域为必填项</value>
   </data>
   <data name="CloudProvider_LocalOnly" xml:space="preserve">
     <value>仅本地（无云同步）</value>
@@ -1687,6 +1798,12 @@
   <data name="Provider_FolderNetworkDrive" xml:space="preserve">
     <value>文件夹 / 映射驱动器</value>
   </data>
+  <data name="Provider_R2" xml:space="preserve">
+    <value>Cloudflare R2</value>
+  </data>
+  <data name="Provider_S3" xml:space="preserve">
+    <value>S3 兼容</value>
+  </data>
   <data name="Provider_LocalOnly" xml:space="preserve">
     <value>仅本地</value>
   </data>
@@ -1989,6 +2106,94 @@
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="OAuth_Authenticated" xml:space="preserve">
     <value>已认证。</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Migration                                                           -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Nav_Migration" xml:space="preserve">
+    <value>迁移</value>
+  </data>
+  <data name="Migration_Title" xml:space="preserve">
+    <value>迁移云数据</value>
+  </data>
+  <data name="Migration_Description" xml:space="preserve">
+    <value>将所有云存档数据从一个提供商复制到另一个。源数据保持不变。</value>
+  </data>
+  <data name="Migration_Source" xml:space="preserve">
+    <value>来源</value>
+  </data>
+  <data name="Migration_Destination" xml:space="preserve">
+    <value>目标</value>
+  </data>
+  <data name="Migration_SteamAccount" xml:space="preserve">
+    <value>Steam 账户</value>
+  </data>
+  <data name="Migration_SameProvider" xml:space="preserve">
+    <value>来源和目标必须是不同的提供商。</value>
+  </data>
+  <data name="Migration_CheckingCredentials" xml:space="preserve">
+    <value>检查凭据中...</value>
+  </data>
+  <data name="Migration_StartMigration" xml:space="preserve">
+    <value>开始迁移</value>
+  </data>
+  <data name="Migration_Migrating" xml:space="preserve">
+    <value>迁移中...</value>
+  </data>
+  <data name="Migration_Starting" xml:space="preserve">
+    <value>启动中...</value>
+  </data>
+  <data name="Migration_Cancelling" xml:space="preserve">
+    <value>取消中...</value>
+  </data>
+  <data name="Migration_Cancel" xml:space="preserve">
+    <value>取消</value>
+  </data>
+  <data name="Migration_Back" xml:space="preserve">
+    <value>返回</value>
+  </data>
+  <data name="Migration_RetryFailed" xml:space="preserve">
+    <value>重试失败的文件</value>
+  </data>
+  <data name="Migration_SwitchProvider" xml:space="preserve">
+    <value>切换活动提供商</value>
+  </data>
+  <data name="Migration_Complete" xml:space="preserve">
+    <value>迁移完成</value>
+  </data>
+  <data name="Migration_CompleteWithErrors" xml:space="preserve">
+    <value>迁移完成（有错误）</value>
+  </data>
+  <data name="Migration_Failed" xml:space="preserve">
+    <value>迁移失败</value>
+  </data>
+  <data name="Migration_Cancelled" xml:space="preserve">
+    <value>迁移已取消</value>
+  </data>
+  <data name="Migration_NoSteamPath" xml:space="preserve">
+    <value>未找到 Steam 路径</value>
+  </data>
+  <data name="Migration_NoLocalData" xml:space="preserve">
+    <value>未找到本地云数据</value>
+  </data>
+  <data name="Migration_NoAccounts" xml:space="preserve">
+    <value>本地存储中未找到账户</value>
+  </data>
+  <data name="Migration_SwitchedTo" xml:space="preserve">
+    <value>已切换到 {0}</value>
+  </data>
+  <data name="Migration_SwitchedToActive" xml:space="preserve">
+    <value>现在使用 {0} 进行云存档。</value>
+  </data>
+  <data name="Migration_NowUsing" xml:space="preserve">
+    <value>已在使用 {0} 进行云存档。</value>
+  </data>
+  <data name="Migration_ActiveProvider" xml:space="preserve">
+    <value>活动提供商</value>
+  </data>
+  <data name="Migration_ScanningSource" xml:space="preserve">
+    <value>正在扫描来源提供商...</value>
   </data>
 
 </root>

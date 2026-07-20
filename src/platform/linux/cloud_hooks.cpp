@@ -350,7 +350,16 @@ static void EnsureInitialized() {
             if (!providerName.empty() && providerName != "local") {
                 provider = CreateCloudProvider(providerName);
                 if (provider) {
-                    std::string tokenPath = cloudRedirectRoot + "tokens_" + providerName + ".json";
+                    // Resolve the credential path the same way the CLI does:
+                    // config.json token_paths[provider] -> legacy token_path ->
+                    // convention filename (r2_credentials.json etc). Previously
+                    // this hardcoded "tokens_<provider>.json", which silently
+                    // failed for R2 (r2_credentials.json) and left the app in
+                    // local-only mode with no cloud sync.
+                    std::string tokenPath = ResolveProviderTokenPath(
+                        cloudRedirectRoot, configStr, providerName);
+                    LOG("[Linux] Cloud provider '%s': resolving credentials at %s",
+                        providerName.c_str(), tokenPath.c_str());
                     if (provider->Init(tokenPath)) {
                         LOG("[Linux] Cloud provider '%s' initialized (tokens: %s)",
                             provider->Name(), tokenPath.c_str());
@@ -360,8 +369,9 @@ static void EnsureInitialized() {
                             provider.reset();
                         }
                     } else {
-                        LOG("[Linux] WARNING: Cloud provider '%s' init failed, falling back to local-only",
-                            providerName.c_str());
+                        LOG("[Linux] WARNING: Cloud provider '%s' init FAILED (credentials path: %s) -- "
+                            "falling back to local-only. Check the file exists and is readable.",
+                            providerName.c_str(), tokenPath.c_str());
                         provider.reset();
                     }
                 } else {
@@ -380,7 +390,7 @@ static void EnsureInitialized() {
         PendingOpsJournal::Init(storageRoot);
         HttpServer::Start(storageRoot, CloudIntercept::GetAccountId());
 
-        // --- Stats/achievement/playtime subsystem (skipped entirely when disabled) ---
+        // Stats/achievement/playtime subsystem; skipped entirely when disabled.
         if (g_statsSyncEnabled.load(std::memory_order_relaxed)) {
         // Stats sync as one account-wide blob at <accountId>/0/stats.json (appId ->
         // stats JSON), not one blob per app (a Drive round-trip per app at startup).

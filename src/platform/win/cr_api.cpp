@@ -220,12 +220,17 @@ void CR_NotifyAppRunning(uint32_t appId, bool running) {
 }
 
 void CR_NotifyStatsStored(uint32_t appId) {
+    CR_NotifyStatsStoredFrom(appId, appId);
+}
+
+void CR_NotifyStatsStoredFrom(uint32_t appId, uint32_t nativeAppId) {
     if (!g_crInitDone.load(std::memory_order_acquire)) return;
     if (!MetadataSync::syncAchievements.load(std::memory_order_relaxed)) return;
     if (!CloudIntercept::IsNamespaceApp(appId)) return;
+    if (nativeAppId == 0) return;
 
-    StatsStore::CaptureNativeUnlocks(appId);
-    LOG("[CR_API] Stats captured for app %u", appId);
+    StatsStore::CaptureNativeUnlocksFrom(appId, nativeAppId);
+    LOG("[CR_API] Stats captured for app %u from native app %u", appId, nativeAppId);
 }
 
 bool CR_GetPlaytime(uint32_t appId, CR_PlaytimeInfo* out) {

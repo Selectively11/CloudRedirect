@@ -114,6 +114,10 @@ CR_API void CR_NotifyAppRunning(uint32_t appId, bool running);
 // achievement unlocks or stat values, and pushes changes to cloud.
 CR_API void CR_NotifyStatsStored(uint32_t appId);
 
+// FakeAppID variant: appId remains the cloud/schema namespace while
+// nativeAppId selects Steam's UserGameStats_<account>_<nativeAppId>.bin.
+CR_API void CR_NotifyStatsStoredFrom(uint32_t appId, uint32_t nativeAppId);
+
 // ─── Query ───────────────────────────────────────────────────────────────
 // Query playtime data. Returns false if no data exists for this app.
 struct CR_PlaytimeInfo {

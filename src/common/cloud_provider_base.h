@@ -22,10 +22,11 @@ extern std::atomic<uint64_t> g_rateLimitHits;
 // 24 MB). Lower keeps each large blob above the request receive timeout.
 extern std::atomic<uint64_t> g_uploadInFlightCapBytes;
 
-// ── IHttpTransport ────────────────────────────────────────────────────────
-// Platform adapter for raw HTTP request execution.
-// Windows: WinHTTP session/connection/request handles.
-// Linux: libcurl curl_easy_* calls.
+struct TransportOptions {
+    bool allowInsecureHttp = false;   // permit plaintext http:// (LAN MinIO/Garage)
+    bool allowInsecureTls  = false;   // skip TLS cert verification (self-signed)
+    std::string caCertPath;           // custom CA bundle for internal CAs
+};
 
 class IHttpTransport {
 public:
@@ -40,6 +41,9 @@ public:
 
     // Returns true if the transport is ready to make requests.
     virtual bool IsReady() const = 0;
+
+    // Apply insecure-mode options. Default no-op keeps HTTPS-only, verified TLS.
+    virtual void SetOptions(const TransportOptions&) {}
 
     // Execute an HTTPS request to host+path. Returns status code + body.
     // method: "GET", "POST", "PUT", "DELETE", "PATCH"
@@ -63,11 +67,6 @@ public:
                                                             const std::string& authHeader) = 0;
 };
 
-// ── ITokenStore ──────────────────────────────────────────────────────────
-// Platform adapter for secure token persistence.
-// Windows: DPAPI-encrypted files.
-// Linux: libsecret (Secret Service / KDE Wallet), falling back to 0600 files.
-
 class ITokenStore {
 public:
     virtual ~ITokenStore() = default;
@@ -85,12 +84,8 @@ public:
     virtual bool IsEncryptionAvailable() const = 0;
 };
 
-// ── Factory functions (defined per-platform) ───────────────────────────────
-
 std::unique_ptr<IHttpTransport> CreateHttpTransport(const char* logTag);
 std::unique_ptr<ITokenStore> CreateTokenStore();
-
-// ── CloudProviderBase ──────────────────────────────────────────────────────
 
 class CloudProviderBase : public ICloudProvider {
 public:

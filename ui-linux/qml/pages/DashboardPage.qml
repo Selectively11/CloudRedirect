@@ -9,9 +9,7 @@ Page {
     property bool providerAuth: backend ? backend.providerAuthenticated : false
 
     function formatProviderName(name) {
-        if (name === "gdrive") return "Google Drive"
-        if (name === "onedrive") return "OneDrive"
-        if (name === "local") return "Local"
+        if (backend) return backend.providerLabel(name)
         return name
     }
     

@@ -170,12 +170,14 @@ ApplicationWindow {
             id: tabBar
             Layout.fillWidth: true
 
-            TabButton { text: "Dashboard" }
-            TabButton { text: "Apps" }
-            TabButton { text: "Backups" }
-            TabButton { text: "Cloud Provider" }
-            TabButton { text: "Setup" }
-            TabButton { text: "Stats Sync" }
+            // Size each tab to its label so wider labels aren't truncated.
+            TabButton { text: "Dashboard";      width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            TabButton { text: "Apps";           width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            TabButton { text: "Backups";        width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            TabButton { text: "Cloud Provider"; width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            TabButton { text: "Setup";          width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            TabButton { text: "Stats Sync";     width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
+            TabButton { text: "Migration";      width: Math.max(implicitWidth, contentItem.implicitWidth + 24) }
         }
 
         StackLayout {
@@ -189,6 +191,7 @@ ApplicationWindow {
             CloudProviderPage {}
             SetupPage {}
             StatsPage {}
+            MigrationPage {}
         }
     }
 }

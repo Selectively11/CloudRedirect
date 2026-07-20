@@ -24,9 +24,8 @@ namespace CloudStorage {
 
 static ICloudProvider* g_stateProvider = nullptr;
 
-// ---- Serve-path cloud-state cache -------------------------------------------
-// Backs FetchCloudStateForServe only. FetchCloudState never reads it; it only
-// refreshes it on each live fetch.
+// Serve-path cloud-state cache: backs FetchCloudStateForServe only.
+// FetchCloudState never reads it; it only refreshes it on each live fetch.
 namespace {
 
 // Staleness ceiling. Covers a download burst (serve runs right after the

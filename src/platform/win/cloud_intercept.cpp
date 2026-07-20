@@ -1979,7 +1979,7 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         return result;
     }
 
-    // ---- Native stats / playtime service RPCs --------------------------------
+    // Native stats / playtime service RPCs.
     // Player.GetUserStats#1: answer namespace apps from our store for the achievement page.
     if (strcmp(methodName, StatsHandlers::RPC_GET_USER_STATS) == 0
         && (g_cloudSaveOnly.load(std::memory_order_relaxed)
@@ -2068,7 +2068,6 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         }
         return result;
     }
-    // --------------------------------------------------------------------------
 
     if (strncmp(methodName, "Cloud.", 6) != 0) {
         return g_originalSlot5(thisptr, methodName, request, response, flags);

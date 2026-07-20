@@ -325,6 +325,8 @@ public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
     {
         "gdrive" => S.Get("Provider_GoogleDrive"),
         "onedrive" => S.Get("Provider_OneDrive"),
+        "r2" => S.Get("Provider_R2"),
+        "s3" => S.Get("Provider_S3"),
         "folder" => S.Get("Provider_FolderNetworkDrive"),
         "local" => S.Get("Provider_LocalOnly"),
         _ => Provider

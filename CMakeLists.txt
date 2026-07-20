@@ -73,6 +73,8 @@ set(COMMON_SOURCES
     src/common/legacy_metadata_cleanup.cpp
     src/common/cli.cpp
     src/common/cloud_provider_base.cpp
+    src/common/sigv4.cpp
+    src/common/sha256_hmac.cpp
     src/common/autocloud_scan.cpp
     src/common/steam_kv_injector.cpp
     src/common/parental_bypass.cpp
@@ -91,6 +93,8 @@ set(PROVIDER_SOURCES
     src/providers/google_drive.cpp
     src/providers/onedrive.cpp
     src/providers/local_disk_provider.cpp
+    src/providers/s3_provider.cpp
+    src/providers/r2_provider.cpp
 )
 
 if(WIN32)
@@ -209,6 +213,20 @@ else()
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
         target_link_options(cloud_redirect PRIVATE -s)
     endif()
+
+    # CLI wrapper (32-bit loader for cloud_redirect.so)
+    add_executable(cloud_redirect_cli
+        src/platform/linux/cli_main.cpp
+    )
+    target_link_libraries(cloud_redirect_cli PRIVATE dl)
+    if(LINUX_32BIT)
+        target_compile_options(cloud_redirect_cli PRIVATE -m32)
+        target_link_options(cloud_redirect_cli PRIVATE -m32)
+    endif()
+    add_dependencies(cloud_redirect_cli cloud_redirect)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        target_link_options(cloud_redirect_cli PRIVATE -s)
+    endif()
 endif()
 
 # ── Tests ───────────────────────────────────────────────────────────────
@@ -252,6 +270,35 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
     target_include_directories(remotecache_repair_tests PRIVATE src/common)
     add_test(NAME remotecache_repair_tests COMMAND remotecache_repair_tests)
 
+    if(EXISTS ${CMAKE_SOURCE_DIR}/tests/sigv4_tests.cpp)
+        add_executable(sigv4_tests
+            tests/sigv4_tests.cpp
+            src/common/sigv4.cpp
+            src/common/sha256_hmac.cpp
+        )
+        target_include_directories(sigv4_tests PRIVATE src/common)
+        add_test(NAME sigv4_tests COMMAND sigv4_tests)
+    endif()
+
+    if(EXISTS ${CMAKE_SOURCE_DIR}/tests/r2_provider_tests.cpp)
+        add_executable(r2_provider_tests
+            tests/r2_provider_tests.cpp
+            src/providers/s3_provider.cpp
+            src/providers/r2_provider.cpp
+            src/common/sigv4.cpp
+            src/common/sha256_hmac.cpp
+        )
+        target_include_directories(r2_provider_tests PRIVATE src/common src/providers)
+        if(WIN32)
+            target_include_directories(r2_provider_tests PRIVATE src/platform/win)
+            target_sources(r2_provider_tests PRIVATE src/platform/win/http_util.cpp)
+        else()
+            target_include_directories(r2_provider_tests PRIVATE src/platform/linux)
+            target_sources(r2_provider_tests PRIVATE src/platform/linux/http_util.cpp)
+        endif()
+        add_test(NAME r2_provider_tests COMMAND r2_provider_tests)
+    endif()
+
     add_executable(rpc_handlers_tests
         tests/rpc_handlers_tests.cpp
         src/common/protobuf.cpp
@@ -286,6 +333,8 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
         src/common/pending_ops_journal.cpp
         src/common/json.cpp
         src/common/cloud_provider_base.cpp
+        src/common/sigv4.cpp
+        src/common/sha256_hmac.cpp
         src/common/autocloud_scan.cpp
         src/common/vdf.cpp
         src/common/miniz.c
@@ -295,6 +344,8 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/tests/autocloud_native_tests.cpp)
         src/providers/google_drive.cpp
         src/providers/onedrive.cpp
         src/providers/local_disk_provider.cpp
+        src/providers/s3_provider.cpp
+        src/providers/r2_provider.cpp
     )
     target_include_directories(cloud_storage_staging_tests PRIVATE src/common src/providers src/testutil)
     if(WIN32)

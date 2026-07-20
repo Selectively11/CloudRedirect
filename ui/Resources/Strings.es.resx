@@ -599,7 +599,7 @@ Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.<
     <value>Proveedor de nube</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configura tu proveedor de Steam Cloud. Solo Google Drive/OneDrive/Carpeta local por ahora.</value>
+    <value>Configura tu proveedor de Steam Cloud. Google Drive, OneDrive, Cloudflare R2, proveedores S3 genéricos o una carpeta local.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Proveedor</value>
@@ -1749,5 +1749,430 @@ Esto puede causar pérdida de datos en algunos casos.
   </data>
   <data name="Stats_SummaryStats" xml:space="preserve">
     <value>{0} estadísticas</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Third-Party Client Mode                                             -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Choice_ThirdParty_Title" xml:space="preserve">
+    <value>Modo cliente de terceros</value>
+  </data>
+  <data name="Choice_ThirdParty_Description" xml:space="preserve">
+    <value>Para uso con OpenSteamTool, HubcapTools u otros clientes de Steam de terceros que cargan CloudRedirect por sí mismos. Solo despliega la DLL principal -- sin parches de SteamTools.</value>
+  </data>
+  <data name="Choice_ThirdParty_Features" xml:space="preserve">
+    <value>Cloud Saves + Sincronización de logros/tiempo de juego (si el cliente lo soporta) -- sin parches de ST</value>
+  </data>
+  <data name="Choice_CurrentMode_ThirdParty" xml:space="preserve">
+    <value>Modo actual: Cliente de terceros</value>
+  </data>
+  <data name="Choice_CurrentMode_ThirdParty_Desc" xml:space="preserve">
+    <value>CloudRedirect es cargado por tu cliente de Steam de terceros. Solo se despliega la DLL principal.</value>
+  </data>
+  <data name="Setup_Description_ThirdParty" xml:space="preserve">
+    <value>Despliega cloud_redirect.dll en tu carpeta de Steam. Tu cliente de terceros (OST, HubcapTools, etc.) la cargará automáticamente -- no se necesitan otros parches.</value>
+  </data>
+  <data name="Setup_ConfirmDeployThirdParty" xml:space="preserve">
+    <value>Esto desplegará cloud_redirect.dll en tu directorio de Steam. Tu cliente de terceros la cargará en el próximo inicio. ¿Continuar?</value>
+  </data>
+  <data name="Setup_ClientTypeHeader" xml:space="preserve">
+    <value>¿Cómo se carga CloudRedirect?</value>
+  </data>
+  <data name="Setup_ClientType_ST" xml:space="preserve">
+    <value>SteamTools</value>
+  </data>
+  <data name="Setup_ClientType_ST_Hint" xml:space="preserve">
+    <value>Configuración completa: parchea las DLL de Steam y despliega el proxy. Usa esto si no tienes un cliente de terceros.</value>
+  </data>
+  <data name="Setup_ClientType_ThirdParty" xml:space="preserve">
+    <value>Tengo una solución de desbloqueo alternativa y compatible</value>
+  </data>
+  <data name="Setup_ClientType_NoClientWarning" xml:space="preserve">
+    <value>No se detectó un cliente compatible en tu directorio de Steam. Asegúrate de que tu cliente esté instalado antes de iniciar Steam.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Cloudflare R2                                                       -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="CloudProvider_R2" xml:space="preserve">
+    <value>Cloudflare R2</value>
+  </data>
+  <data name="CloudProvider_R2CredFilePath" xml:space="preserve">
+    <value>Ruta del archivo de credenciales</value>
+  </data>
+  <data name="CloudProvider_R2CredPlaceholder" xml:space="preserve">
+    <value>Ruta al archivo JSON de credenciales R2</value>
+  </data>
+  <data name="CloudProvider_R2CredHint" xml:space="preserve">
+    <value>Archivo JSON con los campos account_id, access_key_id, secret_access_key y bucket.</value>
+  </data>
+  <data name="CloudProvider_R2CredTitle" xml:space="preserve">
+    <value>Credenciales R2</value>
+  </data>
+  <data name="CloudProvider_R2CredDescription" xml:space="preserve">
+    <value>Introduce tus credenciales de API de Cloudflare R2. Puedes generarlas en el panel de Cloudflare en R2 > Manage R2 API Tokens.</value>
+  </data>
+  <data name="CloudProvider_R2AccountId" xml:space="preserve">
+    <value>Account ID</value>
+  </data>
+  <data name="CloudProvider_R2AccessKeyId" xml:space="preserve">
+    <value>Access Key ID</value>
+  </data>
+  <data name="CloudProvider_R2SecretKey" xml:space="preserve">
+    <value>Secret Access Key</value>
+  </data>
+  <data name="CloudProvider_R2Bucket" xml:space="preserve">
+    <value>Bucket</value>
+  </data>
+  <data name="CloudProvider_R2Advanced" xml:space="preserve">
+    <value>Avanzado</value>
+  </data>
+  <data name="CloudProvider_R2KeyPrefix" xml:space="preserve">
+    <value>Prefijo de clave (opcional)</value>
+  </data>
+  <data name="CloudProvider_R2Endpoint" xml:space="preserve">
+    <value>Endpoint (opcional)</value>
+  </data>
+  <data name="CloudProvider_R2SaveCreds" xml:space="preserve">
+    <value>Guardar credenciales</value>
+  </data>
+  <data name="CloudProvider_R2CredSaved" xml:space="preserve">
+    <value>Credenciales guardadas correctamente</value>
+  </data>
+  <data name="CloudProvider_R2CredFound" xml:space="preserve">
+    <value>Credenciales configuradas</value>
+  </data>
+  <data name="CloudProvider_R2CredMissing" xml:space="preserve">
+    <value>Credenciales no configuradas</value>
+  </data>
+  <data name="CloudProvider_R2CredInvalid" xml:space="preserve">
+    <value>Al archivo de credenciales le faltan campos obligatorios</value>
+  </data>
+  <data name="CloudProvider_R2FieldsRequired" xml:space="preserve">
+    <value>Todos los campos son obligatorios</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- S3 Compatible                                                       -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="CloudProvider_S3" xml:space="preserve">
+    <value>S3 Compatible</value>
+  </data>
+  <data name="CloudProvider_S3CredTitle" xml:space="preserve">
+    <value>Credenciales S3 Compatible</value>
+  </data>
+  <data name="CloudProvider_S3CredDescription" xml:space="preserve">
+    <value>Agrega tu proveedor compatible con S3</value>
+  </data>
+  <data name="CloudProvider_S3AccessKeyId" xml:space="preserve">
+    <value>Access Key ID</value>
+  </data>
+  <data name="CloudProvider_S3SecretKey" xml:space="preserve">
+    <value>Secret Access Key</value>
+  </data>
+  <data name="CloudProvider_S3Bucket" xml:space="preserve">
+    <value>Bucket</value>
+  </data>
+  <data name="CloudProvider_S3Endpoint" xml:space="preserve">
+    <value>Endpoint</value>
+  </data>
+  <data name="CloudProvider_S3Region" xml:space="preserve">
+    <value>Región</value>
+  </data>
+  <data name="CloudProvider_S3KeyPrefix" xml:space="preserve">
+    <value>Prefijo de clave (opcional)</value>
+  </data>
+  <data name="CloudProvider_S3SignPayload" xml:space="preserve">
+    <value>Firmar payloads de solicitud (hash SHA-256 del cuerpo)</value>
+  </data>
+  <data name="CloudProvider_S3AllowInsecureHttp" xml:space="preserve">
+    <value>Permitir endpoints HTTP sin cifrar (inseguro)</value>
+  </data>
+  <data name="CloudProvider_S3AllowInsecureTls" xml:space="preserve">
+    <value>Omitir verificación de certificado TLS (inseguro)</value>
+  </data>
+  <data name="CloudProvider_S3CaCertPath" xml:space="preserve">
+    <value>Ruta del certificado CA (opcional)</value>
+  </data>
+  <data name="CloudProvider_S3CredSaved" xml:space="preserve">
+    <value>Credenciales guardadas correctamente</value>
+  </data>
+  <data name="CloudProvider_S3CredFound" xml:space="preserve">
+    <value>Credenciales configuradas</value>
+  </data>
+  <data name="CloudProvider_S3CredMissing" xml:space="preserve">
+    <value>Credenciales no configuradas</value>
+  </data>
+  <data name="CloudProvider_S3CredInvalid" xml:space="preserve">
+    <value>Al archivo de credenciales le faltan campos obligatorios</value>
+  </data>
+  <data name="CloudProvider_S3FieldsRequired" xml:space="preserve">
+    <value>Access Key ID, Secret Access Key, Bucket, Endpoint y Region son obligatorios</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Settings - Third Party / Providers                                  -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Settings_ModeThirdParty" xml:space="preserve">
+    <value>Cliente de terceros</value>
+  </data>
+  <data name="Provider_R2" xml:space="preserve">
+    <value>Cloudflare R2</value>
+  </data>
+  <data name="Provider_S3" xml:space="preserve">
+    <value>S3 Compatible</value>
+  </data>
+  <data name="Settings_LanguageSimplifiedChinese" xml:space="preserve">
+    <value>简体中文</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- News Page                                                           -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="News_WhatsNew" xml:space="preserve">
+    <value>¿Qué hay de nuevo?</value>
+  </data>
+  <data name="News_AchievementSync_Title" xml:space="preserve">
+    <value>Sincronización de logros y tiempo de juego</value>
+  </data>
+  <data name="News_AchievementSync_Description" xml:space="preserve">
+    <value>¡Los logros y el tiempo de juego ahora se pueden sincronizar en la nube! Se soporta juego entre dispositivos. Funciona a través de los sistemas normales de Steam. Actívalo en Ajustes si te interesa. ¡Esta función es experimental!</value>
+  </data>
+  <data name="News_SchemaFetching_Title" xml:space="preserve">
+    <value>Obtención de esquemas de logros para SteamTools</value>
+  </data>
+  <data name="News_SchemaFetching_Description" xml:space="preserve">
+    <value>¡CR ahora puede obtener esquemas de logros, así que juegos que antes no mostraban logros ahora los mostrarán!</value>
+  </data>
+  <data name="News_ShowLuaGame_Title" xml:space="preserve">
+    <value>Mostrar juego Lua en el estado</value>
+  </data>
+  <data name="News_ShowLuaGame_Description" xml:space="preserve">
+    <value>Las apps lua ahora pueden aparecer en tu estado de Steam. Aparecen como un juego de fuera de Steam con el nombre correcto. Este cambio está activado por defecto; desactívalo en Ajustes si no lo quieres.</value>
+  </data>
+  <data name="News_760CleanUp_Title" xml:space="preserve">
+    <value>Limpieza de 760</value>
+  </data>
+  <data name="News_760CleanUp_Description" xml:space="preserve">
+    <value>Hay una nueva herramienta (experimental) que puede eliminar las partidas que SteamTools subió al AppID 760. Lee las notas de la versión en GitHub para más información.</value>
+  </data>
+  <data name="News_AndMore_Title" xml:space="preserve">
+    <value>...¡y más!</value>
+  </data>
+  <data name="News_AndMore_Description" xml:space="preserve">
+    <value>Correcciones de errores, mejoras de rendimiento en Google Drive, trabajo preparatorio para futuras actualizaciones, funciones no anunciadas esparcidas por la interfaz de CR. ¡Diversión para todos!</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Setup - Manifest Endpoint                                           -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Setup_ManifestEndpoint" xml:space="preserve">
+    <value>Endpoint de manifiestos</value>
+  </data>
+  <data name="Setup_ManifestEndpoint_Description" xml:space="preserve">
+    <value>Sobreescribe la URL de descarga de manifiestos y el User-Agent usados por SteamTools. Déjalo vacío para usar el predeterminado.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Cloud Provider & Stats                                              -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="CloudProvider_Authenticated" xml:space="preserve">
+    <value>Autenticado</value>
+  </data>
+  <data name="Stats_LoadingFromCloud" xml:space="preserve">
+    <value>Cargando datos desde la nube...</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Settings - Auto Update                                              -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Settings_AutoUpdate" xml:space="preserve">
+    <value>Actualización automática</value>
+  </data>
+  <data name="Settings_AutoUpdate_Description" xml:space="preserve">
+    <value>Descargar automáticamente la última versión de la DLL de Cloud Redirect al iniciar Steam</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- 760 Clean Up Page                                                   -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Cloud760_Title" xml:space="preserve">
+    <value>Limpieza de 760</value>
+  </data>
+  <data name="Cloud760_Description" xml:space="preserve">
+    <value>Ver y eliminar las partidas que SteamTools escribió en 760 (Capturas de pantalla de Steam). Esto evitará que SteamTools vuelva a descargar esas partidas cuando se ejecute sin los parches de CloudRedirect, impidiendo que SteamTools contamine los datos de usuario de cada juego inyectado.</value>
+  </data>
+  <data name="Cloud760_Connect" xml:space="preserve">
+    <value>Conectar</value>
+  </data>
+  <data name="Cloud760_Refresh" xml:space="preserve">
+    <value>Actualizar</value>
+  </data>
+  <data name="Cloud760_NoFilesYet" xml:space="preserve">
+    <value>Aún no hay archivos</value>
+  </data>
+  <data name="Cloud760_NoFilesYet_Description" xml:space="preserve">
+    <value>Conéctate para cargar tus archivos en la nube del AppID 760. Si no aparece nada, abre la consola de Steam, ejecuta </value>
+  </data>
+  <data name="Cloud760_ThenRefresh" xml:space="preserve">
+    <value>, luego Actualizar.</value>
+  </data>
+  <data name="Cloud760_OpenConsole" xml:space="preserve">
+    <value>Abrir consola</value>
+  </data>
+  <data name="Cloud760_CopyCommand" xml:space="preserve">
+    <value>Copiar comando</value>
+  </data>
+  <data name="Cloud760_SelectAll" xml:space="preserve">
+    <value>Seleccionar todo</value>
+  </data>
+  <data name="Cloud760_Clear" xml:space="preserve">
+    <value>Limpiar</value>
+  </data>
+  <data name="Cloud760_DeleteCloudFiles" xml:space="preserve">
+    <value>Eliminar archivos en la nube</value>
+  </data>
+  <data name="Cloud760_DeleteWarning" xml:space="preserve">
+    <value>Eliminar archivos aquí es permanente y no se puede deshacer.</value>
+  </data>
+  <data name="Cloud760_DeleteSelected" xml:space="preserve">
+    <value>Eliminar seleccionados</value>
+  </data>
+  <data name="Cloud760_DeleteAll" xml:space="preserve">
+    <value>Eliminar todo</value>
+  </data>
+  <data name="Cloud760_FilesSelected" xml:space="preserve">
+    <value>{0} de {1} seleccionados</value>
+  </data>
+  <data name="Cloud760_FilesCount" xml:space="preserve">
+    <value>{0} archivo(s)</value>
+  </data>
+  <data name="Cloud760_ConsoleOpened" xml:space="preserve">
+    <value>Consola de Steam abierta. Ejecuta 'cloud_sync_up {0}' allí, luego Conectar.</value>
+  </data>
+  <data name="Cloud760_CommandCopied" xml:space="preserve">
+    <value>'cloud_sync_up {0}' copiado al portapapeles. Pégalo en la consola de Steam.</value>
+  </data>
+  <data name="Cloud760_Connecting" xml:space="preserve">
+    <value>Conectando a Steam Cloud como AppID {0}...</value>
+  </data>
+  <data name="Cloud760_QuotaUsed" xml:space="preserve">
+    <value>{0} / {1} usado</value>
+  </data>
+  <data name="Cloud760_ConnectedNoFiles" xml:space="preserve">
+    <value>Conectado al AppID {0}, pero no se encontraron archivos en la nube.</value>
+  </data>
+  <data name="Cloud760_Refreshing" xml:space="preserve">
+    <value>Actualizando...</value>
+  </data>
+  <data name="Cloud760_LoadedFiles" xml:space="preserve">
+    <value>Se cargaron {0} archivo(s) del AppID {1}.</value>
+  </data>
+  <data name="Cloud760_DeletingFiles" xml:space="preserve">
+    <value>Eliminando {0} archivo(s)...</value>
+  </data>
+  <data name="Cloud760_DeletedFiles" xml:space="preserve">
+    <value>Se eliminaron {0} archivo(s)</value>
+  </data>
+  <data name="Cloud760_DeletedFilesFailed" xml:space="preserve">
+    <value>Se eliminaron {0} archivo(s), {1} fallaron.</value>
+  </data>
+  <data name="Cloud760_Error" xml:space="preserve">
+    <value>Error: {0}</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- OAuth / Authentication                                              -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="OAuth_Authenticated" xml:space="preserve">
+    <value>Autenticado.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Migration                                                           -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Nav_Migration" xml:space="preserve">
+    <value>Migración</value>
+  </data>
+  <data name="Migration_Title" xml:space="preserve">
+    <value>Migrar datos en la nube</value>
+  </data>
+  <data name="Migration_Description" xml:space="preserve">
+    <value>Copia todos los datos de guardado en la nube de un proveedor a otro. Los datos de origen se mantienen intactos.</value>
+  </data>
+  <data name="Migration_Source" xml:space="preserve">
+    <value>Origen</value>
+  </data>
+  <data name="Migration_Destination" xml:space="preserve">
+    <value>Destino</value>
+  </data>
+  <data name="Migration_SteamAccount" xml:space="preserve">
+    <value>Cuenta de Steam</value>
+  </data>
+  <data name="Migration_SameProvider" xml:space="preserve">
+    <value>El origen y el destino deben ser proveedores distintos.</value>
+  </data>
+  <data name="Migration_CheckingCredentials" xml:space="preserve">
+    <value>Verificando credenciales...</value>
+  </data>
+  <data name="Migration_StartMigration" xml:space="preserve">
+    <value>Iniciar migración</value>
+  </data>
+  <data name="Migration_Migrating" xml:space="preserve">
+    <value>Migrando...</value>
+  </data>
+  <data name="Migration_Starting" xml:space="preserve">
+    <value>Iniciando...</value>
+  </data>
+  <data name="Migration_Cancelling" xml:space="preserve">
+    <value>Cancelando...</value>
+  </data>
+  <data name="Migration_Cancel" xml:space="preserve">
+    <value>Cancelar</value>
+  </data>
+  <data name="Migration_Back" xml:space="preserve">
+    <value>Volver</value>
+  </data>
+  <data name="Migration_RetryFailed" xml:space="preserve">
+    <value>Reintentar archivos fallidos</value>
+  </data>
+  <data name="Migration_SwitchProvider" xml:space="preserve">
+    <value>Cambiar proveedor activo</value>
+  </data>
+  <data name="Migration_Complete" xml:space="preserve">
+    <value>Migración completada</value>
+  </data>
+  <data name="Migration_CompleteWithErrors" xml:space="preserve">
+    <value>Migración completada con errores</value>
+  </data>
+  <data name="Migration_Failed" xml:space="preserve">
+    <value>La migración falló</value>
+  </data>
+  <data name="Migration_Cancelled" xml:space="preserve">
+    <value>Migración cancelada</value>
+  </data>
+  <data name="Migration_NoSteamPath" xml:space="preserve">
+    <value>Ruta de Steam no encontrada</value>
+  </data>
+  <data name="Migration_NoLocalData" xml:space="preserve">
+    <value>No se encontraron datos locales en la nube</value>
+  </data>
+  <data name="Migration_NoAccounts" xml:space="preserve">
+    <value>No se encontraron cuentas en el almacenamiento local</value>
+  </data>
+  <data name="Migration_SwitchedTo" xml:space="preserve">
+    <value>Cambiado a {0}</value>
+  </data>
+  <data name="Migration_SwitchedToActive" xml:space="preserve">
+    <value>Ahora usando {0} para guardados en la nube.</value>
+  </data>
+  <data name="Migration_NowUsing" xml:space="preserve">
+    <value>Ya estás usando {0} para guardados en la nube.</value>
+  </data>
+  <data name="Migration_ActiveProvider" xml:space="preserve">
+    <value>Proveedor activo</value>
+  </data>
+  <data name="Migration_ScanningSource" xml:space="preserve">
+    <value>Escaneando proveedor de origen...</value>
   </data>
 </root>

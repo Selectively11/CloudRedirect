@@ -963,6 +963,13 @@ public partial class SetupPage : Page
                 var tokenStatus = Services.OAuthService.CheckTokenStatus(existingConfig.TokenPath);
                 providerReady = tokenStatus.IsAuthenticated;
             }
+            else if (existingConfig != null &&
+                     existingConfig.Provider is "r2" or "s3" &&
+                     !string.IsNullOrEmpty(existingConfig.TokenPath) &&
+                     File.Exists(existingConfig.TokenPath))
+            {
+                providerReady = true;
+            }
 
             if (!providerReady)
             {
@@ -1059,6 +1066,13 @@ public partial class SetupPage : Page
             {
                 var tokenStatus = Services.OAuthService.CheckTokenStatus(existingConfig.TokenPath);
                 providerReady = tokenStatus.IsAuthenticated;
+            }
+            else if (existingConfig != null &&
+                     existingConfig.Provider is "r2" or "s3" &&
+                     !string.IsNullOrEmpty(existingConfig.TokenPath) &&
+                     File.Exists(existingConfig.TokenPath))
+            {
+                providerReady = true;
             }
 
             if (!providerReady)
