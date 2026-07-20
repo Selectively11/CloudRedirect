@@ -4,6 +4,8 @@
 #include "local_disk_provider.h"
 #include "google_drive_provider.h"
 #include "onedrive_provider.h"
+#include "s3_provider.h"
+#include "r2_provider.h"
 #include "cloud_metadata_paths.h"
 #include "cloud_staging.h"
 #include "file_util.h"
@@ -808,7 +810,7 @@ static std::string LocalBlobPath(uint32_t accountId, uint32_t appId,
 
 // Enqueue a cloud upload of the current CN value for this app.
 // Dedup in EnqueueWork will coalesce multiple calls during a batch.
-// --- manifest utilities needed by SyncFromCloudInner ---
+// Manifest utilities needed by SyncFromCloudInner.
 // ManifestToJson lives in manifest_store.cpp; SyncFromCloudWithFlag uses
 // SaveManifestLocal / SaveManifest which call through to ManifestStore.
 
@@ -3117,6 +3119,15 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     if (lower == "local" || lower == "folder") {
         return std::make_unique<LocalDiskProvider>();
     }
+    // R2 and generic S3 use static access-key credentials with per-request
+    // SigV4 signing, not OAuth token refresh, so they need no auth-failure
+    // callback. R2 is the Cloudflare-specialized subclass of S3Provider.
+    if (lower == "r2") {
+        return std::make_unique<R2Provider>();
+    }
+    if (lower == "s3") {
+        return std::make_unique<S3Provider>();
+    }
     // Wire the auth-failure callback at construction so CloudProviderBase
     // doesn't reverse-depend on CloudStorage.
     auto wireAuthCallback = [](std::unique_ptr<CloudProviderBase> p)
@@ -3132,4 +3143,38 @@ std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name) {
     }
     LOG("[CloudStorage] CreateCloudProvider: unknown provider '%s'", name.c_str());
     return nullptr;
+}
+
+std::string ResolveProviderTokenPath(const std::string& configDir,
+                                     const std::string& configJson,
+                                     const std::string& provider) {
+    if (!configJson.empty()) {
+        Json::Value root = Json::Parse(configJson);
+        if (root.type == Json::Type::Object) {
+            // 1) Per-provider registry (survives provider switches).
+            if (root.has("token_paths") && root["token_paths"].type == Json::Type::Object &&
+                root["token_paths"].has(provider) &&
+                root["token_paths"][provider].type == Json::Type::String &&
+                !root["token_paths"][provider].str().empty()) {
+                return root["token_paths"][provider].str();
+            }
+            // 2) Active provider's token_path (legacy / single-provider path).
+            if (root.has("provider") && root["provider"].str() == provider &&
+                root.has("token_path") && root["token_path"].type == Json::Type::String &&
+                !root["token_path"].str().empty()) {
+                return root["token_path"].str();
+            }
+        }
+    }
+
+    // 3) Convention-based fallback. Must match the exact default filenames the
+    //    UI writes so a first run works before Settings has persisted an
+    //    explicit token_paths entry. Windows and Linux use different names.
+    if (provider == "r2")       return configDir + "r2_credentials.json";
+    if (provider == "s3")       return configDir + "s3_credentials.json";
+#ifdef _WIN32
+    if (provider == "gdrive")   return configDir + "google_tokens.json";
+    if (provider == "onedrive") return configDir + "onedrive_tokens.json";
+#endif
+    return configDir + "tokens_" + provider + ".json";
 }

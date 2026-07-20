@@ -84,7 +84,7 @@ bool UpdateManifestEntry(uint32_t accountId, uint32_t appId,
 bool RemoveManifestEntry(uint32_t accountId, uint32_t appId,
                          const std::string& filename);
 
-// --- manifest snapshots for Steam-faithful delta changelist ---
+// Manifest snapshots for the Steam-faithful delta changelist.
 
 struct ManifestDelta {
     struct FileChange {

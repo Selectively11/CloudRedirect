@@ -5,7 +5,7 @@
         xmlns:pages="clr-namespace:CloudRedirect.Pages"
         xmlns:res="clr-namespace:CloudRedirect.Resources"
         Title="{res:Loc MainWindow_Title}"
-        Height="680" Width="1050"
+        Height="760" Width="1050"
         MinHeight="500" MinWidth="750"
         WindowStartupLocation="CenterScreen"
         ExtendsContentIntoTitleBar="True">
@@ -118,6 +118,10 @@
                 <ui:NavigationViewItem Content="{res:Loc Nav_Stats}"
                                          Icon="{ui:SymbolIcon Trophy24}"
                                          TargetPageType="{x:Type pages:StatsPage}" />
+                <ui:NavigationViewItem x:Name="NavMigration"
+                                         Content="{res:Loc Nav_Migration}"
+                                         Icon="{ui:SymbolIcon ArrowSync24}"
+                                         TargetPageType="{x:Type pages:MigrationPage}" />
                 <ui:NavigationViewItem x:Name="NavManifestPinning"
                                          Content="{res:Loc Nav_ManifestPinning}"
                                          Icon="{ui:SymbolIcon Pin24}"

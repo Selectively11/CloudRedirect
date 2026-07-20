@@ -166,13 +166,13 @@ static bool BuildTrampoline(uint8_t* hookPoint) {
     uint8_t* jnzPatch = p;
     emit({0x75, 0x00});                   // jnz +?? (patched)
 
-    // --- pass-through path ---
+    // Pass-through path.
     emit({0x61});                         // popad
     uintptr_t resume = (uintptr_t)(hookPoint - PROLOGUE_LEN) + RESUME_OFF;
     emit({0x68}); emit32((uint32_t)resume); // push resume
     emit({0xC3});                           // ret
 
-    // --- block path: skip the original send, return 1 ---
+    // Block path: skip the original send, return 1.
     uint8_t* blockAddr = p;
     jnzPatch[1] = (uint8_t)(blockAddr - (jnzPatch + 2)); // patch jnz offset
     emit({0x61});                         // popad

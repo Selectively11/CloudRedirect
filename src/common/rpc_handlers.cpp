@@ -1930,7 +1930,7 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
     auto& uploadMeta = batch.uploadMeta;
     auto& filePlatforms = batch.filePlatforms;
 
-    // --- Synchronous on Steam's thread: promote + local CN advance ---
+    // Synchronous on Steam's thread: promote + local CN advance.
 
     // Inflight-sync scope: drains before provider teardown (UAF guard).
     CloudStorage::InflightSyncScope guard;
@@ -2005,7 +2005,7 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
             appId, (unsigned long long)publishCN);
     }
 
-    // --- Deferred to background thread: cloud state publish ---
+    // Deferred to background thread: cloud state publish.
     // Captures batch metadata by value; the background thread owns it.
     auto uploadMetaCopy = std::make_shared<
         std::unordered_map<std::string, CloudIntercept::UploadFileMeta>>(uploadMeta);

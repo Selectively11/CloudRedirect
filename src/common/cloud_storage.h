@@ -85,7 +85,7 @@ void NotifyAuthFailure(const std::string& providerName);
 // True once ShutdownProvider is called; checked between retry iterations.
 bool IsShuttingDown();
 
-// --- internal: shared with manifest_store.cpp and token_store.cpp ---
+// Internal: shared with manifest_store.cpp and token_store.cpp.
 struct InflightSyncScope {
     bool entered = false;
     InflightSyncScope();

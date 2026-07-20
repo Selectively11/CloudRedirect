@@ -41,6 +41,8 @@ Same rough idea on Linux, but involving a flatpak application and a library that
 
 - **Google Drive**
 - **OneDrive**
+- **Cloudflare R2**
+- **S3-Compatible** -- AWS S3, MinIO, Backblaze B2, Wasabi, DigitalOcean Spaces, and any self-hosted S3 server.
 - **Local folder / mapped drive** -- by request of literally one user.
 
 With more to come over time. 

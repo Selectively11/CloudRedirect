@@ -21,7 +21,6 @@ using CloudIntercept::kLegacyFileTokensFilename;
 namespace CloudStorage {
 namespace {
 
-// --- manifest-repair helpers ---
 static Manifest RepairManifestWithRemoteBlobListing(
     const Manifest& cloudManifest,
     const Manifest& localManifest,
@@ -57,11 +56,11 @@ static Manifest PruneManifestToRemoteBlobListing(
     return pruned;
 }
 
-// --- provider ref + local root, set by ManifestStore_Init ---
+// Provider ref + local root, set by ManifestStore_Init.
 static ICloudProvider*                     g_manifestProvider = nullptr;
 static std::string                        g_manifestLocalRoot;
 
-// --- in-memory manifest cache (avoids repeated disk reads during download bursts) ---
+// In-memory manifest cache; avoids repeated disk reads during download bursts.
 struct CachedManifest {
     Manifest manifest;
     bool valid = false;
@@ -89,8 +88,6 @@ static void SetCachedManifest(uint32_t accountId, uint32_t appId, const Manifest
     entry.manifest = manifest;
     entry.valid = true;
 }
-
-// --- local helpers ---
 
 static std::string ManifestLocalPath(uint32_t accountId, uint32_t appId) {
     return g_manifestLocalRoot + "storage" + std::string(kPathSepStr)
@@ -231,8 +228,6 @@ static bool SaveManifestImpl(uint32_t accountId, uint32_t appId,
 }
 
 } // namespace
-
-// --- public API ---
 
 void ManifestStore_Init(const std::string& localRoot, ICloudProvider* provider) {
     g_manifestLocalRoot = localRoot;
@@ -599,8 +594,6 @@ bool RemoveManifestEntry(uint32_t accountId, uint32_t appId,
     manifest.erase(it);
     return SaveManifestLocal(accountId, appId, manifest);
 }
-
-// --- manifest snapshots for Steam-faithful delta changelist ---
 
 static std::string ManifestSnapshotFilename(uint32_t accountId, uint32_t appId,
                                             uint64_t cn) {

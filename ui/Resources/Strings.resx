@@ -719,7 +719,7 @@ Force-kill it?</value>
     <value>Cloud Provider</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure your Steam Cloud provider. Google Drive/OneDrive/Local Folder only for now.</value>
+    <value>Configure your Steam Cloud provider. Google Drive, OneDrive, Cloudflare R2, generic S3 providers, or a Local Folder.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Provider</value>
@@ -732,6 +732,117 @@ Force-kill it?</value>
   </data>
   <data name="CloudProvider_FolderMappedDrive" xml:space="preserve">
     <value>Folder / Mapped Drive</value>
+  </data>
+  <data name="CloudProvider_R2" xml:space="preserve">
+    <value>Cloudflare R2</value>
+  </data>
+  <data name="CloudProvider_R2CredFilePath" xml:space="preserve">
+    <value>Credentials File Path</value>
+  </data>
+  <data name="CloudProvider_R2CredPlaceholder" xml:space="preserve">
+    <value>Path to R2 credentials JSON file</value>
+  </data>
+  <data name="CloudProvider_R2CredHint" xml:space="preserve">
+    <value>JSON file with account_id, access_key_id, secret_access_key, and bucket fields.</value>
+  </data>
+  <data name="CloudProvider_R2CredTitle" xml:space="preserve">
+    <value>R2 Credentials</value>
+  </data>
+  <data name="CloudProvider_R2CredDescription" xml:space="preserve">
+    <value>Enter your Cloudflare R2 API credentials. You can generate these in the Cloudflare dashboard under R2 > Manage R2 API Tokens.</value>
+  </data>
+  <data name="CloudProvider_R2AccountId" xml:space="preserve">
+    <value>Account ID</value>
+  </data>
+  <data name="CloudProvider_R2AccessKeyId" xml:space="preserve">
+    <value>Access Key ID</value>
+  </data>
+  <data name="CloudProvider_R2SecretKey" xml:space="preserve">
+    <value>Secret Access Key</value>
+  </data>
+  <data name="CloudProvider_R2Bucket" xml:space="preserve">
+    <value>Bucket</value>
+  </data>
+  <data name="CloudProvider_R2Advanced" xml:space="preserve">
+    <value>Advanced</value>
+  </data>
+  <data name="CloudProvider_R2KeyPrefix" xml:space="preserve">
+    <value>Key Prefix (optional)</value>
+  </data>
+  <data name="CloudProvider_R2Endpoint" xml:space="preserve">
+    <value>Endpoint (optional)</value>
+  </data>
+  <data name="CloudProvider_R2SaveCreds" xml:space="preserve">
+    <value>Save Credentials</value>
+  </data>
+  <data name="CloudProvider_R2CredSaved" xml:space="preserve">
+    <value>Credentials saved successfully</value>
+  </data>
+  <data name="CloudProvider_R2CredFound" xml:space="preserve">
+    <value>Credentials configured</value>
+  </data>
+  <data name="CloudProvider_R2CredMissing" xml:space="preserve">
+    <value>Credentials not configured</value>
+  </data>
+  <data name="CloudProvider_R2CredInvalid" xml:space="preserve">
+    <value>Credentials file missing required fields</value>
+  </data>
+  <data name="CloudProvider_R2FieldsRequired" xml:space="preserve">
+    <value>All fields are required</value>
+  </data>
+  <data name="CloudProvider_S3" xml:space="preserve">
+    <value>S3 Compatible</value>
+  </data>
+  <data name="CloudProvider_S3CredTitle" xml:space="preserve">
+    <value>S3 Compatible Credentials</value>
+  </data>
+  <data name="CloudProvider_S3CredDescription" xml:space="preserve">
+    <value>Add your S3 compatible provider</value>
+  </data>
+  <data name="CloudProvider_S3AccessKeyId" xml:space="preserve">
+    <value>Access Key ID</value>
+  </data>
+  <data name="CloudProvider_S3SecretKey" xml:space="preserve">
+    <value>Secret Access Key</value>
+  </data>
+  <data name="CloudProvider_S3Bucket" xml:space="preserve">
+    <value>Bucket</value>
+  </data>
+  <data name="CloudProvider_S3Endpoint" xml:space="preserve">
+    <value>Endpoint</value>
+  </data>
+  <data name="CloudProvider_S3Region" xml:space="preserve">
+    <value>Region</value>
+  </data>
+  <data name="CloudProvider_S3KeyPrefix" xml:space="preserve">
+    <value>Key Prefix (optional)</value>
+  </data>
+  <data name="CloudProvider_S3SignPayload" xml:space="preserve">
+    <value>Sign request payloads (SHA-256 body hash)</value>
+  </data>
+  <data name="CloudProvider_S3AllowInsecureHttp" xml:space="preserve">
+    <value>Allow plain HTTP endpoints (insecure)</value>
+  </data>
+  <data name="CloudProvider_S3AllowInsecureTls" xml:space="preserve">
+    <value>Skip TLS certificate verification (insecure)</value>
+  </data>
+  <data name="CloudProvider_S3CaCertPath" xml:space="preserve">
+    <value>CA Certificate Path (optional)</value>
+  </data>
+  <data name="CloudProvider_S3CredSaved" xml:space="preserve">
+    <value>Credentials saved successfully</value>
+  </data>
+  <data name="CloudProvider_S3CredFound" xml:space="preserve">
+    <value>Credentials configured</value>
+  </data>
+  <data name="CloudProvider_S3CredMissing" xml:space="preserve">
+    <value>Credentials not configured</value>
+  </data>
+  <data name="CloudProvider_S3CredInvalid" xml:space="preserve">
+    <value>Credentials file missing required fields</value>
+  </data>
+  <data name="CloudProvider_S3FieldsRequired" xml:space="preserve">
+    <value>Access Key ID, Secret Access Key, Bucket, Endpoint and Region are required</value>
   </data>
   <data name="CloudProvider_LocalOnly" xml:space="preserve">
     <value>Local only (no cloud sync)</value>
@@ -1559,6 +1670,12 @@ Are you sure?</value>
   <data name="Provider_FolderNetworkDrive" xml:space="preserve">
     <value>Folder / Network Drive</value>
   </data>
+  <data name="Provider_R2" xml:space="preserve">
+    <value>Cloudflare R2</value>
+  </data>
+  <data name="Provider_S3" xml:space="preserve">
+    <value>S3 Compatible</value>
+  </data>
   <data name="Provider_LocalOnly" xml:space="preserve">
     <value>Local only</value>
   </data>
@@ -2021,6 +2138,94 @@ Are you sure?</value>
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <data name="OAuth_Authenticated" xml:space="preserve">
     <value>Authenticated.</value>
+  </data>
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- Migration                                                           -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <data name="Nav_Migration" xml:space="preserve">
+    <value>Migration</value>
+  </data>
+  <data name="Migration_Title" xml:space="preserve">
+    <value>Migrate Cloud Data</value>
+  </data>
+  <data name="Migration_Description" xml:space="preserve">
+    <value>Copy all cloud save data from one provider to another. Source data is kept intact.</value>
+  </data>
+  <data name="Migration_Source" xml:space="preserve">
+    <value>Source</value>
+  </data>
+  <data name="Migration_Destination" xml:space="preserve">
+    <value>Destination</value>
+  </data>
+  <data name="Migration_SteamAccount" xml:space="preserve">
+    <value>Steam Account</value>
+  </data>
+  <data name="Migration_SameProvider" xml:space="preserve">
+    <value>Source and destination must be different providers.</value>
+  </data>
+  <data name="Migration_CheckingCredentials" xml:space="preserve">
+    <value>Checking credentials...</value>
+  </data>
+  <data name="Migration_StartMigration" xml:space="preserve">
+    <value>Start Migration</value>
+  </data>
+  <data name="Migration_Migrating" xml:space="preserve">
+    <value>Migrating...</value>
+  </data>
+  <data name="Migration_Starting" xml:space="preserve">
+    <value>Starting...</value>
+  </data>
+  <data name="Migration_Cancelling" xml:space="preserve">
+    <value>Cancelling...</value>
+  </data>
+  <data name="Migration_Cancel" xml:space="preserve">
+    <value>Cancel</value>
+  </data>
+  <data name="Migration_Back" xml:space="preserve">
+    <value>Back</value>
+  </data>
+  <data name="Migration_RetryFailed" xml:space="preserve">
+    <value>Retry Failed Files</value>
+  </data>
+  <data name="Migration_SwitchProvider" xml:space="preserve">
+    <value>Switch Active Provider</value>
+  </data>
+  <data name="Migration_Complete" xml:space="preserve">
+    <value>Migration Complete</value>
+  </data>
+  <data name="Migration_CompleteWithErrors" xml:space="preserve">
+    <value>Migration Completed with Errors</value>
+  </data>
+  <data name="Migration_Failed" xml:space="preserve">
+    <value>Migration Failed</value>
+  </data>
+  <data name="Migration_Cancelled" xml:space="preserve">
+    <value>Migration Cancelled</value>
+  </data>
+  <data name="Migration_NoSteamPath" xml:space="preserve">
+    <value>Steam path not found</value>
+  </data>
+  <data name="Migration_NoLocalData" xml:space="preserve">
+    <value>No local cloud data found</value>
+  </data>
+  <data name="Migration_NoAccounts" xml:space="preserve">
+    <value>No accounts found in local storage</value>
+  </data>
+  <data name="Migration_SwitchedTo" xml:space="preserve">
+    <value>Switched to {0}</value>
+  </data>
+  <data name="Migration_SwitchedToActive" xml:space="preserve">
+    <value>Now using {0} for cloud saves.</value>
+  </data>
+  <data name="Migration_NowUsing" xml:space="preserve">
+    <value>Already using {0} for cloud saves.</value>
+  </data>
+  <data name="Migration_ActiveProvider" xml:space="preserve">
+    <value>Active provider</value>
+  </data>
+  <data name="Migration_ScanningSource" xml:space="preserve">
+    <value>Scanning source provider...</value>
   </data>
 
 </root>

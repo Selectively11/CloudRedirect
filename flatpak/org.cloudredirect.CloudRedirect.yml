@@ -33,10 +33,14 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 cloud_redirect.so /app/share/cloud_redirect/cloud_redirect.so
+      - install -Dm755 cloud_redirect_cli /app/share/cloud_redirect/cloud_redirect_cli
       - install -Dm644 cloudredirect.flatpakrepo /app/share/cloud_redirect/cloudredirect.flatpakrepo
     sources:
       - type: file
         path: cloud_redirect.so
+      # 32-bit CLI for the Migration page
+      - type: file
+        path: cloud_redirect_cli
       - type: file
         path: cloudredirect.flatpakrepo
 
@@ -60,6 +64,8 @@ modules:
         # Path to bundled native binary for the deployer
         # 32-bit .so for Steam hooking (deployed to ~/.local/share/SLSsteam/)
         export CR_BUNDLED_SO="/app/share/cloud_redirect/cloud_redirect.so"
+        # 32-bit CLI for cloud-provider migration (deployed alongside the .so).
+        export CR_BUNDLED_CLI="/app/share/cloud_redirect/cloud_redirect_cli"
         exec /app/bin/cloud-redirect-ui "$@"
         EOF
         chmod +x /app/bin/cloud-redirect-ui-wrapper

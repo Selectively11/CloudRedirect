@@ -147,6 +147,10 @@ std::vector<uint8_t> GetSchema(uint32_t appId);
 
 void CaptureNativeUnlocks(uint32_t appId);
 
+// Merge stats stored by Steam under nativeAppId into appId's cloud namespace.
+// FakeAppID hosts use this when Steam's local blob key differs from the game.
+void CaptureNativeUnlocksFrom(uint32_t appId, uint32_t nativeAppId);
+
 // Playtime tracking
 void StartSession(uint32_t appId);
 void EndSession(uint32_t appId);

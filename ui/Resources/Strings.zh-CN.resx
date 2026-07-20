@@ -713,7 +713,7 @@
     <value>云存储提供商</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>配置您的 Steam 云提供商。目前仅支持 Google Drive/OneDrive/本地文件夹。</value>
+    <value>配置您的 Steam 云提供商。支持 Google Drive、OneDrive、Cloudflare R2、通用 S3 提供商或本地文件夹。</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>提供商</value>

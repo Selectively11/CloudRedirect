@@ -599,7 +599,7 @@ Forçar encerramento?</value>
     <value>Provedor de Nuvem</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configure seu provedor de Steam Cloud. Apenas Google Drive/OneDrive/Pasta local por enquanto.</value>
+    <value>Configure seu provedor de Steam Cloud. Google Drive, OneDrive, Cloudflare R2, provedores S3 genéricos ou uma pasta local.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Provedor</value>

@@ -66,6 +66,12 @@ static std::unordered_map<uint32_t, uint32_t> g_activeSessions;
 // Apps reset this session; push replaces (not merges) these. g_mutex.
 static std::unordered_set<uint32_t> g_resetApps;
 
+// Apps whose cache entry was created before the account was resolved, so the
+// on-disk stats could not be loaded yet. These hollow entries must be reloaded
+// from disk once g_diskAccountId is known -- reconcile and reads consult this so
+// they never trust an empty perDevice and double-count real on-disk playtime. g_mutex.
+static std::unordered_set<uint32_t> g_diskLoadPending;
+
 // Resolves the current Steam accountId for locating native UserGameStats blobs.
 static AccountIdProvider g_accountIdProvider;
 // Fired when an import finds no schema for an app (platform requests it).
@@ -476,6 +482,13 @@ static void ReconcileLocalConfig(const std::string& cloudRoot, const std::string
             if (cacheIt == g_cache.end()) {
                 LoadAppStats(appId, g_cache[appId]);
                 cacheIt = g_cache.find(appId);
+            } else if (g_diskLoadPending.count(appId)) {
+                // A cached-but-hollow entry from a pre-login access (before the
+                // account was resolved) never loaded its on-disk playtime. The
+                // shortfall math below would treat real playtime as zero and
+                // double-count it. Reload from disk now that the account is known.
+                if (LoadAppStats(appId, cacheIt->second))
+                    g_diskLoadPending.erase(appId);
             }
             AppStats& stats = cacheIt->second;
 
@@ -506,14 +519,23 @@ static void ReconcileLocalConfig(const std::string& cloudRoot, const std::string
                 }
                 uint32_t shortfall = (vdfPlaytime > otherTotal)
                     ? (uint32_t)(vdfPlaytime - otherTotal) : 0u;
-                DevicePlaytime& mig = stats.playtime.perDevice[kMigratedBucket];
+                LOG("[Stats] Reconcile app=%u: vdfPlaytime=%u otherTotal=%llu shortfall=%u (perDevice=%zu, forever_before=%u)",
+                    appId, vdfPlaytime, (unsigned long long)otherTotal, shortfall,
+                    stats.playtime.perDevice.size(), stats.playtime.minutesForever);
+                if (shortfall > 0) {
+                    DevicePlaytime& mig = stats.playtime.perDevice[kMigratedBucket];
 #ifdef _WIN32
-                mig.windows = shortfall;
+                    mig.windows = shortfall;
 #elif defined(__APPLE__)
-                mig.mac = shortfall;
+                    mig.mac = shortfall;
 #else
-                mig.lin = shortfall;
+                    mig.lin = shortfall;
 #endif
+                } else {
+                    // No shortfall: real device buckets already cover the vdf
+                    // playtime. Don't leave (or create) an empty synthetic bucket.
+                    stats.playtime.perDevice.erase(kMigratedBucket);
+                }
                 stats.playtime.minutesLastTwoWeeks =
                     (std::max)(stats.playtime.minutesLastTwoWeeks, vdfPlaytime2wks);
                 RecomputePlaytimeTotals(stats.playtime, /*allowShrink=*/true);
@@ -652,6 +674,7 @@ bool ResetForAccountSwitch(uint32_t newAccountId) {
     g_dirty.clear();
     g_activeSessions.clear();
     g_resetApps.clear();
+    g_diskLoadPending.clear();
     g_accountBlobDirty = false;
     g_seedDone.store(false, std::memory_order_release);
     g_lastSeenAccountId = newAccountId;
@@ -671,13 +694,15 @@ void ResetForTesting() {
     g_dirty.clear();
     g_activeSessions.clear();
     g_resetApps.clear();
+    g_diskLoadPending.clear();
     g_accountBlobDirty = false;
     g_lastSeenAccountId = 0;
     g_diskAccountId = 0;
 }
 
 // Import native UserGameStats + schema blobs. Caller holds g_mutex.
-static bool ImportNativeStats(uint32_t appId, AppStats& out) {
+static bool ImportNativeStats(uint32_t appId, AppStats& out,
+                              uint32_t nativeAppId = 0) {
     if (g_steamPath.empty() || !g_accountIdProvider) return false;
     uint32_t accountId = g_accountIdProvider();
     if (accountId == 0) return false;
@@ -696,9 +721,12 @@ static bool ImportNativeStats(uint32_t appId, AppStats& out) {
             g_schemaMissingCb(appId);
     }
 
-    // Stats: appcache/stats/UserGameStats_<accountId>_<appId>.bin
+    // Stats: appcache/stats/UserGameStats_<accountId>_<nativeAppId>.bin
+    // The native key normally equals appId, but FakeAppID hosts can keep the
+    // real schema/cloud namespace while Steam writes under a different key.
+    if (nativeAppId == 0) nativeAppId = appId;
     fs::path statsPath = FileUtil::Utf8ToPath(g_steamPath) / "appcache" / "stats"
-        / ("UserGameStats_" + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin");
+        / ("UserGameStats_" + std::to_string(accountId) + "_" + std::to_string(nativeAppId) + ".bin");
     std::ifstream f(statsPath, std::ios::binary);
     if (!f.good())
         return !out.schema.empty();
@@ -1073,8 +1101,24 @@ static const std::string& ThisDeviceId() {
     return id;
 }
 
+// A single device+platform sub-total can never plausibly exceed continuous
+// wall-clock playtime since Steam launched (Sept 2003, ~22 yrs ≈ 11.6M minutes).
+// Anything above this is corruption (a double-count/feedback loop), not real
+// playtime. Clamping each bucket here is defense-in-depth: it caps pathological
+// values from ANY merge path -- present or future -- before they enter the sum,
+// independent of the specific bug that produced them.
+static constexpr uint32_t kMaxPlausiblePlaytimeMinutes = 13u * 1000u * 1000u; // ~24.7 yrs
+
 // Recompute the derived totals from the authoritative per-device sub-totals.
 static void RecomputePlaytimeTotals(PlaytimeData& pt, bool allowShrink) {
+    // Clamp each per-device platform bucket to a physically plausible ceiling so
+    // one corrupt sub-total cannot inflate the aggregate. This mutates perDevice
+    // (the merge source of truth) so the cap also survives the next round-trip.
+    for (auto& [dev, dp] : pt.perDevice) {
+        dp.windows = (std::min)(dp.windows, kMaxPlausiblePlaytimeMinutes);
+        dp.mac     = (std::min)(dp.mac,     kMaxPlausiblePlaytimeMinutes);
+        dp.lin     = (std::min)(dp.lin,     kMaxPlausiblePlaytimeMinutes);
+    }
     uint64_t win = 0, mac = 0, lin = 0;
     for (const auto& [dev, dp] : pt.perDevice) {
         win += dp.windows; mac += dp.mac; lin += dp.lin;
@@ -1096,6 +1140,17 @@ static void RecomputePlaytimeTotals(PlaytimeData& pt, bool allowShrink) {
     pt.playtimeMac     = (std::max)(pt.playtimeMac,     clamp32(mac));
     pt.playtimeLinux   = (std::max)(pt.playtimeLinux,   clamp32(lin));
     pt.minutesForever  = (std::max)(pt.minutesForever,  clamp32(win + mac + lin));
+
+    // When we have authoritative per-device buckets (already clamped above), the
+    // derived totals can never exceed their sum. This defeats a corrupt derived
+    // field that was parsed in from a bad blob and would otherwise survive the
+    // monotonic floor forever (the old feedback-loop failure mode).
+    if (!pt.perDevice.empty()) {
+        pt.playtimeWindows = (std::min)(pt.playtimeWindows, clamp32(win));
+        pt.playtimeMac     = (std::min)(pt.playtimeMac,     clamp32(mac));
+        pt.playtimeLinux   = (std::min)(pt.playtimeLinux,   clamp32(lin));
+        pt.minutesForever  = (std::min)(pt.minutesForever,  clamp32(win + mac + lin));
+    }
 }
 
 // Accrue minutes onto THIS device's own per-device sub-total for this platform.
@@ -1142,11 +1197,15 @@ static void MergePlaytime(PlaytimeData& dst, const PlaytimeData& src) {
         ddp.lin     = (std::max)(ddp.lin,     sdp.lin);
     }
 
-    // Per-platform sums of real (attributed) minutes, for the legacy discount.
+    // Per-platform sums of already-attributed minutes, for the legacy discount.
+    // Includes both real device keys AND the __migrated_localconfig bucket: a
+    // legacy blob's raw platform total is a SUBSET of the localconfig migration
+    // for the same device, so failing to discount against the migrated bucket
+    // double-counts (e.g. 51033 migrated + 17011 legacy = 68044 phantom minutes).
     uint64_t realWin = 0, realMac = 0, realLin = 0;
     if (srcLegacyOnly) {
         for (const auto& [dev, ddp] : dst.perDevice) {
-            if (IsSyntheticKey(dev)) continue;
+            if (IsLegacyDeviceKey(dev)) continue;   // don't discount legacy vs legacy
             realWin += ddp.windows; realMac += ddp.mac; realLin += ddp.lin;
         }
     }
@@ -1526,11 +1585,12 @@ static void EnsureNativeImportLocked(uint32_t appId, AppStats& stats) {
 }
 
 // Re-import native blob, merging new unlocks. Caller holds mutex.
-static bool ReimportNativeStatsLocked(uint32_t appId, AppStats& stats) {
+static bool ReimportNativeStatsLocked(uint32_t appId, AppStats& stats,
+                                      uint32_t nativeAppId = 0) {
     if (!g_accountIdProvider || g_accountIdProvider() == 0) return false;
 
     AppStats native;
-    if (!ImportNativeStats(appId, native)) return false;
+    if (!ImportNativeStats(appId, native, nativeAppId)) return false;
 
     bool changed = MergeStatValues(stats.stats, native.stats);
     if (MergeAchievements(stats.achievements, native.achievements)) changed = true;
@@ -1544,19 +1604,24 @@ static bool ReimportNativeStatsLocked(uint32_t appId, AppStats& stats) {
 }
 
 void CaptureNativeUnlocks(uint32_t appId) {
+    CaptureNativeUnlocksFrom(appId, appId);
+}
+
+void CaptureNativeUnlocksFrom(uint32_t appId, uint32_t nativeAppId) {
     bool changed = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         AppStats& stats = GetOrCreateLocked(appId);
         size_t beforeCount = CountUnlockedAchievements(stats.achievements);
-        if (ReimportNativeStatsLocked(appId, stats)) {
+        if (ReimportNativeStatsLocked(appId, stats, nativeAppId)) {
             size_t afterCount = CountUnlockedAchievements(stats.achievements);
             g_dirty[appId] = true;
             SaveAppStats(appId, stats);   // updates account blob + dirty flag
             g_dirty[appId] = false;
             changed = true;
-            LOG("[Stats] Captured native unlocks for app %u (crc=%u) %zu->%zu unlocked",
-                appId, stats.crcStats, beforeCount, afterCount);
+            LOG("[Stats] Captured native unlocks for app %u from native app %u "
+                "(crc=%u) %zu->%zu unlocked",
+                appId, nativeAppId, stats.crcStats, beforeCount, afterCount);
         }
     }
     // A genuine unlock just landed -- push the account blob now (off-lock).
@@ -1567,6 +1632,12 @@ void CaptureNativeUnlocks(uint32_t appId) {
 static AppStats& GetOrCreateLocked(uint32_t appId) {
     auto it = g_cache.find(appId);
     if (it != g_cache.end()) {
+        // A hollow entry created pre-login: now that the account is known, load
+        // the real on-disk stats into it before anything reads/merges it.
+        if (g_diskLoadPending.count(appId) && g_diskAccountId != 0) {
+            if (LoadAppStats(appId, it->second))
+                g_diskLoadPending.erase(appId);
+        }
         // Late-merge cloud blob if not yet absorbed this fetch cycle.
         if (!g_cloudBlobMerged.count(appId)) {
             uint32_t crcBefore = it->second.crcStats;
@@ -1589,6 +1660,13 @@ static AppStats& GetOrCreateLocked(uint32_t appId) {
     if (!loaded) {
         stats.crcStats = 0;
         stats.playtime = {};
+        // Mark entries created before the account was resolved (disk load could
+        // not run) as not-yet-loaded, so a later access -- and reconcile -- knows
+        // to reload from disk instead of trusting this hollow struct.
+        if (g_diskAccountId == 0)
+            g_diskLoadPending.insert(appId);
+    } else {
+        g_diskLoadPending.erase(appId);
     }
     EnsureNativeImportLocked(appId, stats);
     return stats;

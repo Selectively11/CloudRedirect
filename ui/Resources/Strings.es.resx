@@ -599,7 +599,7 @@ Si omites esto, las partidas se almacenarán localmente en tu carpeta de Steam.<
     <value>Proveedor de nube</value>
   </data>
   <data name="CloudProvider_Description" xml:space="preserve">
-    <value>Configura tu proveedor de Steam Cloud. Solo Google Drive/OneDrive/Carpeta local por ahora.</value>
+    <value>Configura tu proveedor de Steam Cloud. Google Drive, OneDrive, Cloudflare R2, proveedores S3 genéricos o una carpeta local.</value>
   </data>
   <data name="CloudProvider_Provider" xml:space="preserve">
     <value>Proveedor</value>

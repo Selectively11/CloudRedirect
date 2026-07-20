@@ -52,6 +52,9 @@ public:
         std::string path;         // relative path (same format as other calls)
         uint64_t    size = 0;     // file size in bytes
         uint64_t    modifiedTime = 0; // Unix timestamp (seconds)
+        std::string versionId;        // opaque provider version id ("" if none)
+        bool        isLatest = true;  // this is the current version of the key
+        bool        isDeleteMarker = false; // a versioning tombstone, not data
     };
 
     virtual std::vector<FileInfo> List(const std::string& prefix) = 0;
@@ -71,11 +74,6 @@ public:
         return folders;
     }
 
-    // Like List() but returns false on API/filesystem error (missing prefix
-    // is success with an empty listing). When outComplete is non-null,
-    // overrides must init it to false at entry and only write true after
-    // verifying full enumeration; callers refuse destructive prunes on
-    // incomplete listings.
     virtual bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
                              bool* outComplete = nullptr) {
         if (outComplete) *outComplete = false;
@@ -97,6 +95,32 @@ public:
         if (outSupported) *outSupported = false;
         return {};
     }
+
+    virtual bool SupportsVersioning() const { return false; }
+
+    virtual bool ListVersions(const std::string& /*path*/,
+                              std::vector<FileInfo>& outVersions) {
+        outVersions.clear();
+        return false;
+    }
+
+    virtual bool DownloadVersion(const std::string& path,
+                                 const std::string& versionId,
+                                 std::vector<uint8_t>& outData) {
+        if (versionId.empty()) return Download(path, outData);
+        return false;
+    }
+
+    // Permanently remove one specific version (by id) of a key, leaving other
+    // versions intact. Default: unsupported.
+    virtual bool RemoveVersion(const std::string& /*path*/,
+                               const std::string& /*versionId*/) {
+        return false;
+    }
 };
 
 std::unique_ptr<ICloudProvider> CreateCloudProvider(const std::string& name);
+
+std::string ResolveProviderTokenPath(const std::string& configDir,
+                                     const std::string& configJson,
+                                     const std::string& provider);
