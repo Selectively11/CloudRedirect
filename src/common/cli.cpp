@@ -816,42 +816,36 @@ std::string CmdPublishFullManifest(const std::string& provider, const std::strin
     });
 }
 
-static std::string FindStorageRoot() {
+static std::string ReadSyncPath() {
     std::string configDir = GetConfigDir();
     if (configDir.empty()) return "";
 
-    // 1) Check sync_path in config.json.
-    std::string configPath = configDir + "config.json";
-    FILE* f = fopen(configPath.c_str(), "rb");
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long len = ftell(f);
-        if (len > 0) {
-            rewind(f);
-            std::string json((size_t)len, '\0');
-            json.resize(fread(json.data(), 1, (size_t)len, f));
-            fclose(f);
+    FILE* f = fopen((configDir + "config.json").c_str(), "rb");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    if (len <= 0) { fclose(f); return ""; }
+    rewind(f);
+    std::string json((size_t)len, '\0');
+    json.resize(fread(json.data(), 1, (size_t)len, f));
+    fclose(f);
 
-            Json::Value root = Json::Parse(json);
-            if (root.type == Json::Type::Object && root.has("sync_path") &&
-                root["sync_path"].type == Json::Type::String &&
-                !root["sync_path"].str().empty()) {
-                return root["sync_path"].str();
-            }
-        } else {
-            fclose(f);
-        }
-    }
+    Json::Value root = Json::Parse(json);
+    if (root.type == Json::Type::Object && root.has("sync_path") &&
+        root["sync_path"].type == Json::Type::String)
+        return root["sync_path"].str();
+    return "";
+}
 
-    // 2) CloudRedirect config storage (<config>/storage/<account>/<app>).
-    {
+static std::string FindInterceptStorageRoot() {
+    std::string configDir = GetConfigDir();
+    if (!configDir.empty()) {
         std::string configStorage = configDir + "storage";
         std::error_code ec;
         if (std::filesystem::is_directory(FileUtil::Utf8ToPath(configStorage), ec))
             return configStorage;
     }
 
-    // 3) Read Steam path from registry (Windows) or known paths (Linux).
 #ifdef _WIN32
     HKEY hKey = nullptr;
     if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -862,7 +856,6 @@ static std::string FindStorageRoot() {
             (type == REG_SZ || type == REG_EXPAND_SZ)) {
             RegCloseKey(hKey);
             std::string steamPath(buf);
-            // Normalize slashes.
             for (char& c : steamPath) { if (c == '/') c = '\\'; }
             if (!steamPath.empty() && steamPath.back() != '\\') steamPath += '\\';
             return steamPath + "cloud_redirect\\storage";
@@ -870,7 +863,6 @@ static std::string FindStorageRoot() {
         RegCloseKey(hKey);
     }
 #else
-    // Try common Linux Steam paths.
     const char* home = getenv("HOME");
     if (home) {
         std::string paths[] = {
@@ -887,9 +879,18 @@ static std::string FindStorageRoot() {
     return "";
 }
 
-// Enumerates account ID directories from local storage root.
-static std::vector<std::string> DiscoverAccountIds() {
-    std::string storageRoot = FindStorageRoot();
+static std::string FindStorageRoot(const std::string& provider) {
+    if (provider == "folder" || provider == "local") {
+        std::string sp = ReadSyncPath();
+        if (!sp.empty()) return sp;
+    }
+    return FindInterceptStorageRoot();
+}
+
+static std::vector<std::string> DiscoverAccountIds(const std::string& provider) {
+    std::string storageRoot = FindStorageRoot(provider);
+    fprintf(stderr, "[scan] provider=%s storage root=%s\n",
+            provider.c_str(), storageRoot.empty() ? "(none)" : storageRoot.c_str());
     if (storageRoot.empty()) return {};
 
     std::vector<std::string> accounts;
@@ -907,10 +908,12 @@ static std::vector<std::string> DiscoverAccountIds() {
     } catch (...) {}
 
     std::sort(accounts.begin(), accounts.end());
+    fprintf(stderr, "[scan] discovered %zu account(s)\n", accounts.size());
     return accounts;
 }
 
 static bool ListAllFiles(ICloudProvider* prov,
+                         const std::string& provider,
                          std::vector<ICloudProvider::FileInfo>& outFiles,
                          bool& outComplete,
                          const std::function<void(const std::string& phase,
@@ -931,7 +934,7 @@ static bool ListAllFiles(ICloudProvider* prov,
 
     // Flat listing failed — fall back to per-account enumeration.
     if (onStatus) onStatus("discovering", "Discovering accounts...", -1, -1, -1);
-    auto accountIds = DiscoverAccountIds();
+    auto accountIds = DiscoverAccountIds(provider);
     if (accountIds.empty()) return false;
 
     int64_t acctTotal = static_cast<int64_t>(accountIds.size());
@@ -986,7 +989,7 @@ std::string CmdScanAll(const std::string& provider) {
     }
 
     // Discover accounts from local storage.
-    auto accountIds = DiscoverAccountIds();
+    auto accountIds = DiscoverAccountIds(provider);
     if (accountIds.empty()) {
         prov->Shutdown();
         return JsonError("No accounts found in local storage");
@@ -1099,7 +1102,7 @@ int CmdMigrate(const std::string& srcProvider, const std::string& dstProvider) {
 
     std::vector<ICloudProvider::FileInfo> files;
     bool complete = false;
-    if (!ListAllFiles(src.get(), files, complete, emitStatus)) {
+    if (!ListAllFiles(src.get(), srcProvider, files, complete, emitStatus)) {
         src->Shutdown();
         dst->Shutdown();
         emitLine(JsonObject({{"type", JsonString("error")},

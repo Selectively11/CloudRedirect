@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- Shared user-facing version (X.Y.Z) -->
-    <ReleaseVersion>2.6.0</ReleaseVersion>
+    <ReleaseVersion>2.6.1</ReleaseVersion>
 
     <!-- Optional pre-release suffix (e.g. -TEST1, -beta). Empty for stable releases.
          Appended to the user-facing version shown in Settings; AssemblyVersion stays numeric. -->
