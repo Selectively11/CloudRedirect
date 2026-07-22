@@ -118,7 +118,7 @@ void Backend::detectSteamPath()
     QString crPath = crDataDir() + "/cloud_redirect.so";
     m_deployed = QFile::exists(crPath);
 
-    // Parse account ID from loginusers.vdf
+    // Parse account ID from loginusers.vdf (MostRecent > AutoLogin > Timestamp)
     QString loginUsersPath = m_steamPath + "/config/loginusers.vdf";
     QFile f(loginUsersPath);
     if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -130,6 +130,9 @@ void Backend::detectSteamPath()
         QString currentPersonaName;
         bool inUser = false;
         int depth = 0;
+
+        quint64 bestTsSid = 0, bestTs = 0;
+        QString bestTsPersona;
 
         for (const auto &line : lines) {
             QString trimmed = line.trimmed();
@@ -166,7 +169,33 @@ void Backend::detectSteamPath()
                     m_accountId = QString::number(sid & 0xFFFFFFFF);
                     m_accountName = currentPersonaName;
                 }
+                if (m_accountId.isEmpty() && trimmed.contains("\"AutoLogin\"") && trimmed.contains("\"1\"")) {
+                    quint64 sid = currentId.toULongLong();
+                    m_accountId = QString::number(sid & 0xFFFFFFFF);
+                    m_accountName = currentPersonaName;
+                }
+                if (m_accountId.isEmpty() && trimmed.contains("\"Timestamp\"")) {
+                    static const QString kTimestamp = "\"Timestamp\"";
+                    int vStart = trimmed.indexOf('"', trimmed.indexOf(kTimestamp) + kTimestamp.length());
+                    if (vStart > 0) {
+                        int vEnd = trimmed.indexOf('"', vStart + 1);
+                        if (vEnd > vStart) {
+                            quint64 ts = trimmed.mid(vStart + 1, vEnd - vStart - 1).toULongLong();
+                            if (ts > bestTs) {
+                                bestTs = ts;
+                                bestTsSid = currentId.toULongLong();
+                                bestTsPersona = currentPersonaName;
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        // Last resort: use the user with the highest Timestamp
+        if (m_accountId.isEmpty() && bestTsSid != 0) {
+            m_accountId = QString::number(bestTsSid & 0xFFFFFFFF);
+            m_accountName = bestTsPersona;
         }
     }
 }

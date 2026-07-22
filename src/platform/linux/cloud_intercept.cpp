@@ -136,19 +136,7 @@ static void WatchSLSsteamConfig(std::string configPath) {
     g_watcherFd.store(-1, std::memory_order_release);
 }
 
-// ── Parse loginusers.vdf for account ID ─────────────────────────────────
-//
-// Format:
-//   "users"
-//   {
-//       "76561198014569578"
-//       {
-//           "MostRecent"  "1"
-//           ...
-//       }
-//   }
-// 
-// SteamID64 -> AccountID = low 32 bits
+// Parse loginusers.vdf for account ID (MostRecent > AutoLogin > Timestamp)
 
 static uint32_t LoadAccountIdFromLoginUsers() {
     std::string steamPath = DetectSteamPath();
@@ -162,6 +150,9 @@ static uint32_t LoadAccountIdFromLoginUsers() {
 
     std::string line;
     uint64_t mostRecentSteamId = 0;
+    uint64_t autoLoginSteamId = 0;
+    uint64_t newestTimestampSteamId = 0;
+    uint64_t newestTimestamp = 0;
     uint64_t currentSteamId = 0;
     bool inUser = false;
     int braceDepth = 0;
@@ -197,23 +188,55 @@ static uint32_t LoadAccountIdFromLoginUsers() {
             }
         }
 
-        // At depth 2, look for "MostRecent" "1"
+        // At depth 2, look for selection markers
         if (inUser && braceDepth == 2) {
             if (trimmed.find("\"MostRecent\"") != std::string::npos &&
                 trimmed.find("\"1\"") != std::string::npos) {
                 mostRecentSteamId = currentSteamId;
             }
+            if (trimmed.find("\"AutoLogin\"") != std::string::npos &&
+                trimmed.find("\"1\"") != std::string::npos) {
+                autoLoginSteamId = currentSteamId;
+            }
+            static const std::string kTimestamp = "\"Timestamp\"";
+            if (trimmed.find(kTimestamp) != std::string::npos) {
+                size_t vStart = trimmed.find('"', trimmed.find(kTimestamp) + kTimestamp.size());
+                if (vStart != std::string::npos) {
+                    size_t vEnd = trimmed.find('"', vStart + 1);
+                    if (vEnd != std::string::npos) {
+                        std::string tsStr = trimmed.substr(vStart + 1, vEnd - vStart - 1);
+                        char* endp = nullptr;
+                        uint64_t ts = strtoull(tsStr.c_str(), &endp, 10);
+                        if (endp == tsStr.c_str() + tsStr.size() && ts > newestTimestamp) {
+                            newestTimestamp = ts;
+                            newestTimestampSteamId = currentSteamId;
+                        }
+                    }
+                }
+            }
         }
     }
 
-    if (mostRecentSteamId == 0) {
-        LOG("[Linux] No MostRecent user found in loginusers.vdf");
+    // Priority: MostRecent > AutoLogin > highest Timestamp
+    uint64_t selected = mostRecentSteamId;
+    const char* method = "MostRecent";
+    if (selected == 0) {
+        selected = autoLoginSteamId;
+        method = "AutoLogin";
+    }
+    if (selected == 0) {
+        selected = newestTimestampSteamId;
+        method = "Timestamp";
+    }
+
+    if (selected == 0) {
+        LOG("[Linux] No user found in loginusers.vdf (tried MostRecent, AutoLogin, Timestamp)");
         return 0;
     }
 
-    uint32_t accountId = (uint32_t)(mostRecentSteamId & 0xFFFFFFFF);
-    LOG("[Linux] Bootstrapped accountId=%u from SteamID64=%llu (loginusers.vdf)",
-        accountId, (unsigned long long)mostRecentSteamId);
+    uint32_t accountId = (uint32_t)(selected & 0xFFFFFFFF);
+    LOG("[Linux] Bootstrapped accountId=%u from SteamID64=%llu via %s (loginusers.vdf)",
+        accountId, (unsigned long long)selected, method);
     return accountId;
 }
 
