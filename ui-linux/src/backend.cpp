@@ -930,8 +930,14 @@ void Backend::fetchRemoteApps()
     if (m_accountId.isEmpty()) {
         return;
     }
+
+    // R2/S3: use CLI scan-all to list remote apps.
+    if (m_providerName == "r2" || m_providerName == "s3") {
+        fetchCliRemoteApps(m_providerName);
+        return;
+    }
+
     if (m_providerName != "gdrive" && m_providerName != "onedrive") {
-        fprintf(stderr, "[Backend] provider is not gdrive/onedrive, skipping\n");
         emit remoteAppsFetched();
         return;
     }
@@ -952,6 +958,80 @@ void Backend::fetchRemoteApps()
 void Backend::refreshAndFetch()
 {
     fetchRemoteApps();
+}
+
+void Backend::fetchCliRemoteApps(const QString &provider)
+{
+    QString cli = cliExecutablePath();
+    if (cli.isEmpty()) {
+        emit remoteAppsFetched();
+        return;
+    }
+
+    auto *proc = new QProcess(this);
+    proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError) {
+        fprintf(stderr, "[Backend] CLI scan-all failed to launch: %s\n",
+                proc->errorString().toUtf8().constData());
+        proc->deleteLater();
+        emit remoteAppsFetched();
+    });
+
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc](int exitCode, QProcess::ExitStatus) {
+        const QByteArray out = proc->readAllStandardOutput();
+        proc->deleteLater();
+
+        QJsonParseError perr;
+        QJsonDocument doc = QJsonDocument::fromJson(out, &perr);
+        if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+            fprintf(stderr, "[Backend] CLI scan-all: invalid JSON (exit %d)\n", exitCode);
+            emit remoteAppsFetched();
+            return;
+        }
+        QJsonObject root = doc.object();
+        if (root.contains("error")) {
+            fprintf(stderr, "[Backend] CLI scan-all error: %s\n",
+                    root.value("error").toString().toUtf8().constData());
+            emit remoteAppsFetched();
+            return;
+        }
+
+        m_remoteAppIds.clear();
+        for (const QJsonValue &v : root.value("apps").toArray()) {
+            QJsonObject o = v.toObject();
+            QString appIdStr = o.value("app_id").toString();
+            bool ok;
+            uint32_t appId = appIdStr.toUInt(&ok);
+            if (ok && appId > 0 && !kHiddenAppIds.contains(appId))
+                m_remoteAppIds.insert(appId);
+        }
+
+        QSet<uint32_t> localAppIds;
+        for (auto &app : m_apps) {
+            localAppIds.insert(app.appId);
+            if (m_remoteAppIds.contains(app.appId))
+                app.isRemote = true;
+        }
+        for (uint32_t appId : m_remoteAppIds) {
+            if (!localAppIds.contains(appId)) {
+                QString name = m_nameCache.value(appId, QString("App %1").arg(appId));
+                m_apps.append({appId, name, QString(), QString(), 0, 0, false, true});
+            }
+        }
+
+        fprintf(stderr, "[Backend] CLI remote apps: %d remote IDs, %d total apps\n",
+                (int)m_remoteAppIds.size(), (int)m_apps.size());
+        emit appsChanged();
+        emit remoteAppsFetched();
+        QTimer::singleShot(0, this, &Backend::resolveAppNames);
+    });
+
+    QString program;
+    QStringList args;
+    cliLaunch(cli, {"scan-all", provider}, program, args);
+    proc->start(program, args);
 }
 
 void Backend::fetchGoogleDriveApps(const QString &token)
