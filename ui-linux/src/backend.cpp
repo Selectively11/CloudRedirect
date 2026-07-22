@@ -2100,6 +2100,28 @@ QString Backend::cliExecutablePath() const
                 return c;
         }
     }
+
+    // Auto-deploy: if a bundled source exists, copy it to the data dir now.
+    QString source;
+    const QString bundledEnv = qEnvironmentVariable("CR_BUNDLED_CLI");
+    if (!bundledEnv.isEmpty() && QFile::exists(bundledEnv))
+        source = bundledEnv;
+    else if (QFile::exists(QCoreApplication::applicationDirPath() + "/cloud_redirect_cli"))
+        source = QCoreApplication::applicationDirPath() + "/cloud_redirect_cli";
+    else if (QFile::exists("/app/share/cloud_redirect/cloud_redirect_cli"))
+        source = "/app/share/cloud_redirect/cloud_redirect_cli";
+
+    if (!source.isEmpty()) {
+        QDir().mkpath(crDataDir());
+        if (QFile::copy(source, deployed)) {
+            QFile::setPermissions(deployed,
+                QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+                QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+                QFileDevice::ReadOther | QFileDevice::ExeOther);
+            return deployed;
+        }
+    }
+
     return QString();
 }
 
