@@ -31,61 +31,10 @@ static bool QuotaValueLooksValid(uint64_t quota, uint64_t files) {
 
 #ifdef _WIN32
 
-// steamclient64.dll RVAs (IDA image base: 0x138000000, build 1782428855)
-
-// Global CSteamEngine* pointer. Same global used by cloud_intercept.
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17CC738;
-
-// Offset from *CSteamEngine to the CAppInfoCache instance.
-// Pattern observed in many callers:
-//   mov rbx, cs:qword_1397CC738
-//   lea rcx, [rbx + 0xE68]   ; 0xE68 = 3688
-//   call CAppInfoCache::BlockOnInitialization
-static constexpr uintptr_t APPINFOCACHE_OFFSET = 0xE68;
-
-// CAppInfoCache::GetAppInfo(cache, appId) -> appInfo*
-static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x4A2370;
-
-// CAppInfoCache::GetSection(appInfo, sectionId) -> KeyValues*
-// sectionId 10 = "ufs"
-static constexpr uintptr_t SC_RVA_GET_SECTION = 0x4A46A0;
-
-// CAppInfoCache::ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
-static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x4A33E0;
-
-// BlockOnInit -- calls CThread::Join off-engine-thread, crashes/deadlocks. Do not call.
-// Cache is already loaded before our RPC handlers run.
-// static constexpr uintptr_t SC_RVA_BLOCK_ON_INIT = 0x4B4D90;
-
-// KeyValues::FindKey(parent, name, bCreate, out)
-// When bCreate=1 creates the key if not present.
-static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xD01190;
-
-// KeyValues::GetUint64(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xD024E0;
-
-// KeyValues::GetInt(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xD02090;
-
-// KeyValues::SetUint64(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xD02750;
-
-// KeyValues::SetInt(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xD02790;
-
-// KeyValues::SetString(kv, value) -- sets string value on a KV leaf node
-static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xD027D0;
-
-// CAppInfoUpdater::RequestAppInfoUpdate -- not yet wired (offset unconfirmed).
-// Steam's background PICS populates KV on its own schedule; cached values suffice.
-// static constexpr uintptr_t SC_RVA_REQUEST_APP_INFO = 0x4B9EA0;
-
 using GetAppInfoFn = void* (__fastcall*)(void* cache, uint32_t appId);
 using GetSectionFn = void* (__fastcall*)(void* appInfo, uint32_t sectionId);
 using KvFindKeyFn = void* (__fastcall*)(void* parent, const char* name, uint8_t bCreate, void* outChild);
-// ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
 using ReadConfigU64Fn = uint64_t (__fastcall*)(void* cache, uint64_t appId, uint32_t sectionId, const char* keyName, uint64_t defaultVal);
-// KV::GetUint64(kvNode, defaultVal, outStatusOrNull) -- raw node accessor
 using KvGetUint64Fn = uint64_t (__fastcall*)(void* kvNode, uint64_t defaultVal, void* outStatus);
 using KvGetIntFn = int (__fastcall*)(void* kvNode, int defaultVal, void* outStatus);
 using KvSetUint64Fn = void (__fastcall*)(void* kvNode, uint64_t value);
@@ -93,7 +42,7 @@ using KvSetIntFn = void (__fastcall*)(void* kvNode, int value);
 using KvSetStringFn = void (__fastcall*)(void* kvNode, const char* value);
 
 struct Resolved {
-    void** globalEnginePtrPtr = nullptr; // address of qword_1397CC738 (CSteamEngine*)
+    void** globalEnginePtrPtr = nullptr;
     GetAppInfoFn     getAppInfo = nullptr;
     GetSectionFn     getSection = nullptr;
     ReadConfigU64Fn  readConfigU64 = nullptr;
@@ -103,46 +52,65 @@ struct Resolved {
     KvSetUint64Fn    kvSetUint64 = nullptr;
     KvSetIntFn       kvSetInt = nullptr;
     KvSetStringFn    kvSetString = nullptr;
+    uint32_t         appInfoCacheOffset = 0;
 };
 
 static Resolved g_r;
+static ResolvedKvAddrs g_configured;
+static std::atomic<bool> g_configuredSet{false};
 static std::atomic<bool> g_ready{false};
 static std::once_flag g_initOnce;
 
-// Section ID for "ufs" in the app config KV tree.
+// sectionId 10 = "ufs" in the app config KV tree.
 static constexpr uint32_t kSectionUfs = 10;
 
-// Resolve CAppInfoCache from global engine ptr; null if Steam not init'd
 static void* GetCachePtr() {
     if (!g_r.globalEnginePtrPtr) return nullptr;
     void* engine = *g_r.globalEnginePtrPtr;
     if (!engine) return nullptr;
-    return reinterpret_cast<uint8_t*>(engine) + APPINFOCACHE_OFFSET;
+    return reinterpret_cast<uint8_t*>(engine) + g_r.appInfoCacheOffset;
+}
+
+void Configure(const ResolvedKvAddrs& addrs) {
+    g_configured = addrs;
+    g_configuredSet.store(true, std::memory_order_release);
 }
 
 bool Init() {
     bool success = false;
     std::call_once(g_initOnce, [&]() {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) {
-            LOG("[KvInjector] Init: steamclient64.dll not loaded yet");
+        if (!g_configuredSet.load(std::memory_order_acquire)) {
+            LOG("[KvInjector] Init: Configure() not called; resolver addresses required");
             return;
         }
-        uintptr_t base = reinterpret_cast<uintptr_t>(hSC);
-        LOG("[KvInjector] Init: steamclient64.dll base %p", hSC);
 
-        g_r.globalEnginePtrPtr = reinterpret_cast<void**>(base + SC_RVA_GLOBAL_ENGINE);
-        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(base + SC_RVA_GET_APP_INFO);
-        g_r.getSection    = reinterpret_cast<GetSectionFn>(base + SC_RVA_GET_SECTION);
-        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(base + SC_RVA_READ_CONFIG_U64);
-        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(base + SC_RVA_KV_FIND_KEY);
-        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(base + SC_RVA_KV_GET_UINT64);
-        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(base + SC_RVA_KV_GET_INT);
-        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(base + SC_RVA_KV_SET_UINT64);
-        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(base + SC_RVA_KV_SET_INT);
-        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(base + SC_RVA_KV_SET_STRING);
+        const ResolvedKvAddrs& c = g_configured;
+        if (!c.globalEnginePtrPtr || !c.getAppInfo || !c.getSection ||
+            !c.readConfigU64 || !c.kvFindKey || !c.kvGetUint64 || !c.kvGetInt ||
+            !c.kvSetUint64 || !c.kvSetInt || !c.kvSetString || !c.appInfoCacheOffset) {
+            LOG("[KvInjector] Init: resolver supplied incomplete addresses "
+                "(engine=%p getAppInfo=0x%llX getSection=0x%llX readCfg=0x%llX "
+                "find=0x%llX getU64=0x%llX getInt=0x%llX setU64=0x%llX setInt=0x%llX "
+                "setStr=0x%llX cacheOff=0x%X); aborting",
+                c.globalEnginePtrPtr, (uint64_t)c.getAppInfo, (uint64_t)c.getSection,
+                (uint64_t)c.readConfigU64, (uint64_t)c.kvFindKey, (uint64_t)c.kvGetUint64,
+                (uint64_t)c.kvGetInt, (uint64_t)c.kvSetUint64, (uint64_t)c.kvSetInt,
+                (uint64_t)c.kvSetString, c.appInfoCacheOffset);
+            return;
+        }
 
-        // Guard against wrong steamclient build -- bad RVA crashes on first call
+        g_r.globalEnginePtrPtr = c.globalEnginePtrPtr;
+        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(c.getAppInfo);
+        g_r.getSection    = reinterpret_cast<GetSectionFn>(c.getSection);
+        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(c.readConfigU64);
+        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(c.kvFindKey);
+        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(c.kvGetUint64);
+        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(c.kvGetInt);
+        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(c.kvSetUint64);
+        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(c.kvSetInt);
+        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(c.kvSetString);
+        g_r.appInfoCacheOffset = c.appInfoCacheOffset;
+
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery((LPCVOID)g_r.getAppInfo, &mbi, sizeof(mbi)) == 0 ||
             mbi.State != MEM_COMMIT ||
@@ -153,8 +121,8 @@ bool Init() {
             return;
         }
 
-        LOG("[KvInjector] Init: resolved function pointers (engine global @ %p)",
-            g_r.globalEnginePtrPtr);
+        LOG("[KvInjector] Init: using resolver addresses (engine global @ %p, cacheOff 0x%X)",
+            g_r.globalEnginePtrPtr, g_r.appInfoCacheOffset);
         g_ready.store(true, std::memory_order_release);
         success = true;
     });
@@ -656,6 +624,8 @@ static uintptr_t FindCallInRange(uintptr_t funcStart, size_t minOff, size_t maxO
     }
     return 0;
 }
+
+void Configure(const ResolvedKvAddrs&) {}
 
 bool Init() {
     bool success = false;

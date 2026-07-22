@@ -124,51 +124,48 @@ static constexpr uintptr_t SC_RVA_YIELD_IF_TIMESLICE = 0xCEF280;
 // Schema-fetch injection: send EMsg 818 (schema_local_version=-1) on behalf of
 // an owning SteamID; server replies with 819 -> UserGameStatsSchema_<appid>.bin.
 // RVAs from CAPIJobRequestUserStats (sub_138A45010).
-static constexpr uintptr_t SC_RVA_PBMSG_CTOR      = 0xCF8F90;   // CProtoBufMsgBase::ctor(this, emsg, 0)
-static constexpr uintptr_t SC_RVA_PBMSG_FINALIZE  = 0xCFBB30;   // allocate typed body (sub_138CFBB30)
-static constexpr uintptr_t SC_RVA_PBMSG_CLEANUP   = 0xCF9240;   // destroy msg
-static constexpr uintptr_t SC_RVA_GETUSERSTATS_DESC = 0x16F1670; // CMsgClientGetUserStats body descriptor
+static constexpr uintptr_t SC_RVA_PBMSG_CTOR      = 0xCFC7D0;   // CProtoBufMsgBase::ctor(this, emsg, 0)
+static constexpr uintptr_t SC_RVA_PBMSG_FINALIZE  = 0xCFF370;   // allocate typed body (sub_138CFF370)
+static constexpr uintptr_t SC_RVA_PBMSG_CLEANUP   = 0xCFCA80;   // destroy msg
+static constexpr uintptr_t SC_RVA_GETUSERSTATS_DESC = 0x16F8830; // CMsgClientGetUserStats body descriptor
 // Typed vtable for CProtoBufMsg<CMsgClientGetUserStats>.
 // Must be at msg[0] after base ctor; base vftable -> serialization crash.
-static constexpr uintptr_t SC_RVA_GETUSERSTATS_VFTABLE = 0x1341318;
+static constexpr uintptr_t SC_RVA_GETUSERSTATS_VFTABLE = 0x1347988;
 static constexpr uint32_t EMSG_CLIENT_GET_USER_STATS = 818;
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
-// qword_1397CC738 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17CC738;
+// qword_1397D3628 = global CSteamEngine* pointer
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17D3628;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x12737D8;
-// sub_138CFEAB0 = CNetPacket->CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCFEAB0;
-// sub_138D0A310 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD0A310;
-// sub_1380EC350 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC350;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x1279888;
+// sub_138D022F0 = CNetPacket->CProtoBufNetPacket wrapper
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD022F0;
+// sub_138D0DBD0 = CJobMgr::BRouteMsgToJob
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD0DBD0;
+// sub_1380EC300 = Release wrapped packet (CProtoBufNetPacket ref-count release)
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC300;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1250EA0;
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1256DF0;
 // protobuf ParseFromArray, 3-arg (msgObj, data, int size)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBCCBC0;
-// sub_138BCCFD0 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBCCFD0;
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBD03F0;
+// sub_138BD0800 = protobuf SerializeToArray (writes body to raw bytes)
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBD0800;
 // CUser playtime state helpers
-static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BFA40;
-static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CFEF0;
-static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D2D20;
-// Live playtime update (sub_1389DA1D0): synthesized GetLastPlayedTimes response.
-//   sub_1389C7930  = writer (updates m_mapTrackingPlaytimeForApp + localconfig)
-//   sub_138CF07F0  = CProtoBufMsg ctor,  sub_138CF3390 = init,  sub_138CF0AA0 = dtor
-//   off_1396C1360  = Response descriptor, off_1396D3F48 = LastPlayedTimesSyncTime key
-// Build 1782428855 RVAs:
-static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9D06A0;
-static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCF8F90;
-static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xD02710;
-static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCF9240;
-static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16CE4D8;
-static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x132DD40;
-// off_1396E10C8: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
-static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16E10C8;
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9C37A0;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9D3C40;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D6A70;
+// Live playtime update: synthesized GetLastPlayedTimes response.
+// Build 1784669098 RVAs:
+static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9CFDA0;
+static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCFC7D0;
+static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xCFF370;  // unused; same as PBMSG_FINALIZE
+static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCFCA80;
+static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16D5590;
+static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x1334340;
+// off_1396E8248: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
+static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16E8248;
 // CUser member offsets used by the writer path
 static constexpr uint32_t USER_OFF_REGISTRY          = 3272;   // CUser+0xCC8: registry obj (sync-time write)
 // Inner CPlayer_GetLastPlayedTimes_Response message offsets
@@ -343,6 +340,20 @@ static void RunAutoResolver() {
     }
     g_resolved = ScResolver::Resolve(g_steamClientBase);
     ScResolver::LogComparison(g_resolved, g_steamClientBase);
+
+    SteamKvInjector::ResolvedKvAddrs kv;
+    kv.globalEnginePtrPtr  = reinterpret_cast<void**>(g_resolved.globalEngine);
+    kv.getAppInfo          = g_resolved.getAppInfo;
+    kv.getSection          = g_resolved.getSection;
+    kv.readConfigU64       = g_resolved.readConfigU64;
+    kv.kvFindKey           = g_resolved.kvFindKey;
+    kv.kvGetUint64         = g_resolved.kvGetUint64;
+    kv.kvGetInt            = g_resolved.kvGetInt;
+    kv.kvSetUint64         = g_resolved.kvSetUint64;
+    kv.kvSetInt            = g_resolved.kvSetInt;
+    kv.kvSetString         = g_resolved.kvSetString;
+    kv.appInfoCacheOffset  = g_resolved.engineOffAppInfoCache;
+    SteamKvInjector::Configure(kv);
 }
 
 static std::string g_steamPath;
@@ -2195,7 +2206,6 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     bool isCompleteBatch = (strcmp(methodName, RPC_COMPLETE_BATCH) == 0);
     if (isCompleteBatch || strcmp(methodName, RPC_BEGIN_BATCH) == 0) {
         uintptr_t jobPtr = ReadCurrentJobPtr();
-        // coroutine-active = can legally yield here (decisive for cooperative upload).
         bool coroActive = CoroutineActiveNow();
         LOG("[FiberProbe] %s app=%u: g_pJobCur=%p (on-fiber=%d) jobid=%llu coro-active=%d",
             methodName, appId, (void*)jobPtr, jobPtr != 0 ? 1 : 0, ReadCurrentJobId(),

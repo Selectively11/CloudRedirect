@@ -349,29 +349,9 @@ static uintptr_t ResolveBRouteMsgToJob() {
 }
 
 // ── KvFindKey ─────────────────────────────────────────────────────────
-// Unique 16B signature (position-independent):
-//   48 8B C4  57  48 81 EC 50 04 00 00  48 89 70 20  48
-// The 0x450 stack frame is very distinctive for this function.
 
 static uintptr_t ResolveKvFindKey() {
-    static const uint8_t pat[] = {
-        0x48, 0x8B, 0xC4,                    // mov rax, rsp
-        0x57,                                 // push rdi
-        0x48, 0x81, 0xEC, 0x50, 0x04, 0x00, 0x00,  // sub rsp, 450h
-        0x48, 0x89, 0x70, 0x20,              // mov [rax+20h], rsi
-        0x48, 0x8B, 0xFA,                    // mov rdi, rdx
-    };
-    static const char mask[] = "xxxxxxxxxxxxxxxxxx";
-
-    uintptr_t result = SigScanner::FindPattern(pat, mask, 18);
-    if (result) {
-        LOG("[Resolver] KvFindKey @ %p (RVA 0x%llX) via signature",
-            (void*)result, (uint64_t)(result - SigScanner::GetImageBase()));
-        return result;
-    }
-
-    // Fallback: string xref
-    return ResolveFuncByStringXref("KeyValues::FindKey", "KvFindKey");
+    return ResolveFuncByStringXref("KeyValues::FindKey( StringView ... )", "KvFindKey");
 }
 
 // ── KvSetUint64 / KvSetInt / KvSetString ──────────────────────────────
@@ -1033,7 +1013,7 @@ ResolvedAddrs Resolve(uintptr_t steamClientBase) {
     r.engineOffUserMap      = 0;
     r.ccmOffConnContext     = 0;
     r.userOffCcmInterface   = 0;
-    r.engineOffAppInfoCache = 0;
+    r.engineOffAppInfoCache = 0xE68;
 
     LOG("[Resolver] === Auto-resolution complete ===");
     return r;
@@ -1057,42 +1037,42 @@ void LogComparison(const ResolvedAddrs& r, uintptr_t base) {
         }
     };
 
-    logEntry("CCMInterface VT",        r.ccmInterfaceVtable,      0x12737D8);
-    logEntry("ServiceTransport VT",    r.serviceTransportVtable,  0x1250EA0);
-    logEntry("GlobalEngine",           r.globalEngine,            0x17CC738);
-    logEntry("ParseFromArray",         r.parseFromArray,          0xBCCBC0);
-    logEntry("SerializeToArray",       r.serializeToArray,        0xBCCFD0);
-    logEntry("WrapPacket",             r.wrapPacket,              0xCFEAB0);
-    logEntry("BRouteMsgToJob",         r.bRouteMsgToJob,          0xD0A310);
-    logEntry("ReleaseWrapped",         r.releaseWrapped,          0x0EC350);
-    logEntry("RefCountHelper",         r.refCountHelper,          0xDC2D70);
-    logEntry("FindJob",                r.findJob,                 0xD0CDB0);
-    logEntry("RefCountGlobal",         r.refCountGlobal,          0x17B7E38);
-    logEntry("JobCurGlobal",           r.jobCurGlobal,            0x17E9CC0);
-    logEntry("BuildDepotDependency",   r.buildDepotDependency,    0x4B13A0);
-    logEntry("GetAppMinutesPlayed",    r.getAppMinutesPlayedData, 0x9BFA40);
-    logEntry("FlushAppMinutesPlayed",  r.flushAppMinutesPlayed,   0x9CFEF0);
-    logEntry("SetAppLastPlayedTime",   r.setAppLastPlayedTime,    0x9D2D20);
+    logEntry("CCMInterface VT",        r.ccmInterfaceVtable,      0x1279888);
+    logEntry("ServiceTransport VT",    r.serviceTransportVtable,  0x1256DF0);
+    logEntry("GlobalEngine",           r.globalEngine,            0x17D3628);
+    logEntry("ParseFromArray",         r.parseFromArray,          0xBD03F0);
+    logEntry("SerializeToArray",       r.serializeToArray,        0xBD0800);
+    logEntry("WrapPacket",             r.wrapPacket,              0xD022F0);
+    logEntry("BRouteMsgToJob",         r.bRouteMsgToJob,          0xD0DBD0);
+    logEntry("ReleaseWrapped",         r.releaseWrapped,          0x0EC300);
+    logEntry("RefCountHelper",         r.refCountHelper,          0xDC6ED0);
+    logEntry("FindJob",                r.findJob,                 0xD10670);
+    logEntry("RefCountGlobal",         r.refCountGlobal,          0x17BED58);
+    logEntry("JobCurGlobal",           r.jobCurGlobal,            0x17F0940);
+    logEntry("BuildDepotDependency",   r.buildDepotDependency,    0x4B73B0);
+    logEntry("GetAppMinutesPlayed",    r.getAppMinutesPlayedData, 0x9C37A0);
+    logEntry("FlushAppMinutesPlayed",  r.flushAppMinutesPlayed,   0x9D3C40);
+    logEntry("SetAppLastPlayedTime",   r.setAppLastPlayedTime,    0x9D6A70);
     logEntry("KvFindKey",              r.kvFindKey,               0xD01190);
-    logEntry("KvGetUint64",            r.kvGetUint64,             0xD024E0);
-    logEntry("KvGetInt",               r.kvGetInt,                0xD02090);
-    logEntry("KvSetUint64",            r.kvSetUint64,             0xD02750);
-    logEntry("KvSetInt",               r.kvSetInt,                0xD02790);
-    logEntry("KvSetString",            r.kvSetString,             0xD027D0);
-    logEntry("GetAppInfo",             r.getAppInfo,              0x4A2370);
-    logEntry("GetSection",             r.getSection,              0x4A46A0);
-    logEntry("ReadConfigU64",          r.readConfigU64,           0x4A33E0);
-    logEntry("BAsyncSend",             r.bAsyncSend,              0xCF9590);
-    logEntry("PlaytimeWriter",         r.playtimeWriter,          0x9CC050);
-    logEntry("PbMsgCtor",              r.pbMsgCtor,               0xCF8F90);
-    logEntry("PbMsgFinalize",          r.pbMsgFinalize,           0xCFBB30);
-    logEntry("PbMsgCleanup",           r.pbMsgCleanup,            0xCF9240);
-    logEntry("YieldIfTimeSlice",       r.yieldIfTimeSlice,        0xCEF280);
-    logEntry("GetUserStatsVtable",     r.getUserStatsVtable,      0x1341318);
-    logEntry("GetUserStatsDesc",       r.getUserStatsDesc,        0x16F1670);
-    logEntry("RespWrapperVtable",      r.respWrapperVtable,       0x132DD40);
-    logEntry("RespDescriptor",         r.respDescriptor,          0x16CE4D8);
-    logEntry("RegKeySyncTime",         r.regKeySyncTime,          0x16E10C8);
+    logEntry("KvGetUint64",            r.kvGetUint64,             0xD05E20);
+    logEntry("KvGetInt",               r.kvGetInt,                0xD059D0);
+    logEntry("KvSetUint64",            r.kvSetUint64,             0xD06090);
+    logEntry("KvSetInt",               r.kvSetInt,                0xD060D0);
+    logEntry("KvSetString",            r.kvSetString,             0xD06110);
+    logEntry("GetAppInfo",             r.getAppInfo,              0x4A8380);
+    logEntry("GetSection",             r.getSection,              0x4AA6B0);
+    logEntry("ReadConfigU64",          r.readConfigU64,           0x4A93F0);
+    logEntry("BAsyncSend",             r.bAsyncSend,              0xCFCDD0);
+    logEntry("PlaytimeWriter",         r.playtimeWriter,          0x9CFDA0);
+    logEntry("PbMsgCtor",              r.pbMsgCtor,               0xCFC7D0);
+    logEntry("PbMsgFinalize",          r.pbMsgFinalize,           0xCFF370);
+    logEntry("PbMsgCleanup",           r.pbMsgCleanup,            0xCFCA80);
+    logEntry("YieldIfTimeSlice",       r.yieldIfTimeSlice,        0xCF2AC0);
+    logEntry("GetUserStatsVtable",     r.getUserStatsVtable,      0x1347988);
+    logEntry("GetUserStatsDesc",       r.getUserStatsDesc,        0x16F8830);
+    logEntry("RespWrapperVtable",      r.respWrapperVtable,       0x1334340);
+    logEntry("RespDescriptor",         r.respDescriptor,          0x16D5590);
+    logEntry("RegKeySyncTime",         r.regKeySyncTime,          0x16E8248);
 
     LOG("[Resolver] Result: %d/%d matched, %d failed", matched, total, failed);
 }

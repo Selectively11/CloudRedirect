@@ -8,6 +8,22 @@
 
 namespace SteamKvInjector {
 
+struct ResolvedKvAddrs {
+    void**    globalEnginePtrPtr = nullptr;
+    uintptr_t getAppInfo    = 0;
+    uintptr_t getSection    = 0;
+    uintptr_t readConfigU64 = 0;
+    uintptr_t kvFindKey     = 0;
+    uintptr_t kvGetUint64   = 0;
+    uintptr_t kvGetInt      = 0;
+    uintptr_t kvSetUint64   = 0;
+    uintptr_t kvSetInt      = 0;
+    uintptr_t kvSetString   = 0;
+    uint32_t  appInfoCacheOffset = 0;
+};
+
+void Configure(const ResolvedKvAddrs& addrs);
+
 bool Init();
 
 bool IsReady();
