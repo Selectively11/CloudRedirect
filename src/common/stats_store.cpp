@@ -63,6 +63,11 @@ static uint32_t g_diskAccountId = 0;
 // Active play sessions: appId -> session start (unix time). Guarded by g_mutex.
 static std::unordered_map<uint32_t, uint32_t> g_activeSessions;
 
+// Seconds left over from the last session's minute conversion, per app, so the
+// truncation doesn't discard them. Process-local by design: persisting it would
+// mean a new blob field and merge rule for at most 59 seconds. g_mutex.
+static std::unordered_map<uint32_t, uint32_t> g_carrySeconds;
+
 // Apps reset this session; push replaces (not merges) these. g_mutex.
 static std::unordered_set<uint32_t> g_resetApps;
 
@@ -673,6 +678,7 @@ bool ResetForAccountSwitch(uint32_t newAccountId) {
     g_cloudBlobMerged.clear();
     g_dirty.clear();
     g_activeSessions.clear();
+    g_carrySeconds.clear();
     g_resetApps.clear();
     g_diskLoadPending.clear();
     g_accountBlobDirty = false;
@@ -693,6 +699,7 @@ void ResetForTesting() {
     g_cloudBlobMerged.clear();
     g_dirty.clear();
     g_activeSessions.clear();
+    g_carrySeconds.clear();
     g_resetApps.clear();
     g_diskLoadPending.clear();
     g_accountBlobDirty = false;
@@ -2214,7 +2221,13 @@ static bool EndSessionLocked(uint32_t appId) {
     // resume) must not over-count a session. Backward jumps already clamp to 0.
     const uint32_t kMaxSessionSecs = 24u * 60 * 60;
     if (elapsed > kMaxSessionSecs) elapsed = kMaxSessionSecs;
-    uint32_t minutes = elapsed / 60;
+    // Add the seconds the previous session's truncation left over and keep this
+    // one's remainder for the next. Without the carry, minute conversion discards
+    // up to 59 s per session -- a bias that is always downward and adds up over
+    // many short sessions (five 5:59 sessions counted 25 min instead of 29).
+    uint32_t total = elapsed + g_carrySeconds[appId];
+    uint32_t minutes = total / 60;
+    g_carrySeconds[appId] = total % 60;
     g_activeSessions.erase(it);
 
     // Seed first so the cloud blob's cross-device unlocks are in the record we
@@ -2268,7 +2281,10 @@ PlaytimeData GetPlaytime(uint32_t appId) {
         // over-count the in-progress session's live playtime estimate.
         const uint32_t kMaxSessionSecs = 24u * 60 * 60;
         if (elapsed > kMaxSessionSecs) elapsed = kMaxSessionSecs;
-        uint32_t minutes = elapsed / 60;
+        // Include the carry, matching EndSession, so the live estimate and the
+        // value finally stored agree instead of differing by a minute.
+        auto carry = g_carrySeconds.find(appId);
+        uint32_t minutes = (elapsed + (carry != g_carrySeconds.end() ? carry->second : 0)) / 60;
         pt.minutesForever += minutes;
         pt.minutesLastTwoWeeks += minutes;
 #ifdef _WIN32
