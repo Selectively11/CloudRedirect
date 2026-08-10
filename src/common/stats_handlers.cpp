@@ -302,7 +302,7 @@ std::optional<std::vector<uint8_t>> HandleLegacyStoreUserStats2(
 }
 
 // Observe CMsgClientGamesPlayed (EMsg 5410) for playtime session tracking.
-void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
+std::vector<uint32_t> ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
     auto fields = PB::Parse(body, bodyLen);
 
     std::unordered_set<uint32_t> currentApps;
@@ -342,6 +342,7 @@ void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen) {
     for (uint32_t appId : ended) {
         g_activeApps.erase(appId);
     }
+    return ended;
 }
 
 // Observe StoreUserStats2 (EMsg 5466) -- re-read native blob for new unlocks.

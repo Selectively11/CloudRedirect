@@ -45,8 +45,12 @@ std::optional<std::vector<uint8_t>> HandleLegacyGetUserStats(
 std::optional<std::vector<uint8_t>> HandleLegacyStoreUserStats2(
     const uint8_t* body, size_t bodyLen, uint64_t steamId);
 
-// Observe CMsgClientGamesPlayed (EMsg 5410) for playtime tracking.
-void ObserveGamesPlayed(const uint8_t* body, size_t bodyLen);
+// Observe CMsgClientGamesPlayed (EMsg 5410) for playtime tracking. Returns the
+// apps whose session just ended, so a platform with a live writer can push their
+// fresh minutes into the running client -- the cloud poller only ever queues apps
+// the CLOUD advanced, so a local session would otherwise sit unseen until Steam's
+// next natural GetLastPlayedTimes (in practice: a restart).
+std::vector<uint32_t> ObserveGamesPlayed(const uint8_t* body, size_t bodyLen);
 
 // Observe CMsgClientStoreUserStats2 (EMsg 5466) to capture achievement unlocks
 // the moment the game stores them. body = serialized message; game_id is field 1.

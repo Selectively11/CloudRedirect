@@ -1,6 +1,7 @@
 #include "gamesplayed_hook.h"
 #include "stats_handlers.h"
 #include "metadata_sync.h"
+#include "live_playtime.h"
 #include "log.h"
 
 #include <atomic>
@@ -95,7 +96,22 @@ extern "C" int GamesPlayedHook_OnSend(int cmInterface, void* msg) {
                     if (isGamesPlayed) {
                         LOG("[Stats] GamesPlayed observed (emsg=%u, %zu bytes) -> session tracking",
                             emsg, len);
-                        StatsHandlers::ObserveGamesPlayed(bytes, len);
+                        auto ended = StatsHandlers::ObserveGamesPlayed(bytes, len);
+                        // Push our own just-ended session into the running client.
+                        // The cloud poller queues exclusively what the CLOUD
+                        // advanced, so without this the fresh minutes wait for
+                        // Steam's next natural GetLastPlayedTimes -- in practice a
+                        // restart. Queue is thread-safe; the drain in BYieldingSend
+                        // applies it on the next send.
+                        if (!ended.empty() && LivePlaytime::Ready()) {
+                            PB::Writer notice =
+                                StatsHandlers::BuildLastPlayedNotificationBody(ended);
+                            if (notice.Size() > 0) {
+                                LivePlaytime::Queue(notice.Data());
+                                LOG("[Stats] Queued live playtime update for %zu local app(s)",
+                                    ended.size());
+                            }
+                        }
                     } else {
                         LOG("[Stats] StoreUserStats2 observed (emsg=%u, %zu bytes) -> capturing unlocks",
                             emsg, len);
