@@ -54,11 +54,17 @@ struct DevicePlaytime {
     uint32_t windows = 0;
     uint32_t mac = 0;
     uint32_t lin = 0;   // NOTE: not 'linux' -- that's a predefined macro on Linux/GCC
+    // Minutes bucketed by day index (unix ts / 86400), used to derive the rolling
+    // two-week total. Pruned to the window on every recompute, so this holds at
+    // most ~15 entries per device -- unlike a raw session list, it cannot grow.
+    std::map<uint32_t, uint32_t> days;
 };
 
 struct PlaytimeData {
     // Derived totals (recomputed from perDevice).
     uint32_t minutesForever = 0;
+    // Derived from the perDevice day buckets when daysTracked; otherwise carries
+    // the legacy max-merged value from blobs written before day tracking existed.
     uint32_t minutesLastTwoWeeks = 0;
     uint32_t lastPlayedTime = 0;       // unix timestamp (max across devices)
     uint32_t playtimeWindows = 0;
@@ -67,6 +73,12 @@ struct PlaytimeData {
 
     // Per-device sub-totals keyed by hostname (merge source of truth).
     std::map<std::string, DevicePlaytime> perDevice;
+
+    // True once any device bucket carries day tracking (parsed from a blob that
+    // had it, or accrued locally). Gates the derived two-week total: without it
+    // the value must keep its legacy max-merge, with it the value must be free
+    // to shrink, else it could never decay back to zero.
+    bool daysTracked = false;
 };
 
 struct AppStats {
