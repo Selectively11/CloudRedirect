@@ -231,29 +231,6 @@ static bool EnumerateSaveFiles(const std::string& directory,
     return true;
 }
 
-static bool RemoveAllObjectVersions(ICloudProvider& provider, const std::string& path) {
-    if (!provider.SupportsVersioning()) return provider.Remove(path);
-    std::vector<ICloudProvider::FileInfo> versions;
-    if (!provider.ListVersions(path, versions)) return false;
-    bool ok = true;
-    for (const auto& version : versions) {
-        if (!version.versionId.empty() && !provider.RemoveVersion(path, version.versionId)) ok = false;
-    }
-    return ok;
-}
-
-static bool PurgeSupersededObjectVersions(ICloudProvider& provider, const std::string& path) {
-    if (!provider.SupportsVersioning()) return true;
-    std::vector<ICloudProvider::FileInfo> versions;
-    if (!provider.ListVersions(path, versions)) return false;
-    bool ok = true;
-    for (const auto& version : versions) {
-        if (!version.isLatest && !version.versionId.empty() &&
-            !provider.RemoveVersion(path, version.versionId)) ok = false;
-    }
-    return ok;
-}
-
 static std::string GetSaveProviderInitPath(const std::string& providerName) {
     if (providerName != "folder" && providerName != "local") return GetTokenPath(providerName);
 
@@ -309,9 +286,7 @@ std::string CmdSaveUpload(const std::string& providerName, const std::string& ac
 
     const std::string folder = SanitizeGameFolderName(gameName);
     const std::string prefix = accountId + "/" + appId + "/" + folder + "/";
-    std::unordered_set<std::string> wantedPaths;
     uint64_t totalBytes = 0;
-    bool versionCleanupOk = true;
     for (const auto& [relative, localPath] : localFiles) {
         std::vector<uint8_t> content;
         if (!ReadBinaryFile(localPath, content)) {
@@ -323,25 +298,7 @@ std::string CmdSaveUpload(const std::string& providerName, const std::string& ac
             provider->Shutdown();
             return JsonError("Save file upload failed: " + relative);
         }
-        wantedPaths.insert(cloudPath);
         totalBytes += content.size();
-        if (!PurgeSupersededObjectVersions(*provider, cloudPath)) versionCleanupOk = false;
-    }
-
-    std::vector<ICloudProvider::FileInfo> remoteFiles;
-    bool complete = false;
-    if (!provider->ListChecked(prefix, remoteFiles, &complete) || !complete) {
-        provider->Shutdown();
-        return JsonError("Save files uploaded, but stale remote files could not be checked");
-    }
-    size_t removed = 0;
-    for (const auto& remote : remoteFiles) {
-        if (remote.path.rfind(prefix, 0) != 0 || wantedPaths.contains(remote.path)) continue;
-        if (!RemoveAllObjectVersions(*provider, remote.path)) {
-            provider->Shutdown();
-            return JsonError("Save files uploaded, but a stale remote file could not be removed");
-        }
-        ++removed;
     }
     provider->Shutdown();
 
@@ -349,9 +306,7 @@ std::string CmdSaveUpload(const std::string& providerName, const std::string& ac
         {"success", JsonBool(true)},
         {"game", JsonString(folder)},
         {"files", JsonInt(static_cast<int64_t>(localFiles.size()))},
-        {"removed", JsonInt(static_cast<int64_t>(removed))},
-        {"bytes", JsonInt(static_cast<int64_t>(totalBytes))},
-        {"version_cleanup", JsonBool(versionCleanupOk)}
+        {"bytes", JsonInt(static_cast<int64_t>(totalBytes))}
     });
 }
 
