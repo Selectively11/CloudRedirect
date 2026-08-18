@@ -24,6 +24,10 @@
 #include <thread>
 #include <atomic>
 #include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
 #include <unordered_set>
 
 #ifdef _WIN32
@@ -38,6 +42,16 @@
 namespace CloudRedirectCli {
 
 static std::string GetConfigDir() {
+    if (const char* overrideDir = std::getenv("CLOUD_REDIRECT_CONFIG_DIR");
+        overrideDir != nullptr && *overrideDir != '\0') {
+        std::string result = overrideDir;
+#ifdef _WIN32
+        if (result.back() != '\\' && result.back() != '/') result += '\\';
+#else
+        if (result.back() != '/') result += '/';
+#endif
+        return result;
+    }
 #ifdef _WIN32
     wchar_t* appDataPath = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appDataPath))) {
@@ -133,6 +147,325 @@ static std::string JsonInt(int64_t n) {
 
 static std::string JsonError(const std::string& message) {
     return JsonObject({{"success", JsonBool(false)}, {"error", JsonString(message)}});
+}
+
+static bool IsPositiveDecimal(const std::string& value) {
+    return !value.empty() && value != "0" &&
+           std::all_of(value.begin(), value.end(), [](unsigned char c) { return c >= '0' && c <= '9'; });
+}
+
+static bool ReadBinaryFile(const std::string& path, std::vector<uint8_t>& out) {
+    std::ifstream file(FileUtil::Utf8ToPath(path), std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    auto size = file.tellg();
+    if (size < 0 || static_cast<uint64_t>(size) > 2ULL * 1024 * 1024 * 1024) return false;
+    out.resize(static_cast<size_t>(size));
+    if (size == 0) return true;
+    file.seekg(0, std::ios::beg);
+    return static_cast<bool>(file.read(reinterpret_cast<char*>(out.data()), size));
+}
+
+static std::string SanitizeGameFolderName(const std::string& gameName) {
+    std::string result;
+    result.reserve(gameName.size());
+    for (unsigned char c : gameName) {
+        const bool invalid = c < 32 || c == '/' || c == '\\' || c == ':' || c == '*' ||
+                             c == '?' || c == '"' || c == '<' || c == '>' || c == '|';
+        result.push_back(invalid ? '_' : static_cast<char>(c));
+    }
+    while (!result.empty() && (result.back() == ' ' || result.back() == '.')) result.pop_back();
+    size_t first = result.find_first_not_of(' ');
+    if (first == std::string::npos) return "Game";
+    result.erase(0, first);
+    if (result == "." || result == "..") return "Game";
+    return result;
+}
+
+static bool SafeSaveRelativePath(const std::string& relative) {
+    if (relative.empty() || relative.front() == '/' || relative.front() == '\\') return false;
+    std::string part;
+    std::istringstream stream(relative);
+    while (std::getline(stream, part, '/')) {
+        if (part.empty() || part == "." || part == ".." || part.find('\\') != std::string::npos)
+            return false;
+#ifdef _WIN32
+        if (part.find(':') != std::string::npos) return false;
+#endif
+    }
+    return true;
+}
+
+static bool EnumerateSaveFiles(const std::string& directory,
+                               std::vector<std::pair<std::string, std::string>>& out,
+                               std::string& error) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path root = fs::weakly_canonical(FileUtil::Utf8ToPath(directory), ec);
+    if (ec || !fs::is_directory(root, ec)) {
+        error = "Prepared save directory was not found";
+        return false;
+    }
+
+    fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec) || ec) continue;
+        fs::path relativePath = fs::relative(it->path(), root, ec);
+        if (ec) break;
+        std::string relative = FileUtil::PathToUtf8(relativePath);
+        std::replace(relative.begin(), relative.end(), '\\', '/');
+        if (!SafeSaveRelativePath(relative)) {
+            error = "Prepared save directory contains an unsafe path";
+            return false;
+        }
+        out.emplace_back(relative, FileUtil::PathToUtf8(it->path()));
+    }
+    if (ec) {
+        error = "Could not enumerate prepared save files";
+        return false;
+    }
+    std::sort(out.begin(), out.end());
+    if (out.empty()) {
+        error = "Prepared save directory contains no files";
+        return false;
+    }
+    return true;
+}
+
+static bool RemoveAllObjectVersions(ICloudProvider& provider, const std::string& path) {
+    if (!provider.SupportsVersioning()) return provider.Remove(path);
+    std::vector<ICloudProvider::FileInfo> versions;
+    if (!provider.ListVersions(path, versions)) return false;
+    bool ok = true;
+    for (const auto& version : versions) {
+        if (!version.versionId.empty() && !provider.RemoveVersion(path, version.versionId)) ok = false;
+    }
+    return ok;
+}
+
+static bool PurgeSupersededObjectVersions(ICloudProvider& provider, const std::string& path) {
+    if (!provider.SupportsVersioning()) return true;
+    std::vector<ICloudProvider::FileInfo> versions;
+    if (!provider.ListVersions(path, versions)) return false;
+    bool ok = true;
+    for (const auto& version : versions) {
+        if (!version.isLatest && !version.versionId.empty() &&
+            !provider.RemoveVersion(path, version.versionId)) ok = false;
+    }
+    return ok;
+}
+
+static std::string GetSaveProviderInitPath(const std::string& providerName) {
+    if (providerName != "folder" && providerName != "local") return GetTokenPath(providerName);
+
+    std::string configPath = GetConfigDir() + "config.json";
+    std::ifstream file(FileUtil::Utf8ToPath(configPath), std::ios::binary);
+    if (!file) return "";
+    std::ostringstream content;
+    content << file.rdbuf();
+    auto config = Json::Parse(content.str());
+    return config.type == Json::Type::Object && config.has("sync_path")
+        ? config["sync_path"].str()
+        : "";
+}
+
+static bool InitSaveProvider(const std::string& providerName,
+                             std::unique_ptr<ICloudProvider>& provider,
+                             std::string& error) {
+    std::string initPath = GetSaveProviderInitPath(providerName);
+    if (initPath.empty()) {
+        error = "Cannot determine provider configuration";
+        return false;
+    }
+    provider = CreateCloudProvider(providerName);
+    if (!provider) {
+        error = "Unknown provider: " + providerName;
+        return false;
+    }
+    if (!provider->Init(initPath)) {
+        error = "Failed to initialize provider";
+        return false;
+    }
+    if (!provider->IsAuthenticated()) {
+        provider->Shutdown();
+        provider.reset();
+        error = "Not authenticated";
+        return false;
+    }
+    return true;
+}
+
+std::string CmdSaveUpload(const std::string& providerName, const std::string& accountId,
+                          const std::string& appId, const std::string& gameName,
+                          const std::string& sourceDirectory) {
+    if (!IsPositiveDecimal(accountId) || !IsPositiveDecimal(appId))
+        return JsonError("Invalid account_id or app_id");
+
+    std::vector<std::pair<std::string, std::string>> localFiles;
+    std::string error;
+    if (!EnumerateSaveFiles(sourceDirectory, localFiles, error)) return JsonError(error);
+
+    std::unique_ptr<ICloudProvider> provider;
+    if (!InitSaveProvider(providerName, provider, error)) return JsonError(error);
+
+    const std::string folder = SanitizeGameFolderName(gameName);
+    const std::string prefix = accountId + "/" + appId + "/" + folder + "/";
+    std::unordered_set<std::string> wantedPaths;
+    uint64_t totalBytes = 0;
+    bool versionCleanupOk = true;
+    for (const auto& [relative, localPath] : localFiles) {
+        std::vector<uint8_t> content;
+        if (!ReadBinaryFile(localPath, content)) {
+            provider->Shutdown();
+            return JsonError("A save file is unreadable or larger than 2 GiB: " + relative);
+        }
+        const std::string cloudPath = prefix + relative;
+        if (!provider->Upload(cloudPath, content.data(), content.size())) {
+            provider->Shutdown();
+            return JsonError("Save file upload failed: " + relative);
+        }
+        wantedPaths.insert(cloudPath);
+        totalBytes += content.size();
+        if (!PurgeSupersededObjectVersions(*provider, cloudPath)) versionCleanupOk = false;
+    }
+
+    std::vector<ICloudProvider::FileInfo> remoteFiles;
+    bool complete = false;
+    if (!provider->ListChecked(prefix, remoteFiles, &complete) || !complete) {
+        provider->Shutdown();
+        return JsonError("Save files uploaded, but stale remote files could not be checked");
+    }
+    size_t removed = 0;
+    for (const auto& remote : remoteFiles) {
+        if (remote.path.rfind(prefix, 0) != 0 || wantedPaths.contains(remote.path)) continue;
+        if (!RemoveAllObjectVersions(*provider, remote.path)) {
+            provider->Shutdown();
+            return JsonError("Save files uploaded, but a stale remote file could not be removed");
+        }
+        ++removed;
+    }
+    provider->Shutdown();
+
+    return JsonObject({
+        {"success", JsonBool(true)},
+        {"game", JsonString(folder)},
+        {"files", JsonInt(static_cast<int64_t>(localFiles.size()))},
+        {"removed", JsonInt(static_cast<int64_t>(removed))},
+        {"bytes", JsonInt(static_cast<int64_t>(totalBytes))},
+        {"version_cleanup", JsonBool(versionCleanupOk)}
+    });
+}
+
+std::string CmdSaveDownload(const std::string& providerName, const std::string& accountId,
+                            const std::string& appId, const std::string& gameName,
+                            const std::string& outputDirectory) {
+    if (!IsPositiveDecimal(accountId) || !IsPositiveDecimal(appId))
+        return JsonError("Invalid account_id or app_id");
+
+    std::unique_ptr<ICloudProvider> provider;
+    std::string error;
+    if (!InitSaveProvider(providerName, provider, error)) return JsonError(error);
+
+    const std::string folder = SanitizeGameFolderName(gameName);
+    const std::string prefix = accountId + "/" + appId + "/" + folder + "/";
+    std::vector<ICloudProvider::FileInfo> listed;
+    bool complete = false;
+    if (!provider->ListChecked(prefix, listed, &complete) || !complete) {
+        provider->Shutdown();
+        return JsonError("Could not list save files");
+    }
+
+    std::vector<std::string> saveFiles;
+    for (const auto& item : listed) {
+        if (item.path.rfind(prefix, 0) == 0 && item.path.size() > prefix.size())
+            saveFiles.push_back(item.path);
+    }
+    if (saveFiles.empty()) {
+        provider->Shutdown();
+        return JsonError("No save files found");
+    }
+    std::sort(saveFiles.begin(), saveFiles.end());
+
+    namespace fs = std::filesystem;
+    fs::path outputRoot = FileUtil::Utf8ToPath(outputDirectory);
+    std::error_code ec;
+    fs::create_directories(outputRoot, ec);
+    if (ec) {
+        provider->Shutdown();
+        return JsonError("Could not create save download directory");
+    }
+
+    uint64_t totalBytes = 0;
+    for (const auto& cloudPath : saveFiles) {
+        const std::string relative = cloudPath.substr(prefix.size());
+        if (!SafeSaveRelativePath(relative)) {
+            provider->Shutdown();
+            fs::remove_all(outputRoot, ec);
+            return JsonError("Cloud save contains an unsafe path");
+        }
+        std::vector<uint8_t> content;
+        if (!provider->Download(cloudPath, content)) {
+            provider->Shutdown();
+            fs::remove_all(outputRoot, ec);
+            return JsonError("Save file download failed: " + relative);
+        }
+        fs::path destination = outputRoot / FileUtil::Utf8ToPath(relative);
+        fs::create_directories(destination.parent_path(), ec);
+        if (ec || !FileUtil::AtomicWriteBinary(FileUtil::PathToUtf8(destination), content.data(), content.size())) {
+            provider->Shutdown();
+            fs::remove_all(outputRoot, ec);
+            return JsonError("Could not write downloaded save file: " + relative);
+        }
+        totalBytes += content.size();
+    }
+    provider->Shutdown();
+
+    return JsonObject({
+        {"success", JsonBool(true)},
+        {"game", JsonString(folder)},
+        {"path", JsonString(outputDirectory)},
+        {"files", JsonInt(static_cast<int64_t>(saveFiles.size()))},
+        {"bytes", JsonInt(static_cast<int64_t>(totalBytes))}
+    });
+}
+
+std::string CmdSaveList(const std::string& providerName, const std::string& accountId,
+                        const std::string& appId, const std::string& gameName) {
+    if (!IsPositiveDecimal(accountId) || !IsPositiveDecimal(appId))
+        return JsonError("Invalid account_id or app_id");
+
+    std::unique_ptr<ICloudProvider> provider;
+    std::string error;
+    if (!InitSaveProvider(providerName, provider, error)) return JsonError(error);
+
+    const std::string folder = SanitizeGameFolderName(gameName);
+    const std::string prefix = accountId + "/" + appId + "/" + folder + "/";
+    std::vector<ICloudProvider::FileInfo> listed;
+    bool complete = false;
+    if (!provider->ListChecked(prefix, listed, &complete) || !complete) {
+        provider->Shutdown();
+        return JsonError("Could not list save files");
+    }
+    provider->Shutdown();
+
+    std::vector<ICloudProvider::FileInfo> saveFiles;
+    for (const auto& item : listed) {
+        if (item.path.rfind(prefix, 0) == 0 && item.path.size() > prefix.size()) saveFiles.push_back(item);
+    }
+    std::sort(saveFiles.begin(), saveFiles.end(), [](const auto& a, const auto& b) {
+        return a.path > b.path;
+    });
+
+    std::ostringstream array;
+    array << "[";
+    for (size_t i = 0; i < saveFiles.size(); ++i) {
+        if (i) array << ",";
+        array << JsonObject({
+            {"file", JsonString(saveFiles[i].path.substr(prefix.size()))},
+            {"size", JsonInt(static_cast<int64_t>(saveFiles[i].size))}
+        });
+    }
+    array << "]";
+    return JsonObject({{"success", JsonBool(true)}, {"game", JsonString(folder)}, {"files", array.str()}});
 }
 
 static std::string JsonSuccess() {
@@ -1295,6 +1628,9 @@ static void PrintUsage() {
     fprintf(stderr, "  gc-blobs <provider> <account_id> <app_id> <cloud_root>  Delete unreferenced SHA blobs from cloud\n");
     fprintf(stderr, "  scan-all <provider>                                       List all apps across all accounts (single-pass)\n");
     fprintf(stderr, "  migrate <src_provider> <dst_provider>                     Copy all cloud data from one provider to another\n");
+    fprintf(stderr, "  save upload <provider> <account_id> <app_id> <game_name> <source_dir>  Replace raw cloud save files\n");
+    fprintf(stderr, "  save download <provider> <account_id> <app_id> <game_name> <output_dir> Download raw save files\n");
+    fprintf(stderr, "  save list <provider> <account_id> <app_id> <game_name>                 List raw save files\n");
     fprintf(stderr, "\nProviders: gdrive, onedrive, r2, s3\n");
 }
 
@@ -1416,6 +1752,35 @@ int RunCli(int argc, char** argv) {
             return 1;
         }
         result = CmdScanAll(argv[3]);
+    }
+    else if (strcmp(command, "save") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Error: save requires upload, download, or list\n");
+            return 1;
+        }
+        const std::string operation = argv[3];
+        if (operation == "upload") {
+            if (argc < 9) {
+                fprintf(stderr, "Error: save upload requires <provider> <account_id> <app_id> <game_name> <source_dir>\n");
+                return 1;
+            }
+            result = CmdSaveUpload(argv[4], argv[5], argv[6], argv[7], argv[8]);
+        } else if (operation == "download") {
+            if (argc < 9) {
+                fprintf(stderr, "Error: save download requires <provider> <account_id> <app_id> <game_name> <output_dir>\n");
+                return 1;
+            }
+            result = CmdSaveDownload(argv[4], argv[5], argv[6], argv[7], argv[8]);
+        } else if (operation == "list") {
+            if (argc < 8) {
+                fprintf(stderr, "Error: save list requires <provider> <account_id> <app_id> <game_name>\n");
+                return 1;
+            }
+            result = CmdSaveList(argv[4], argv[5], argv[6], argv[7]);
+        } else {
+            fprintf(stderr, "Error: unknown save operation: %s\n", argv[3]);
+            return 1;
+        }
     }
     else if (strcmp(command, "migrate") == 0) {
         if (argc < 5) {
