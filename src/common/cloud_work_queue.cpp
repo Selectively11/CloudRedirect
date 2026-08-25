@@ -35,11 +35,19 @@ static std::unordered_map<std::string, std::pair<uint64_t, std::chrono::steady_c
 static std::unordered_set<std::string>   g_failedPaths;
 static std::unordered_map<std::string, WorkItem> g_failedWorkItems;
 static std::condition_variable           g_drainCV;
-static constexpr int                     WORKER_THREAD_COUNT = 4;
+static constexpr int                     WORKER_THREAD_COUNT = 8;
+
+// Number of background worker threads. Defaults to WORKER_THREAD_COUNT.
+// Tests set it to 1 for deterministic, single-worker repro runs.
+static std::atomic<int>                  g_workerThreadCount{WORKER_THREAD_COUNT};
 
 static constexpr int                     MAX_DRAIN_REQUEUES = 3;
 static constexpr int                     FAIL_THRESHOLD     = 5;
 static constexpr auto                    RECENT_UPLOAD_TTL = std::chrono::seconds(120);
+
+// Base unit for exponential retry backoff (delay = unit << (retries - 1)).
+// Defaults to 1000ms (1s/2s/4s). Tests set it to 0 for deterministic, fast runs.
+static std::atomic<int>                  g_retryBackoffUnitMs{1000};
 
 // Error reporter -- set once at Init. Tests inject a no-op or spy.
 // Never changed after Init; no mutex needed.
@@ -227,9 +235,13 @@ static void RequeueFailedWorkForPrefixLocked(const std::string& prefix) {
         g_failedPaths.erase(it->first);
         if (!g_activePaths.count(item.cloudPath)) {
             ++item.drainRequeues;
+            bool isUpload = item.type == WorkItem::Upload;
             g_workQueue.push_back(std::move(item));
-            // Don't update g_uploadIndex for requeued items -- iterator
-            // would be invalidated by concurrent push_back/erase.
+            // Re-index requeued uploads: std::list iterators stay valid until the
+            // node is erased, so the stored iterator tracks this entry.
+            if (isUpload) {
+                g_uploadIndex[g_workQueue.back().cloudPath] = std::prev(g_workQueue.end());
+            }
         } else {
             // Path is actively being processed; preserve the failed item
             // so it can be retried on the next drain cycle.
@@ -306,7 +318,7 @@ static void WorkerLoop(int threadId) {
         }
 
         if (consecutiveFailures > 0) {
-            int delayMs = 1000 * (1 << (consecutiveFailures < 5 ? consecutiveFailures : 5));
+            int delayMs = g_retryBackoffUnitMs.load() * (1 << (consecutiveFailures < 5 ? consecutiveFailures : 5));
             if (delayMs > 30000) delayMs = 30000;
             LOG("[CloudStorage] Worker %d backing off %d ms after %d consecutive failure(s)",
                 threadId, delayMs, consecutiveFailures);
@@ -352,11 +364,11 @@ static void WorkerLoop(int threadId) {
                         LOG("[CloudStorage] BG upload deferred after existence check failure [%d]: %s",
                             threadId, item.cloudPath.c_str());
                         OnCloudFailure("Exists", item.cloudPath);
-                        int delaySecs = 1 << (item.existsCheckRetries - 1);
+                        int delayMs = g_retryBackoffUnitMs.load() << (item.existsCheckRetries - 1);
                         item.notBefore = std::chrono::steady_clock::now()
-                            + std::chrono::seconds(delaySecs);
-                        LOG("[CloudStorage] Exists retry %d in %ds: %s",
-                            item.existsCheckRetries, delaySecs, item.cloudPath.c_str());
+                            + std::chrono::milliseconds(delayMs);
+                        LOG("[CloudStorage] Exists retry %d in %dms: %s",
+                            item.existsCheckRetries, delayMs, item.cloudPath.c_str());
                         requeued = RequeueFromWorker(std::move(item));
                         if (!requeued) droppedAsStale = true;
                         break;
@@ -378,11 +390,11 @@ static void WorkerLoop(int threadId) {
                     LOG("[CloudStorage] BG upload FAILED [%d]: %s", threadId, item.cloudPath.c_str());
                     OnCloudFailure("Upload", item.cloudPath);
                     if (item.transferRetries++ < 3) {
-                        int delaySecs = 1 << (item.transferRetries - 1);
+                        int delayMs = g_retryBackoffUnitMs.load() << (item.transferRetries - 1);
                         item.notBefore = std::chrono::steady_clock::now()
-                            + std::chrono::seconds(delaySecs);
-                        LOG("[CloudStorage] Upload retry %d in %ds: %s",
-                            item.transferRetries, delaySecs, item.cloudPath.c_str());
+                            + std::chrono::milliseconds(delayMs);
+                        LOG("[CloudStorage] Upload retry %d in %dms: %s",
+                            item.transferRetries, delayMs, item.cloudPath.c_str());
                         requeued = RequeueFromWorker(std::move(item));
                         if (!requeued) droppedAsStale = true;
                     }
@@ -397,11 +409,11 @@ static void WorkerLoop(int threadId) {
                     LOG("[CloudStorage] BG delete FAILED [%d]: %s", threadId, item.cloudPath.c_str());
                     OnCloudFailure("Delete", item.cloudPath);
                     if (item.transferRetries++ < 3) {
-                        int delaySecs = 1 << (item.transferRetries - 1);
+                        int delayMs = g_retryBackoffUnitMs.load() << (item.transferRetries - 1);
                         item.notBefore = std::chrono::steady_clock::now()
-                            + std::chrono::seconds(delaySecs);
-                        LOG("[CloudStorage] Delete retry %d in %ds: %s",
-                            item.transferRetries, delaySecs, item.cloudPath.c_str());
+                            + std::chrono::milliseconds(delayMs);
+                        LOG("[CloudStorage] Delete retry %d in %dms: %s",
+                            item.transferRetries, delayMs, item.cloudPath.c_str());
                         requeued = RequeueFromWorker(std::move(item));
                         if (!requeued) droppedAsStale = true;
                     }
@@ -513,27 +525,14 @@ void EnqueueWork(WorkItem item) {
 static bool RequeueFromWorker(WorkItem item) {
     std::lock_guard<std::mutex> lock(g_queueMutex);
     if (item.type == WorkItem::Upload) {
-        auto indexIt = g_uploadIndex.find(item.cloudPath);
-        if (indexIt != g_uploadIndex.end()) {
-            // Verify iterator is still valid before trusting it
-            bool iteratorValid = false;
-            for (auto it = g_workQueue.begin(); it != g_workQueue.end(); ++it) {
-                if (it == indexIt->second) {
-                    iteratorValid = true;
-                    break;
-                }
-            }
-            if (!iteratorValid) {
-                LOG("[CloudStorage] Stale upload index entry for %s, cleaning up",
-                    item.cloudPath.c_str());
-                g_uploadIndex.erase(indexIt);
-            } else {
-                LOG("[CloudStorage] Retry dropped: newer upload already queued for %s",
-                    item.cloudPath.c_str());
-                g_failedPaths.erase(item.cloudPath);
-                g_failedWorkItems.erase(item.cloudPath);
-                return false;
-            }
+        // A present index entry means a newer upload is already queued for this
+        // path, so drop the retry instead of walking the list under the lock.
+        if (g_uploadIndex.find(item.cloudPath) != g_uploadIndex.end()) {
+            LOG("[CloudStorage] Retry dropped: newer upload already queued for %s",
+                item.cloudPath.c_str());
+            g_failedPaths.erase(item.cloudPath);
+            g_failedWorkItems.erase(item.cloudPath);
+            return false;
         }
     }
     if (item.type == WorkItem::Delete) {
@@ -678,16 +677,28 @@ void Init(ICloudProvider* provider, Reporter reporter) {
 
     if (g_provider) {
         g_workerRunning = true;
-        for (int i = 0; i < WORKER_THREAD_COUNT; ++i) {
+        int workerCount = g_workerThreadCount.load();
+        if (workerCount < 1) workerCount = 1;
+        for (int i = 0; i < workerCount; ++i) {
             g_workerThreads.emplace_back(WorkerLoop, i);
         }
-        LOG("[CloudStorage] Started %d background worker threads", WORKER_THREAD_COUNT);
+        LOG("[CloudStorage] Started %d background worker threads", workerCount);
     }
 }
 
 void SetShuttingDown() {
     g_shuttingDown.store(true, std::memory_order_seq_cst);
     g_queueCV.notify_all();
+}
+
+void SetRetryBackoffUnitMs(int unitMs) {
+    if (unitMs < 0) unitMs = 0;
+    g_retryBackoffUnitMs.store(unitMs);
+}
+
+void SetWorkerThreadCount(int count) {
+    if (count < 1) count = 1;
+    g_workerThreadCount.store(count);
 }
 
 void Shutdown() {

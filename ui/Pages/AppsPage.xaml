@@ -3,29 +3,53 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
       xmlns:res="clr-namespace:CloudRedirect.Resources"
-      xmlns:conv="clr-namespace:CloudRedirect.Converters"
-      ScrollViewer.CanContentScroll="False">
+      xmlns:conv="clr-namespace:CloudRedirect.Converters">
 
     <Page.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVis" />
         <conv:UrlToImageSourceConverter x:Key="UrlToImageSource" />
+
+        <!-- Card list items: no ListBox selection/hover chrome, stretch wide. -->
+        <Style x:Key="CardItemStyle" TargetType="ListBoxItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <ContentPresenter />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Page.Resources>
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
-        <StackPanel>
+    <!-- Header + action bar fixed on top; a pixel-virtualizing ListBox fills the
+         rest and owns the only scrollbar. Pixel scroll keeps the mouse wheel
+         working over cards while still UI-virtualizing (only visible cards are
+         realized / images decoded), which kills the navigate-to-Apps lag. -->
+    <DockPanel Margin="24" MaxWidth="800" HorizontalAlignment="Left">
 
-            <TextBlock Text="{res:Loc Apps_Title}"
-                       FontSize="28" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,8" />
+        <TextBlock DockPanel.Dock="Top"
+                   Text="{res:Loc Apps_Title}"
+                   FontSize="28" FontWeight="SemiBold"
+                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                   Margin="0,0,0,8" />
 
-            <TextBlock Text="{res:Loc Apps_Description}"
-                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                       Margin="0,0,0,16" />
+        <TextBlock DockPanel.Dock="Top"
+                   Text="{res:Loc Apps_Description}"
+                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                   Margin="0,0,0,16" />
 
-            <StackPanel x:Name="AppListPanel">
+            <!-- app-list mode and restore mode overlay here, one visible -->
+            <Grid>
 
-                <WrapPanel x:Name="ActionBar" Margin="0,0,0,16">
+            <DockPanel x:Name="AppListPanel">
+
+                <WrapPanel x:Name="ActionBar" DockPanel.Dock="Top" Margin="0,0,0,16">
                     <ui:Button x:Name="RestoreSavesButton"
                                Content="{res:Loc Apps_RestoreSaves}"
                                Icon="{ui:SymbolIcon ArrowUndo24}"
@@ -47,8 +71,17 @@
                                VerticalAlignment="Center" />
                 </WrapPanel>
 
-                <ItemsControl x:Name="AppList">
-                    <ItemsControl.ItemTemplate>
+                <ListBox x:Name="AppList"
+                         BorderThickness="0"
+                         Background="Transparent"
+                         Padding="0"
+                         ItemContainerStyle="{StaticResource CardItemStyle}"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         ScrollViewer.CanContentScroll="True"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         VirtualizingPanel.ScrollUnit="Pixel">
+                    <ListBox.ItemTemplate>
                         <DataTemplate>
                             <StackPanel Margin="0,0,0,8">
                                 <ui:CardControl>
@@ -108,7 +141,7 @@
                                             <StackPanel Grid.Column="2"
                                                         Orientation="Horizontal"
                                                         VerticalAlignment="Center">
-                                                <ui:Button Content="{res:Loc Apps_ReviewOrphans}"
+                                                <ui:Button Content="{Binding OrphansToggleText}"
                                                            Appearance="Caution"
                                                            VerticalAlignment="Center"
                                                            Click="OrphansToggle_Click"
@@ -137,7 +170,7 @@
                                     Prune button pokes past the card's right edge and, when
                                     the page's vertical scrollbar appears, past the viewport.
                                 -->
-                                <StackPanel Visibility="Collapsed"
+                                <StackPanel Visibility="{Binding OrphansDetailVisibility}"
                                             Margin="16,8,16,0">
                                     <Grid Margin="0,0,0,8">
                                         <Grid.ColumnDefinitions>
@@ -166,17 +199,17 @@
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
-                                </StackPanel>
-                            </StackPanel>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                                 </StackPanel>
+                             </StackPanel>
+                          </DataTemplate>
+                      </ListBox.ItemTemplate>
+                </ListBox>
 
-            </StackPanel>
+            </DockPanel>
 
-            <StackPanel x:Name="RestorePanel" Visibility="Collapsed">
+            <DockPanel x:Name="RestorePanel" Visibility="Collapsed">
 
-                <WrapPanel Margin="0,0,0,16">
+                <WrapPanel DockPanel.Dock="Top" Margin="0,0,0,16">
                     <ui:Button x:Name="BackButton"
                                Content="{res:Loc Apps_Back}"
                                Icon="{ui:SymbolIcon ArrowLeft24}"
@@ -198,12 +231,14 @@
                                VerticalAlignment="Center" />
                 </WrapPanel>
 
-                <TextBlock Text="{res:Loc Apps_RestoreDescription}"
+                <TextBlock DockPanel.Dock="Top"
+                           Text="{res:Loc Apps_RestoreDescription}"
                            Foreground="{DynamicResource TextFillColorTertiaryBrush}"
                            TextWrapping="Wrap"
                            Margin="0,0,0,16" />
 
                 <StackPanel x:Name="RestoreLoadingPanel"
+                            DockPanel.Dock="Top"
                             Visibility="Collapsed"
                             HorizontalAlignment="Center"
                             Margin="0,40,0,40">
@@ -213,10 +248,13 @@
                                HorizontalAlignment="Center" />
                 </StackPanel>
 
-                <StackPanel x:Name="BackupListPanel" />
+                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel x:Name="BackupListPanel" />
+                </ScrollViewer>
 
-            </StackPanel>
+            </DockPanel>
 
-        </StackPanel>
-    </ScrollViewer>
+            </Grid>
+    </DockPanel>
 </Page>

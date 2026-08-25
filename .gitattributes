@@ -1,0 +1,2 @@
+# Shell scripts must use LF endings or they break when run on Linux (bash\r).
+*.sh text eol=lf

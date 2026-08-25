@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <cerrno>
+#include <cstring>
 
 // ── libsecret runtime binding (dlopen, no compile-time dependency) ──────
 
@@ -148,7 +150,7 @@ static bool WriteTokenToSecretService(const std::string& provider, const std::st
 static std::string ReadTokenFileFallback(const std::string& path, std::string& outError) {
     struct stat st;
     if (stat(path.c_str(), &st) != 0) {
-        outError = "file does not exist";
+        outError = std::string("stat failed: ") + strerror(errno);
         return {};
     }
     if (!S_ISREG(st.st_mode)) {

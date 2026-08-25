@@ -36,44 +36,6 @@
                 </StackPanel>
             </Border>
 
-            <!-- STFixer Mode card -->
-            <Border x:Name="STFixerCard"
-                    Background="{DynamicResource ControlFillColorDefaultBrush}"
-                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    CornerRadius="8"
-                    Padding="24"
-                    Margin="0,0,0,16"
-                    Cursor="Hand"
-                    MouseLeftButtonUp="STFixerCard_Click">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-
-                    <ui:SymbolIcon Symbol="Shield24" FontSize="36"
-                                   Foreground="{DynamicResource SystemAccentColorPrimaryBrush}"
-                                   VerticalAlignment="Top"
-                                   Margin="0,0,16,0" />
-
-                    <StackPanel Grid.Column="1">
-                        <TextBlock Text="{res:Loc Choice_STFixer_Title}"
-                                   FontSize="18" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                                   Margin="0,0,0,4" />
-                        <TextBlock Text="{res:Loc Choice_STFixer_Description}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap"
-                                   Margin="0,0,0,12" />
-                        <TextBlock Text="{res:Loc Choice_STFixer_Features}"
-                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}"
-                                   TextWrapping="Wrap"
-                                   FontSize="12" />
-                    </StackPanel>
-                </Grid>
-            </Border>
-
             <!-- Cloud Redirect Mode card -->
             <Border x:Name="CloudRedirectCard"
                     Background="{DynamicResource ControlFillColorDefaultBrush}"
@@ -91,7 +53,7 @@
                     </Grid.ColumnDefinitions>
 
                     <ui:SymbolIcon Symbol="CloudArrowUp24" FontSize="36"
-                                   Foreground="#CC2222"
+                                   Foreground="{DynamicResource SystemAccentColorPrimaryBrush}"
                                    VerticalAlignment="Top"
                                    Margin="0,0,16,0" />
 

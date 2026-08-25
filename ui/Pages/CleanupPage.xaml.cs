@@ -152,13 +152,10 @@ public partial class CleanupPage : Page
             foreach (var (id, info) in storeInfo)
                 _storeCache[id] = info;
 
-            // Build the game list (still hidden)
             BuildGameList(appsWithFiles);
 
-            // Now reveal everything at once -- no bounce
+            // Reveal only after data is ready to avoid a layout bounce.
             LoadingPanel.Visibility = Visibility.Collapsed;
-
-            // Show search box now that we have results
             GameSearchBox.Text = "";
             GameSearchBox.Visibility = Visibility.Visible;
 
@@ -249,7 +246,6 @@ public partial class CleanupPage : Page
             _backupsLoaded = false;
             ShowUndoBanner(totalMoved);
 
-            // Refresh
             ScanButton_Click(null!, null!);
         }
         catch (Exception ex)
@@ -368,7 +364,6 @@ public partial class CleanupPage : Page
 
             detailPanel.Children.Clear();
 
-            // Summary
             var summary = new TextBlock
             {
                 Text = result != null
@@ -382,7 +377,6 @@ public partial class CleanupPage : Page
             };
             detailPanel.Children.Add(summary);
 
-            // Show log output
             if (logLines.Count > 0)
             {
                 var logBorder = new Border
@@ -738,7 +732,6 @@ public partial class CleanupPage : Page
             var cardContent = new StackPanel();
             card.Child = cardContent;
 
-            // Header row: icon + name + stats + expand button
             var headerRow = new Grid();
             headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(42) });
             headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -784,7 +777,6 @@ public partial class CleanupPage : Page
             Grid.SetColumn(iconImage, 0);
             headerRow.Children.Add(iconImage);
 
-            // Name + stats
             var nameStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             var nameText = new TextBlock
             {
@@ -814,7 +806,6 @@ public partial class CleanupPage : Page
             Grid.SetColumn(nameStack, 1);
             headerRow.Children.Add(nameStack);
 
-            // Expand/collapse button
             var expandBtn = new Wpf.Ui.Controls.Button
             {
                 Content = hasPollution ? S.Get("Cleanup_ReviewFiles") : S.Get("Cleanup_ViewFiles"),
@@ -835,7 +826,6 @@ public partial class CleanupPage : Page
             };
             cardContent.Children.Add(detailPanel);
 
-            // Wire expand button
             expandBtn.Click += (_, _) =>
             {
                 if (detailPanel.Visibility == Visibility.Collapsed)
@@ -911,7 +901,6 @@ public partial class CleanupPage : Page
                     checkboxes.Add((cb, file));
                 }
 
-                // Filename
                 var fileNameText = new TextBlock
                 {
                     Text = file.RelativePath,
@@ -922,13 +911,11 @@ public partial class CleanupPage : Page
                     TextTrimming = TextTrimming.CharacterEllipsis,
                     Margin = new Thickness(0, 0, 8, 0)
                 };
-                // Tooltip with full reason
                 if (!string.IsNullOrEmpty(file.Reason))
                     fileNameText.ToolTip = file.Reason;
                 Grid.SetColumn(fileNameText, 1);
                 fileRow.Children.Add(fileNameText);
 
-                // Classification badge
                 var badge = new Border
                 {
                     CornerRadius = new CornerRadius(4),
@@ -961,7 +948,6 @@ public partial class CleanupPage : Page
                 Grid.SetColumn(badge, 2);
                 fileRow.Children.Add(badge);
 
-                // File size
                 var sizeText = new TextBlock
                 {
                     Text = FileUtils.FormatSize(file.SizeBytes),
@@ -978,7 +964,6 @@ public partial class CleanupPage : Page
             }
         }
 
-        // Action buttons
         if (checkboxes.Count > 0)
         {
             var actionBar = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
@@ -1017,7 +1002,6 @@ public partial class CleanupPage : Page
                 Margin = new Thickness(0, 0, 0, 0)
             };
 
-            // Capture app reference for the closure
             var capturedApp = app;
             var capturedCheckboxes = checkboxes;
 
@@ -1062,7 +1046,6 @@ public partial class CleanupPage : Page
                     _backupsLoaded = false;
                     ShowUndoBanner(moved);
 
-                    // Refresh the scan
                     ScanButton_Click(null!, null!);
                 }
                 catch (Exception ex)

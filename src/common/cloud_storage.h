@@ -15,6 +15,8 @@
 
 namespace CloudStorage {
 
+struct CloudAppState; // defined in app_state.h
+
 void Init(const std::string& localRoot, std::unique_ptr<ICloudProvider> provider);
 void Shutdown();
 bool IsCloudActive();
@@ -46,6 +48,11 @@ bool PromoteStagedBatchForCommit(uint32_t accountId, uint32_t appId,
                                  const std::vector<std::string>& uploads,
                                  const std::vector<std::string>& deletes);
 
+// Verify CAS blobs are durable before publishing; heals or drops phantoms.
+// Returns false only when blob listing is unavailable.
+bool VerifyAndHealManifestForPublish(uint32_t accountId, uint32_t appId,
+                                     CloudAppState& state);
+
 std::vector<uint64_t> ListStagedBatchIds(uint32_t accountId, uint32_t appId);
 bool RemoveStagedBatch(uint32_t accountId, uint32_t appId, uint64_t batchId);
 
@@ -62,20 +69,8 @@ bool HasLocalBlob(uint32_t accountId, uint32_t appId,
 // GC: delete unreferenced blobs. Returns count deleted, or -1 on error.
 int GarbageCollectBlobs(uint32_t accountId, uint32_t appId);
 
-// Returns 0 if in sync or error; >0 = cloud CN when cloud is newer.
-uint64_t FetchCloudCN(uint32_t accountId, uint32_t appId);
-
 bool SyncFromCloud(uint32_t accountId, uint32_t appId);
 std::vector<uint32_t> SyncAllFromCloud(uint32_t accountId);
-
-void PushCNToCloud(uint32_t accountId, uint32_t appId, uint64_t cn);
-bool PushCNToCloudSync(uint32_t accountId, uint32_t appId, uint64_t cn);
-
-// Drain + sync push CN; on failure enqueues async retry + drains again.
-bool CommitCNWithRetry(uint32_t accountId, uint32_t appId, uint64_t cn);
-
-// Fire-and-forget CommitCNWithRetry on a detached thread.
-void CommitCNAsync(uint32_t accountId, uint32_t appId, uint64_t cn);
 
 // Pauses background uploads so foreground SyncFromCloud doesn't queue behind sweeps.
 struct ForegroundSyncScope {
@@ -87,7 +82,10 @@ struct ForegroundSyncScope {
 
 void NotifyAuthFailure(const std::string& providerName);
 
-// --- internal: shared with manifest_store.cpp and token_store.cpp ---
+// True once ShutdownProvider is called; checked between retry iterations.
+bool IsShuttingDown();
+
+// Internal: shared with manifest_store.cpp and token_store.cpp.
 struct InflightSyncScope {
     bool entered = false;
     InflightSyncScope();
@@ -100,7 +98,17 @@ std::string CloudMetadataPath(uint32_t accountId, uint32_t appId, const std::str
 bool DownloadCloudMetadataWithLegacyFallback(uint32_t accountId, uint32_t appId,
     const char* canonicalName, const char* legacyName,
     std::vector<uint8_t>& outData, bool* outUsedLegacy = nullptr);
+enum class MetadataFetch { Ok, Missing, Error };
+MetadataFetch FetchCloudMetadataStatus(uint32_t accountId, uint32_t appId,
+    const char* canonicalName, std::vector<uint8_t>& outData);
+// Download the first-format per-app playtime blob (account-scope
+// <acct>/0/blobs/Playtime/<appId>.bin). False if absent/unavailable. Migration-only.
+bool DownloadLegacyPlaytimeBlob(uint32_t accountId, uint32_t appId,
+    std::vector<uint8_t>& outData);
 bool UploadCloudMetadataText(uint32_t accountId, uint32_t appId,
+    const char* name, const std::string& content);
+// Queued (thread-safe) variant: serializes on the cloud work queue.
+void UploadCloudMetadataTextAsync(uint32_t accountId, uint32_t appId,
     const char* name, const std::string& content);
 void RemoveCloudMetadataIfPresent(uint32_t accountId, uint32_t appId, const char* name);
 void RemoveLegacyCloudMetadataIfCanonicalExists(uint32_t accountId, uint32_t appId,

@@ -17,7 +17,7 @@ public static class SteamDetector
     /// <summary>
     /// Supported Steam client versions our patches and RVAs target. Index 0 is the newest.
     /// </summary>
-    public static readonly long[] SupportedSteamVersions = { 1781041600, 1780352834, 1779918128, 1779486452, 1778281814, 1778003620 };
+    public static readonly long[] SupportedSteamVersions = { 1782866176, 1782533657, 1782437068, 1782428855, 1782344391, 1782257239, 1781041600, 1780352834, 1779918128, 1779486452, 1778281814, 1778003620 };
 
     public static long ExpectedSteamVersion => SupportedSteamVersions[0];
 
@@ -38,14 +38,19 @@ public static class SteamDetector
         {
             if (_cachedPath != null)
                 return _cachedPath;
+        }
 
-            // Try registry (most reliable on Windows)
-            _cachedPath = TryRegistry();
+        // Resolve outside the lock to avoid stalling on slow filesystem lookups.
+        var resolved = NormalizeToSteamRoot(TryRegistry())
+                       ?? NormalizeToSteamRoot(TryKnownPaths());
+
+        lock (_cacheLock)
+        {
+            // Another thread may have resolved while we were outside the lock;
+            // prefer the already-cached value to keep a single stable result.
             if (_cachedPath != null)
                 return _cachedPath;
-
-            // Fallback: well-known paths
-            _cachedPath = TryKnownPaths();
+            _cachedPath = resolved;
             return _cachedPath;
         }
     }
@@ -58,7 +63,10 @@ public static class SteamDetector
     {
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
             return false;
-        lock (_cacheLock) { _cachedPath = path; }
+        var root = NormalizeToSteamRoot(path);
+        if (root == null)
+            return false;
+        lock (_cacheLock) { _cachedPath = root; }
         return true;
     }
 
@@ -102,6 +110,30 @@ public static class SteamDetector
         {
             // Version parse can fail if manifest is malformed — not critical
         }
+        return null;
+    }
+
+    /// <summary>Walks up from <paramref name="path"/> to find the directory containing steam.exe, or null.</summary>
+    private static string? NormalizeToSteamRoot(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+
+        try
+        {
+            var dir = new DirectoryInfo(path);
+            while (dir != null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "steam.exe")))
+                    return dir.FullName;
+                dir = dir.Parent;
+            }
+        }
+        catch
+        {
+            // Malformed path -- fall through to null
+        }
+
         return null;
     }
 
@@ -293,6 +325,8 @@ public record CloudConfig(string Provider, string? TokenPath, string? SyncPath)
     {
         "gdrive" => S.Get("Provider_GoogleDrive"),
         "onedrive" => S.Get("Provider_OneDrive"),
+        "r2" => S.Get("Provider_R2"),
+        "s3" => S.Get("Provider_S3"),
         "folder" => S.Get("Provider_FolderNetworkDrive"),
         "local" => S.Get("Provider_LocalOnly"),
         _ => Provider

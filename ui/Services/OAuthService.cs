@@ -319,7 +319,7 @@ public sealed class OAuthService : IDisposable
             if (!hasRefresh)
                 return new TokenStatus(false, "Token file exists but missing refresh token");
 
-            return new TokenStatus(true, "Authenticated.");
+            return new TokenStatus(true, S.Get("OAuth_Authenticated"));
         }
         catch (Exception ex)
         {

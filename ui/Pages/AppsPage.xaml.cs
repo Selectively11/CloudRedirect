@@ -135,13 +135,15 @@ public partial class AppsPage : Page
 
         if (apps == null || apps.Count == 0)
         {
-            _allApps = apps;
-            AppList.ItemsSource = apps ?? new List<AppInfo>();
+            _allApps = apps ?? new List<AppInfo>();
+            _appsView = null;        // force rebind to the new (empty) source
+            ApplyAppFilter();
             return;
         }
 
         // Show the list immediately with app IDs while we fetch names
         _allApps = apps;
+        _appsView = null;            // rebind view to the freshly loaded source
         ApplyAppFilter();
 
         // Fetch names + header images from Steam store API (batch, cached)
@@ -181,25 +183,33 @@ public partial class AppsPage : Page
         ApplyAppFilter();
     }
 
+    private System.Windows.Data.ListCollectionView? _appsView;
+
     private void ApplyAppFilter()
     {
         if (_allApps == null) return;
-        var query = AppSearchBox?.Text?.Trim() ?? "";
 
-        if (string.IsNullOrEmpty(query))
+        // Live-filtered CollectionView avoids rebuilding cards (which re-decodes images).
+        if (_appsView == null || _appsView.SourceCollection != (System.Collections.IEnumerable)_allApps)
         {
-            AppList.ItemsSource = null;
-            AppList.ItemsSource = _allApps;
-            return;
+            _appsView = (System.Windows.Data.ListCollectionView)
+                System.Windows.Data.CollectionViewSource.GetDefaultView(_allApps);
+            _appsView.Filter = AppFilter;
+            AppList.ItemsSource = _appsView;
         }
+        else
+        {
+            _appsView.Refresh();
+        }
+    }
 
-        var filtered = _allApps
-            .Where(a => a.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase)
-                     || a.AppId.Contains(query, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        AppList.ItemsSource = null;
-        AppList.ItemsSource = filtered;
+    private bool AppFilter(object item)
+    {
+        var query = AppSearchBox?.Text?.Trim() ?? "";
+        if (string.IsNullOrEmpty(query)) return true;
+        if (item is not AppInfo a) return false;
+        return a.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase)
+            || a.AppId.Contains(query, StringComparison.OrdinalIgnoreCase);
     }
 
     private void RestoreSearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -444,40 +454,9 @@ public partial class AppsPage : Page
     /// <summary>Per-card Review/Collapse toggle for the orphan detail panel.</summary>
     private void OrphansToggle_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not System.Windows.Controls.Primitives.ButtonBase btn) return;
-
-        // Walk up to the outer DataTemplate-root StackPanel (the one whose
-        // first child is the CardControl and whose second child is the
-        // orphans detail StackPanel).
-        DependencyObject? cur = btn;
-        StackPanel? outer = null;
-        while (cur != null)
-        {
-            cur = System.Windows.Media.VisualTreeHelper.GetParent(cur);
-            if (cur is StackPanel sp &&
-                sp.Children.Count == 2 &&
-                sp.Children[0] is Wpf.Ui.Controls.CardControl &&
-                sp.Children[1] is StackPanel)
-            {
-                outer = sp;
-                break;
-            }
-        }
-        if (outer == null) return;
-        if (outer.Children[1] is not StackPanel detail) return;
-
-        if (detail.Visibility == Visibility.Collapsed)
-        {
-            detail.Visibility = Visibility.Visible;
-            btn.SetValue(System.Windows.Controls.ContentControl.ContentProperty,
-                S.Get("Apps_CollapseOrphans"));
-        }
-        else
-        {
-            detail.Visibility = Visibility.Collapsed;
-            btn.SetValue(System.Windows.Controls.ContentControl.ContentProperty,
-                S.Get("Apps_ReviewOrphans"));
-        }
+        // Safe under virtualization (no visual-tree walking).
+        if (sender is FrameworkElement { DataContext: AppInfo app })
+            app.OrphansExpanded = !app.OrphansExpanded;
     }
 
     /// <summary>
@@ -1085,7 +1064,7 @@ public partial class AppsPage : Page
 
 }
 
-public class AppInfo
+public class AppInfo : System.ComponentModel.INotifyPropertyChanged
 {
     public string AppId { get; set; } = "";
     public string AccountId { get; set; } = "";
@@ -1096,16 +1075,47 @@ public class AppInfo
 
     /// <summary>Game name from Steam store API. Falls back to "App {AppId}" if unavailable.</summary>
     public string DisplayName => !string.IsNullOrEmpty(Name) ? Name : S.Format("Apps_AppFallbackName", AppId);
-    public string Name { get; set; } = "";
+
+    private string _name = "";
+    public string Name
+    {
+        get => _name;
+        set { _name = value; Notify(nameof(Name)); Notify(nameof(DisplayName)); }
+    }
 
     /// <summary>Header image URL (292x136) from Steam CDN, or null.</summary>
-    public string? HeaderUrl { get; set; }
+    private string? _headerUrl;
+    public string? HeaderUrl
+    {
+        get => _headerUrl;
+        set { _headerUrl = value; Notify(nameof(HeaderUrl)); }
+    }
 
     /// <summary>True if the last scan completed and returned orphans.</summary>
-    public bool HasOrphans { get; set; }
+    private bool _hasOrphans;
+    public bool HasOrphans
+    {
+        get => _hasOrphans;
+        set { _hasOrphans = value; Notify(nameof(HasOrphans)); }
+    }
 
     /// <summary>Localized summary shown in the expander header.</summary>
     public string OrphanSummary { get; set; } = "";
+
+    /// <summary>Whether the orphan detail panel is expanded (data-bound so the
+    /// virtualized list stays correct under container recycling).</summary>
+    private bool _orphansExpanded;
+    public bool OrphansExpanded
+    {
+        get => _orphansExpanded;
+        set { _orphansExpanded = value; Notify(nameof(OrphansExpanded)); Notify(nameof(OrphansDetailVisibility)); Notify(nameof(OrphansToggleText)); }
+    }
+
+    public System.Windows.Visibility OrphansDetailVisibility =>
+        _orphansExpanded ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+
+    public string OrphansToggleText =>
+        S.Get(_orphansExpanded ? "Apps_CollapseOrphans" : "Apps_ReviewOrphans");
 
     /// <summary>
     /// Raw filenames from the last scan. Authoritative source for prune;
@@ -1115,4 +1125,8 @@ public class AppInfo
 
     /// <summary>Sanitized projection of OrphanFiles for safe display.</summary>
     public List<string> OrphanFilesPreview { get; set; } = new();
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    private void Notify(string n) =>
+        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(n));
 }

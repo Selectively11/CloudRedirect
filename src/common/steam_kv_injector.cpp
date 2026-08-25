@@ -33,62 +33,10 @@ static bool QuotaValueLooksValid(uint64_t quota, uint64_t files) {
 
 #ifdef _WIN32
 
-// steamclient64.dll RVAs (IDA image base: 0x138000000)
-
-// Global CSteamEngine* pointer. Same global already used by cloud_intercept.
-// (SC_RVA_GLOBAL_ENGINE = 0x17A70E8 in that module.)
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE = 0x17C2D08;
-
-// Offset from *qword_1397A70E8 to the CAppInfoCache instance.
-// Pattern observed in many callers:
-//   mov rbx, cs:qword_1397A70E8
-//   lea rcx, [rbx + 0xE68]   ; 0xE68 = 3688
-//   call CAppInfoCache::BlockOnInitialization
-static constexpr uintptr_t APPINFOCACHE_OFFSET = 0xE68;
-
-// CAppInfoCache::GetAppInfo(appId) -> appInfo*
-static constexpr uintptr_t SC_RVA_GET_APP_INFO = 0x49D9C0;
-
-// CAppInfoCache::GetSection(appInfo, sectionId) -> KeyValues*
-// sectionId 10 = "ufs"
-static constexpr uintptr_t SC_RVA_GET_SECTION = 0x49FCF0;
-
-// CAppInfoCache::ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
-static constexpr uintptr_t SC_RVA_READ_CONFIG_U64 = 0x49EA30;
-
-// BlockOnInit -- calls CThread::Join off-engine-thread, crashes/deadlocks. Do not call.
-// Cache is already loaded before our RPC handlers run.
-// static constexpr uintptr_t SC_RVA_BLOCK_ON_INIT = 0x4B4D90;
-
-// KeyValues::FindKey(parent, name, bCreate, out)
-// When bCreate=1 creates the key if not present.
-static constexpr uintptr_t SC_RVA_KV_FIND_KEY = 0xCFA7F0;
-
-// KeyValues::GetUint64(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_UINT64 = 0xCFBB40;
-
-// KeyValues::GetInt(kv, defaultVal, key)
-static constexpr uintptr_t SC_RVA_KV_GET_INT = 0xCFB6F0;
-
-// KeyValues::SetUint64(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_UINT64 = 0xCFBDB0;
-
-// KeyValues::SetInt(kv, value)
-static constexpr uintptr_t SC_RVA_KV_SET_INT = 0xCFBDF0;
-
-// KeyValues::SetString(kv, value) -- sets string value on a KV leaf node
-static constexpr uintptr_t SC_RVA_KV_SET_STRING = 0xCFBE30;
-
-// CAppInfoUpdater::RequestAppInfoUpdate -- not yet wired (offset unconfirmed).
-// Steam's background PICS populates KV on its own schedule; cached values suffice.
-// static constexpr uintptr_t SC_RVA_REQUEST_APP_INFO = 0x4B9EA0;
-
 using GetAppInfoFn = void* (__fastcall*)(void* cache, uint32_t appId);
 using GetSectionFn = void* (__fastcall*)(void* appInfo, uint32_t sectionId);
 using KvFindKeyFn = void* (__fastcall*)(void* parent, const char* name, uint8_t bCreate, void* outChild);
-// ReadAppConfigUint64(cache, appId, sectionId, keyName, defaultVal)
 using ReadConfigU64Fn = uint64_t (__fastcall*)(void* cache, uint64_t appId, uint32_t sectionId, const char* keyName, uint64_t defaultVal);
-// KV::GetUint64(kvNode, defaultVal, outStatusOrNull) -- raw node accessor
 using KvGetUint64Fn = uint64_t (__fastcall*)(void* kvNode, uint64_t defaultVal, void* outStatus);
 using KvGetIntFn = int (__fastcall*)(void* kvNode, int defaultVal, void* outStatus);
 using KvSetUint64Fn = void (__fastcall*)(void* kvNode, uint64_t value);
@@ -96,7 +44,7 @@ using KvSetIntFn = void (__fastcall*)(void* kvNode, int value);
 using KvSetStringFn = void (__fastcall*)(void* kvNode, const char* value);
 
 struct Resolved {
-    void** globalEnginePtrPtr = nullptr; // address of qword_1397A70E8 (a void**)
+    void** globalEnginePtrPtr = nullptr;
     GetAppInfoFn     getAppInfo = nullptr;
     GetSectionFn     getSection = nullptr;
     ReadConfigU64Fn  readConfigU64 = nullptr;
@@ -106,46 +54,65 @@ struct Resolved {
     KvSetUint64Fn    kvSetUint64 = nullptr;
     KvSetIntFn       kvSetInt = nullptr;
     KvSetStringFn    kvSetString = nullptr;
+    uint32_t         appInfoCacheOffset = 0;
 };
 
 static Resolved g_r;
+static ResolvedKvAddrs g_configured;
+static std::atomic<bool> g_configuredSet{false};
 static std::atomic<bool> g_ready{false};
 static std::once_flag g_initOnce;
 
-// Section ID for "ufs" in the app config KV tree.
+// sectionId 10 = "ufs" in the app config KV tree.
 static constexpr uint32_t kSectionUfs = 10;
 
-// Resolve CAppInfoCache from global engine ptr; null if Steam not init'd
 static void* GetCachePtr() {
     if (!g_r.globalEnginePtrPtr) return nullptr;
     void* engine = *g_r.globalEnginePtrPtr;
     if (!engine) return nullptr;
-    return reinterpret_cast<uint8_t*>(engine) + APPINFOCACHE_OFFSET;
+    return reinterpret_cast<uint8_t*>(engine) + g_r.appInfoCacheOffset;
+}
+
+void Configure(const ResolvedKvAddrs& addrs) {
+    g_configured = addrs;
+    g_configuredSet.store(true, std::memory_order_release);
 }
 
 bool Init() {
     bool success = false;
     std::call_once(g_initOnce, [&]() {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) {
-            LOG("[KvInjector] Init: steamclient64.dll not loaded yet");
+        if (!g_configuredSet.load(std::memory_order_acquire)) {
+            LOG("[KvInjector] Init: Configure() not called; resolver addresses required");
             return;
         }
-        uintptr_t base = reinterpret_cast<uintptr_t>(hSC);
-        LOG("[KvInjector] Init: steamclient64.dll base %p", hSC);
 
-        g_r.globalEnginePtrPtr = reinterpret_cast<void**>(base + SC_RVA_GLOBAL_ENGINE);
-        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(base + SC_RVA_GET_APP_INFO);
-        g_r.getSection    = reinterpret_cast<GetSectionFn>(base + SC_RVA_GET_SECTION);
-        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(base + SC_RVA_READ_CONFIG_U64);
-        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(base + SC_RVA_KV_FIND_KEY);
-        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(base + SC_RVA_KV_GET_UINT64);
-        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(base + SC_RVA_KV_GET_INT);
-        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(base + SC_RVA_KV_SET_UINT64);
-        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(base + SC_RVA_KV_SET_INT);
-        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(base + SC_RVA_KV_SET_STRING);
+        const ResolvedKvAddrs& c = g_configured;
+        if (!c.globalEnginePtrPtr || !c.getAppInfo || !c.getSection ||
+            !c.readConfigU64 || !c.kvFindKey || !c.kvGetUint64 || !c.kvGetInt ||
+            !c.kvSetUint64 || !c.kvSetInt || !c.kvSetString || !c.appInfoCacheOffset) {
+            LOG("[KvInjector] Init: resolver supplied incomplete addresses "
+                "(engine=%p getAppInfo=0x%llX getSection=0x%llX readCfg=0x%llX "
+                "find=0x%llX getU64=0x%llX getInt=0x%llX setU64=0x%llX setInt=0x%llX "
+                "setStr=0x%llX cacheOff=0x%X); aborting",
+                c.globalEnginePtrPtr, (uint64_t)c.getAppInfo, (uint64_t)c.getSection,
+                (uint64_t)c.readConfigU64, (uint64_t)c.kvFindKey, (uint64_t)c.kvGetUint64,
+                (uint64_t)c.kvGetInt, (uint64_t)c.kvSetUint64, (uint64_t)c.kvSetInt,
+                (uint64_t)c.kvSetString, c.appInfoCacheOffset);
+            return;
+        }
 
-        // Guard against wrong steamclient build -- bad RVA crashes on first call
+        g_r.globalEnginePtrPtr = c.globalEnginePtrPtr;
+        g_r.getAppInfo    = reinterpret_cast<GetAppInfoFn>(c.getAppInfo);
+        g_r.getSection    = reinterpret_cast<GetSectionFn>(c.getSection);
+        g_r.readConfigU64 = reinterpret_cast<ReadConfigU64Fn>(c.readConfigU64);
+        g_r.kvFindKey     = reinterpret_cast<KvFindKeyFn>(c.kvFindKey);
+        g_r.kvGetUint64   = reinterpret_cast<KvGetUint64Fn>(c.kvGetUint64);
+        g_r.kvGetInt      = reinterpret_cast<KvGetIntFn>(c.kvGetInt);
+        g_r.kvSetUint64   = reinterpret_cast<KvSetUint64Fn>(c.kvSetUint64);
+        g_r.kvSetInt      = reinterpret_cast<KvSetIntFn>(c.kvSetInt);
+        g_r.kvSetString   = reinterpret_cast<KvSetStringFn>(c.kvSetString);
+        g_r.appInfoCacheOffset = c.appInfoCacheOffset;
+
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery((LPCVOID)g_r.getAppInfo, &mbi, sizeof(mbi)) == 0 ||
             mbi.State != MEM_COMMIT ||
@@ -156,8 +123,8 @@ bool Init() {
             return;
         }
 
-        LOG("[KvInjector] Init: resolved function pointers (engine global @ %p)",
-            g_r.globalEnginePtrPtr);
+        LOG("[KvInjector] Init: using resolver addresses (engine global @ %p, cacheOff 0x%X)",
+            g_r.globalEnginePtrPtr, g_r.appInfoCacheOffset);
         g_ready.store(true, std::memory_order_release);
         success = true;
     });
@@ -190,29 +157,6 @@ bool ReadAppQuota(uint32_t appId, uint64_t& outQuotaBytes, uint32_t& outMaxNumFi
     outQuotaBytes  = quota;
     outMaxNumFiles = static_cast<uint32_t>(files);
     return true;
-}
-
-bool TriggerPicsAndWait(uint32_t appId,
-                        uint64_t& outQuotaBytes,
-                        uint32_t& outMaxNumFiles,
-                        int timeoutMs) {
-    if (!g_ready.load(std::memory_order_acquire)) return false;
-
-    // No PICS trigger wired yet -- just poll. Returns false so caller uses cached values.
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeoutMs);
-    uint64_t q = 0;
-    uint32_t f = 0;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (ReadAppQuota(appId, q, f) && q > 0 && f > 0) {
-            outQuotaBytes = q;
-            outMaxNumFiles = f;
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return false;
 }
 
 bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
@@ -285,6 +229,47 @@ bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
             (unsigned long long)existingQuota, (unsigned long long)existingFiles);
     }
     return true;
+}
+
+bool EnsureMaxNumFilesFloor(uint32_t appId, uint32_t floorFiles, uint64_t floorBytes) {
+    if (!g_ready.load(std::memory_order_acquire)) return false;
+    if (floorFiles == 0) return false;
+    if (floorFiles > kMaxPlausibleMaxFiles) return false;  // guard pathological input
+
+    void* cache = GetCachePtr();
+    if (!cache) return false;
+    void* appInfo = g_r.getAppInfo(cache, appId);
+    if (!appInfo) return false;
+    void* ufs = g_r.getSection(appInfo, kSectionUfs);
+    if (!ufs) return false;
+
+    uint64_t curFiles = g_r.readConfigU64(cache, appId, kSectionUfs, "maxnumfiles", 0);
+    uint64_t curQuota = g_r.readConfigU64(cache, appId, kSectionUfs, "quota", 0);
+
+    bool wrote = false;
+    if (curFiles < floorFiles) {
+        void* filesKv = g_r.kvFindKey(ufs, "maxnumfiles", 1, nullptr);
+        if (filesKv) {
+            g_r.kvSetInt(filesKv, static_cast<int>(floorFiles));
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised maxnumfiles %llu -> %u",
+                appId, (unsigned long long)curFiles, floorFiles);
+        }
+    }
+    // Cap (not skip): floorBytes derives from real PICS facts; silently dropping
+    // the quota raise while still raising maxnumfiles would reopen byte-quota
+    // eviction in exactly the multi-root scenario the floor protects.
+    if (floorBytes > kMaxPlausibleQuotaBytes) floorBytes = kMaxPlausibleQuotaBytes;
+    if (floorBytes > 0 && curQuota < floorBytes) {
+        void* quotaKv = g_r.kvFindKey(ufs, "quota", 1, nullptr);
+        if (quotaKv) {
+            g_r.kvSetUint64(quotaKv, floorBytes);
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised quota %llu -> %llu",
+                appId, (unsigned long long)curQuota, (unsigned long long)floorBytes);
+        }
+    }
+    return wrote;
 }
 
 bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
@@ -386,16 +371,7 @@ bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
 
 #else // !_WIN32 -- Linux 32-bit steamclient.so
 
-// Linux steamclient.so -- runtime signature scanning; falls back to hardcoded RVAs (build 1781043450)
-
-// Fallback RVAs (steamclient.so build 1781043450, IDA image base 0x0).
-static constexpr uintptr_t FALLBACK_RVA_GLOBAL_ENGINE   = 0x2ED1BC0;
-static constexpr uintptr_t FALLBACK_RVA_READ_CONFIG_U64 = 0xF77960;
-static constexpr uintptr_t FALLBACK_RVA_GET_SECTION     = 0xF74EC0;
-static constexpr uintptr_t FALLBACK_RVA_KV_FIND_KEY     = 0x2517320;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_UINT64   = 0x2512070;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_INT32    = 0x2512040;
-static constexpr uintptr_t FALLBACK_RVA_KV_SET_STRING   = 0x2511EE0;
+// Linux steamclient.so -- runtime signature scanning only (no hardcoded fallback RVAs)
 
 // Offset from CSteamEngine* to CAppInfoCache instance.
 static constexpr uintptr_t APPINFOCACHE_OFFSET = 2952; // 0xB88
@@ -537,66 +513,89 @@ static uintptr_t DecodeRelCall(uintptr_t addr) {
     return addr + 5 + rel;
 }
 
+// Match "lea reg, [ebx + disp32]" (8D /r with mod=10, rm=011); returns dest reg.
 static bool IsLeaEbxDisp32(const uint8_t* p, uint8_t& outReg) {
     if (p[0] != 0x8D || (p[1] & 0xC7) != 0x83) return false;
     outReg = (p[1] >> 3) & 7;
     return true;
 }
 
-// Resolve &g_engine at runtime by decoding the GOTOFF address-of idiom:
-//   lea reg2,[ebx+leaDisp]; mov reg,[reg2]; add reg,0xB88
-// where ebx is the GOT base from this function's "add ebx,imm32" prologue.
-// Build-independent, unlike a hardcoded RVA.
+// Search for "add reg, 0xB88" (81 C0-C7 88 0B 00 00) in a range, then
+// back-trace to find the GOT-relative lea that loads the global engine ptr.
+// Returns the absolute address of the global (the dereferenced GOT entry).
 static uintptr_t FindGlobalEnginePtr(uintptr_t textStart, uintptr_t textEnd,
                                      uintptr_t soBase, uintptr_t soEnd) {
+    // Pattern: 81 Cx 88 0B 00 00 where x is C0-C7 (add eax..edi, 0xB88)
     const uint8_t* mem = reinterpret_cast<const uint8_t*>(textStart);
     size_t len = textEnd - textStart;
 
     for (size_t i = 8; i + 6 <= len; ++i) {
-        // add reg, 0xB88
         if (mem[i] != 0x81) continue;
-        if (mem[i + 1] < 0xC0 || mem[i + 1] > 0xC7) continue;
+        uint8_t modrm = mem[i + 1];
+        if (modrm < 0xC0 || modrm > 0xC7) continue;
         if (mem[i + 2] != 0x88 || mem[i + 3] != 0x0B ||
             mem[i + 4] != 0x00 || mem[i + 5] != 0x00) continue;
 
+        // Found add reg, 0xB88. Back-trace: expect "mov reg, [reg2]" (2 bytes)
+        // and before that "lea reg2, [ebx + disp32]" (6 bytes: 8D /r xx xx xx xx).
+        // The lea loads the address of the global from GOT-relative addressing.
         uintptr_t addAddr = textStart + i;
 
-        // mov reg, [reg2]
+        // 2 bytes before: "mov reg, [reg2]" (8B /r, mod=00). Accept any base reg
+        // except esp(4)/ebp(5), whose modrm=00 encodings mean SIB/disp32 instead.
         if (mem[i - 2] != 0x8B) continue;
         uint8_t movModrm = mem[i - 1];
-        if ((movModrm >> 6) != 0) continue;
+        if ((movModrm >> 6) != 0) continue;          // require mod=00 ([reg])
         uint8_t movBase = movModrm & 7;
         if (movBase == 4 || movBase == 5) continue;
 
-        // lea reg2, [ebx + leaDisp], feeding the mov above
+        // 6 bytes before that: "lea reg2, [ebx + disp32]"; reg2 must feed the mov.
         uint8_t leaReg = 0;
         if (!IsLeaEbxDisp32(&mem[i - 8], leaReg)) continue;
         if (leaReg != movBase) continue;
 
+        // 32-bit PIC: ebx = _GLOBAL_OFFSET_TABLE_; the lea computes the .bss global's
+        // absolute address. Decode it.
         int32_t leaDisp;
-        memcpy(&leaDisp, &mem[i - 8 + 2], 4);
+        memcpy(&leaDisp, &mem[i - 6], 4);            // disp32 of lea reg2,[ebx+disp]
 
-        // get_pc_thunk.bx returns the address of the "add ebx,imm32" itself, so
-        // the runtime GOT base is addr_of_add + imm32 (not the add's end).
+        LOG("[KvInjector] SigScan: found 'add reg, 0xB88' at 0x%lx (base+0x%lx), "
+            "lea disp=0x%lx",
+            (unsigned long)addAddr, (unsigned long)(addAddr - soBase),
+            (unsigned long)(uint32_t)leaDisp);
+
+        // Resolve ebx (GOT base): scan back for "add ebx, imm32" (81 C3), ebx = addr + imm32.
+        uintptr_t leaAddr = textStart + (i - 8);
+        uintptr_t scanBack = (leaAddr > 0x1000) ? leaAddr - 0x1000 : textStart;
+        const uint8_t* sb = reinterpret_cast<const uint8_t*>(scanBack);
+        size_t sbLen = leaAddr - scanBack;
         uintptr_t gotBase = 0;
-        size_t maxBack = (i < 512) ? i : 512;
-        for (size_t back = 9; back <= maxBack; ++back) {
-            size_t k = i - back;
-            if (mem[k] == 0x81 && mem[k + 1] == 0xC3) {
-                int32_t gotDisp;
-                memcpy(&gotDisp, &mem[k + 2], 4);
-                gotBase = (textStart + k) + static_cast<uintptr_t>(static_cast<intptr_t>(gotDisp));
+        for (size_t k = sbLen; k-- > 0;) {
+            if (sb[k] == 0x81 && sb[k + 1] == 0xC3) {
+                int32_t imm;
+                memcpy(&imm, &sb[k + 2], 4);
+                uintptr_t addEbxAddr = scanBack + k;
+                gotBase = addEbxAddr + (uint32_t)imm;   // ebx after thunk
                 break;
             }
         }
-        if (!gotBase) continue;
+        if (!gotBase) {
+            LOG("[KvInjector] SigScan: could not resolve GOT base (ebx) for engine global");
+            return 0;
+        }
 
-        uintptr_t engineGlobal = gotBase + static_cast<uintptr_t>(static_cast<intptr_t>(leaDisp));
-        if (engineGlobal <= soBase || engineGlobal >= soEnd) continue;
-
-        LOG("[KvInjector] SigScan: engine global &g_engine = 0x%lx (base+0x%lx)",
-            (unsigned long)engineGlobal, (unsigned long)(engineGlobal - soBase));
-        return engineGlobal;
+        uintptr_t engineVar = gotBase + (uint32_t)leaDisp;
+        if (engineVar <= soBase || (soEnd != 0 && engineVar >= soEnd)) {
+            // Decoded address outside the module's mapped range -- a false match;
+            // keep scanning rather than dereferencing garbage.
+            LOG("[KvInjector] SigScan: engine-global 0x%lx out of module bounds "
+                "[0x%lx,0x%lx); skipping match",
+                (unsigned long)engineVar, (unsigned long)soBase, (unsigned long)soEnd);
+            continue;
+        }
+        LOG("[KvInjector] SigScan: decoded engine-global var at 0x%lx (base+0x%lx)",
+            (unsigned long)engineVar, (unsigned long)(engineVar - soBase));
+        return engineVar;
     }
     return 0;
 }
@@ -667,6 +666,8 @@ static uintptr_t FindCallInRange(uintptr_t funcStart, size_t minOff, size_t maxO
     }
     return 0;
 }
+
+void Configure(const ResolvedKvAddrs&) {}
 
 bool Init() {
     bool success = false;
@@ -792,26 +793,10 @@ bool Init() {
             LOG("[KvInjector] Init: all signatures resolved successfully");
         } else {
             LOG("[KvInjector] SigScan: partial (readCfg=%d getSect=%d kvFind=%d "
-                "kvSetU64=%d kvSetI32=%d kvSetStr=%d global=%d)",
+                "kvSetU64=%d kvSetI32=%d kvSetStr=%d global=%d) -- DISABLED (no fallback RVAs)",
                 readCfg ? 1 : 0, getSect ? 1 : 0, kvFind ? 1 : 0,
                 kvSetU64 ? 1 : 0, kvSetI32 ? 1 : 0, kvSetStr ? 1 : 0, globalEng ? 1 : 0);
-
-            g_r.globalEnginePtr = reinterpret_cast<void**>(globalEng ? globalEng : (base + FALLBACK_RVA_GLOBAL_ENGINE));
-            g_r.readConfigU64   = reinterpret_cast<ReadConfigU64Fn>(readCfg ? readCfg : (base + FALLBACK_RVA_READ_CONFIG_U64));
-            g_r.getSection      = reinterpret_cast<GetSectionFn>(getSect ? getSect : (base + FALLBACK_RVA_GET_SECTION));
-            g_r.kvFindKey       = reinterpret_cast<KvFindKeyFn>(kvFind ? kvFind : (base + FALLBACK_RVA_KV_FIND_KEY));
-            g_r.kvSetUint64     = reinterpret_cast<KvSetUint64Fn>(kvSetU64 ? kvSetU64 : (base + FALLBACK_RVA_KV_SET_UINT64));
-            g_r.kvSetInt32      = reinterpret_cast<KvSetInt32Fn>(kvSetI32 ? kvSetI32 : (base + FALLBACK_RVA_KV_SET_INT32));
-            g_r.kvSetString     = reinterpret_cast<KvSetStringFn>(kvSetStr ? kvSetStr : (base + FALLBACK_RVA_KV_SET_STRING));
-
-            // Don't trust fallback RVAs if criticals couldn't be sig-scanned.
-            // readConfigU64 is included: a stale fallback there crashes in
-            // steamclient's BST walk on the first GetChangelist RPC.
-            if (!globalEng || !getSect || !kvFind || !readCfg) {
-                LOG("[KvInjector] Critical functions unresolved -- KV injector DISABLED (prevents crash on stale RVAs)");
-                return;
-            }
-            usedSigs = true;
+            return;
         }
 
         LOG("[KvInjector] Init: resolved Linux pointers (engine global @ %p, sigs=%d)",
@@ -867,27 +852,6 @@ bool ReadAppQuota(uint32_t appId, uint64_t& outQuotaBytes, uint32_t& outMaxNumFi
     outQuotaBytes  = quota;
     outMaxNumFiles = static_cast<uint32_t>(files);
     return true;
-}
-
-bool TriggerPicsAndWait(uint32_t appId,
-                        uint64_t& outQuotaBytes,
-                        uint32_t& outMaxNumFiles,
-                        int timeoutMs) {
-    if (!g_ready.load(std::memory_order_acquire)) return false;
-    // No active PICS-trigger plumbing yet on Linux; poll only.
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeoutMs);
-    uint64_t q = 0;
-    uint32_t f = 0;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (ReadAppQuota(appId, q, f) && q > 0 && f > 0) {
-            outQuotaBytes = q;
-            outMaxNumFiles = f;
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return false;
 }
 
 // Inline BST walk: manager+76=rootIndex, manager+96=nodes (24-byte stride).
@@ -999,6 +963,48 @@ bool InjectAppQuota(uint32_t appId, uint64_t quotaBytes, uint32_t maxNumFiles) {
     return true;
 }
 
+bool EnsureMaxNumFilesFloor(uint32_t appId, uint32_t floorFiles, uint64_t floorBytes) {
+    if (!g_ready.load(std::memory_order_acquire)) return false;
+    if (floorFiles == 0) return false;
+    if (floorFiles > kMaxPlausibleMaxFiles) return false;
+
+    void* cache = GetCachePtr();
+    if (!cache) return false;
+    void* appInfo = ResolveAppInfo(cache, appId);
+    if (!appInfo) return false;
+    void* ufs = g_r.getSection(appInfo, kSectionUfs);
+    if (!ufs) return false;
+
+    uint64_t curFiles = g_r.readConfigU64(cache, appId, kSectionUfs, "maxnumfiles", 0);
+    uint64_t curQuota = g_r.readConfigU64(cache, appId, kSectionUfs, "quota", 0);
+
+    bool wrote = false;
+    if (curFiles < floorFiles) {
+        void* filesKv = g_r.kvFindKey(ufs, "maxnumfiles", 1, nullptr);
+        if (filesKv) {
+            g_r.kvSetInt32(filesKv, static_cast<int32_t>(floorFiles));
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised maxnumfiles %llu -> %u",
+                appId, (unsigned long long)curFiles, floorFiles);
+        }
+    }
+    // Cap (not skip): see Windows impl -- dropping the quota raise while raising
+    // maxnumfiles would reopen byte-quota eviction for multi-root apps.
+    if (floorBytes > kMaxPlausibleQuotaBytes) floorBytes = kMaxPlausibleQuotaBytes;
+    if (floorBytes > 0 && curQuota < floorBytes) {
+        void* quotaKv = g_r.kvFindKey(ufs, "quota", 1, nullptr);
+        if (quotaKv) {
+            uint32_t lo = static_cast<uint32_t>(floorBytes & 0xFFFFFFFFu);
+            uint32_t hi = static_cast<uint32_t>((floorBytes >> 32) & 0xFFFFFFFFu);
+            g_r.kvSetUint64(quotaKv, lo, hi);
+            wrote = true;
+            LOG("[KvInjector] EnsureMaxNumFilesFloor app=%u: raised quota %llu -> %llu",
+                appId, (unsigned long long)curQuota, (unsigned long long)floorBytes);
+        }
+    }
+    return wrote;
+}
+
 bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
     if (!g_ready.load(std::memory_order_acquire)) return false;
     if (g_kvBroken.load(std::memory_order_acquire)) return false;
@@ -1100,5 +1106,13 @@ bool InjectSaveFiles(uint32_t appId, const std::vector<SaveFileRule>& rules) {
 }
 
 #endif // _WIN32
+
+void** GetEngineGlobalPtr() {
+#ifdef _WIN32
+    return nullptr; // Windows uses a different resolution path
+#else
+    return g_r.globalEnginePtr;
+#endif
+}
 
 } // namespace SteamKvInjector

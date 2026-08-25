@@ -1,30 +1,43 @@
 #include "log.h"
+#include "xdg.h"
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
 #include <ctime>
-#include <mutex>
+#include <cstring>
+#include <pthread.h>
 #include <sys/stat.h>
 
 static FILE* g_logFile = nullptr;
-static std::mutex g_logMutex;
+// pthread_mutex_t with PTHREAD_MUTEX_INITIALIZER is safe before C++ static
+// init completes — needed because we run from an LD_PRELOAD constructor.
+static pthread_mutex_t g_logMutex = PTHREAD_MUTEX_INITIALIZER;
+static char g_logPathBuf[512] = {};
+static constexpr long MAX_LOG_SIZE = 10 * 1024 * 1024;
 
 void Log::Init()
 {
+    // Build paths with stack buffers only — no std::string, no heap, so this
+    // is safe inside an LD_PRELOAD constructor before the C++ runtime is up.
     const char* home = getenv("HOME");
-    if (!home) home = "/tmp";
+    if (!home || !home[0]) home = "/tmp";
+    const char* xdg = getenv("XDG_CONFIG_HOME");
 
-    char path[512];
-    snprintf(path, sizeof(path), "%s/.config/CloudRedirect/cloud_redirect.log", home);
+    char base[256];
+    if (xdg && xdg[0] == '/')
+        snprintf(base, sizeof(base), "%s/CloudRedirect", xdg);
+    else
+        snprintf(base, sizeof(base), "%s/.config/CloudRedirect", home);
 
-    // Create directory if missing
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s/.config", home);
+    // Ensure parent dirs exist
+    char dir[256];
+    snprintf(dir, sizeof(dir), "%.*s", (int)(strrchr(base, '/') - base), base);
     mkdir(dir, 0755);
-    snprintf(dir, sizeof(dir), "%s/.config/CloudRedirect", home);
-    mkdir(dir, 0755);
+    mkdir(base, 0755);
 
-    g_logFile = fopen(path, "a");
+    snprintf(g_logPathBuf, sizeof(g_logPathBuf), "%s/cloud_redirect.log", base);
+
+    g_logFile = fopen(g_logPathBuf, "a");
     if (g_logFile) {
         fprintf(g_logFile, "\n--------------------------------------------------------------------------------\n");
         fflush(g_logFile);
@@ -40,16 +53,32 @@ void Log::Init(const char* /* path */)
 
 void Log::Shutdown()
 {
-    std::lock_guard<std::mutex> lock(g_logMutex);
+    pthread_mutex_lock(&g_logMutex);
     if (g_logFile) {
         fclose(g_logFile);
         g_logFile = nullptr;
+    }
+    pthread_mutex_unlock(&g_logMutex);
+}
+
+static void TruncateIfNeeded() {
+    if (!g_logFile) return;
+    long pos = ftell(g_logFile);
+    if (pos < 0 || pos < MAX_LOG_SIZE) return;
+    fclose(g_logFile);
+    if (g_logPathBuf[0]) remove(g_logPathBuf);
+    g_logFile = fopen(g_logPathBuf, "a");
+    if (g_logFile) {
+        fprintf(g_logFile, "=== Log truncated (size limit reached) ===\n");
+        fflush(g_logFile);
     }
 }
 
 static void LogWrite(const char* level, const char* fmt, va_list args)
 {
-    std::lock_guard<std::mutex> lock(g_logMutex);
+    pthread_mutex_lock(&g_logMutex);
+
+    TruncateIfNeeded();
 
     time_t now = time(nullptr);
     struct tm tm;
@@ -63,6 +92,8 @@ static void LogWrite(const char* level, const char* fmt, va_list args)
     vfprintf(out, fmt, args);
     fprintf(out, "\n");
     fflush(out);
+
+    pthread_mutex_unlock(&g_logMutex);
 }
 
 void Log::Write(const char* fmt, ...)

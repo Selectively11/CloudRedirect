@@ -487,6 +487,9 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
                 if (!overrideRule.root.empty() &&
                     (!overrideRule.useInstead.empty() || !overrideRule.addPath.empty() ||
                      !overrideRule.pathTransforms.empty())) {
+                    LOG("GetAutoCloudFileList: app %u parsed override root='%s' os='%s' oscompare='%s' useinstead='%s'",
+                        appId, overrideRule.root.c_str(), overrideRule.os.c_str(),
+                        overrideRule.osCompare.c_str(), overrideRule.useInstead.c_str());
                     overrides.push_back(std::move(overrideRule));
                 }
             }
@@ -576,8 +579,8 @@ static std::vector<AutoCloudRuleNative> LoadAutoCloudRules(const std::string& st
 
 // SHA1 for files
 
-// Read a whole file and compute its SHA1 in one pass; returns the bytes in
-// outBytes so the caller can avoid a second read at commit time.
+// Read a whole file and SHA1 it in one pass, returning the bytes in outBytes so
+// the caller can reuse them without a second read. Returns empty on error.
 static std::vector<uint8_t> ReadAndHashFile(const std::string& path,
                                             std::vector<uint8_t>& outBytes) {
     outBytes.clear();
@@ -632,12 +635,18 @@ ScanResult GetFileList(const std::string& steamPath,
     }
     outResult.hasRules = true;
 
+    // Final rule set after overrides. Two rules with the same root/path here were
+    // not collapsed by the override.
+    LOG("GetAutoCloudFileList: app %u final rule set (%zu rules) after overrides:", appId, rules.size());
+    for (size_t i = 0; i < rules.size(); ++i) {
+        const auto& r = rules[i];
+        LOG("  rule[%zu]: root='%s' cloudRoot='%s' path='%s' resolvedPath='%s' pattern='%s' recursive=%u platforms=0x%X siblings=%zu",
+            i, r.root.c_str(), r.cloudRoot.c_str(), r.path.c_str(), r.resolvedPath.c_str(),
+            r.pattern.c_str(), r.recursive ? 1u : 0u, r.platforms, r.siblings.size());
+    }
+
     std::filesystem::path appUserdataDir = FileUtil::Utf8ToPath(steamPath) / "userdata" /
         std::to_string(accountId) / std::to_string(appId);
-
-    // Retain hashed bytes (up to a budget) so commit needn't re-read from disk.
-    constexpr uint64_t kMaxRetainedContentBytes = 512ULL * 1024 * 1024;
-    uint64_t retainedContentBytes = 0;
 
     auto addFile = [&](const std::filesystem::directory_entry& fileEntry,
                        const std::string& cloudPath,
@@ -651,7 +660,7 @@ ScanResult GetFileList(const std::string& steamPath,
         uint64_t rawSize = (uint64_t)fileEntry.file_size(ec);
         if (ec) return;
 
-        std::vector<uint8_t> bytes;
+        std::vector<uint8_t> bytes;  // read once for SHA; not retained on the entry
         auto sha = ReadAndHashFile(FileUtil::PathToUtf8(fileEntry.path()), bytes);
         if (sha.empty()) {
             LOG("GetAutoCloudFileList: skipping app %u file %s (SHA1 read error)",
@@ -670,10 +679,6 @@ ScanResult GetFileList(const std::string& steamPath,
         fe.rootToken = rootToken;
         fe.rootId = rootId;
         fe.sha = std::move(sha);
-        if (retainedContentBytes + bytes.size() <= kMaxRetainedContentBytes) {
-            retainedContentBytes += bytes.size();
-            fe.content = std::move(bytes);
-        }
         outResult.files.push_back(std::move(fe));
     };
 
@@ -871,6 +876,7 @@ ScanResult GetFileList(const std::string& steamPath,
     std::unordered_map<std::string, std::string> seenRootsByCloudPath;
     // Sibling dedupe; separate from primary so siblings can't trip the abort.
     std::unordered_set<std::string> emittedSiblings;
+
     bool hasRootCollision = false;
     bool scanLimitHit = false;
     size_t visitedFiles = 0;
@@ -1388,5 +1394,16 @@ std::unordered_map<std::string, std::string> GetRootTokenDirectories(
 
     return result;
 }
+
+std::string GetAppName(const std::string& steamPath, uint32_t appId) {
+    return GetAppNameFromAppInfo(steamPath, appId);
+}
+
+#ifdef CLOUDREDIRECT_TESTING
+std::vector<uint8_t> TestReadAndHashFile(const std::string& path,
+                                         std::vector<uint8_t>& outBytes) {
+    return ReadAndHashFile(path, outBytes);
+}
+#endif
 
 } // namespace AutoCloudScan

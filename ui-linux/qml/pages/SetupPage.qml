@@ -116,7 +116,7 @@ Page {
             }
 
             Label {
-                text: "Deploy CloudRedirect into your SLSsteam installation."
+                text: "Deploy or remove CloudRedirect."
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
                 Layout.leftMargin: 20

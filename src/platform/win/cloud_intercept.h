@@ -26,14 +26,18 @@ using RecvPktFn = int64_t(__fastcall*)(void* thisptr, CNetPacket* pkt);
 void Init(const std::string& steamPath, bool cloudSaveOnly = false,
           CR_NotifyFn notifyCallback = nullptr);
 
-// hook the saved-original RecvPkt pointer to monitor incoming packets
-void InstallRecvPktMonitor(void* savedOrigPtrAddr);
+// Inline-detour CCMConnection::RecvPkt in steamclient64.dll via sig-scan.
+void InstallRecvPktDetour();
 
 // install inline detour on steamclient64 for manifest pinning
 void InstallManifestPinHook();
 
-// Stub -- release-state patching removed from public builds.
+// Patch GetEffectiveReleaseState to always return RELEASED.
 void InstallReleaseStateNop();
+void InstallGamesPlayedHook();
+
+// Redirect manifest endpoint URL in the payload at runtime.
+void InstallManifestEndpointOverride();
 
 // compute payload base and set up cave replacement buffer globals
 void SetSendPktAddr(void* recvPktGlobalAddr);
@@ -49,15 +53,26 @@ void SetAccountId(uint32_t accountId);
 // get the Steam installation path (with trailing backslash)
 const std::string& GetSteamPath();
 
-// record the launch timestamp for internal playtime tracking
-void RecordLaunchTime(uint32_t appId);
-
 void AddNamespaceApp(uint32_t appId);
 void RemoveNamespaceApp(uint32_t appId);
 bool IsNamespaceApp(uint32_t appId);
 // outAdded/outRemoved may be null.
 void SetNamespaceApps(const uint32_t* appIds, uint32_t count,
                       size_t* outAdded, size_t* outRemoved);
+
+// Install vtable hooks on CClientUnifiedServiceTransport (for third-party consumers).
+void InstallServiceMethodHook();
+bool VtableHookInstalled();
+
+// Deferred stats seeding for third-party consumers (CR_SetApps triggers it).
+void SetNeedsSeed(bool v);
+void TriggerDeferredSeed(const std::vector<uint32_t>& apps);
+
+// Drain queued playtime updates (live push into CUser map).
+// Caller MUST be on Steam's network thread (slot4/slot5 hook context).
+void DrainPlaytimeUpdates();
+
+void QueueLocalPlaytimePush(const std::vector<uint32_t>& endedApps);
 
 // signal shutdown
 void Shutdown();

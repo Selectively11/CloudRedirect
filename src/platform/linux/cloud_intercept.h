@@ -13,6 +13,9 @@ void InitLinux();
 bool IsNamespaceApp(uint32_t appId);
 bool HasNamespaceApps();
 
+// Snapshot of all managed namespace app IDs.
+std::vector<uint32_t> GetNamespaceApps();
+
 // Dynamically register an app as a namespace app
 void RegisterNamespaceApp(uint32_t appId);
 
@@ -27,8 +30,6 @@ void SetAccountId(uint32_t id);
 
 // Set the Steam path (called by Linux hook layer during init)
 void SetSteamPath(const std::string& path);
-
-void RecordLaunchTime(uint32_t appId);
 
 // Signal shutdown
 void Shutdown();

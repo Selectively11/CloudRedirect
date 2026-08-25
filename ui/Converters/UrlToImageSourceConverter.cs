@@ -86,11 +86,18 @@ public sealed class UrlToImageSourceConverter : IValueConverter
         {
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
+
+            // Decode at display size to avoid list stutter. Default 184px (2x 92px slot).
+            int decodeWidth = 184;
+            if (parameter is string ps && int.TryParse(ps, out var pw) && pw > 0)
+                decodeWidth = pw;
+
             if (uri.IsFile)
             {
                 // Local cache file: decode now, release the handle, freeze so
                 // eviction + atomic File.Move(overwrite: true) aren't blocked.
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.DecodePixelWidth = decodeWidth;
             }
             // HTTP: leave CacheOption at Default so the download streams in
             // the background. Intentionally NOT frozen -- an unfinished

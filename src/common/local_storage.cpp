@@ -793,8 +793,11 @@ uint64_t GetChangeNumber(uint32_t accountId, uint32_t appId) {
             break;
     }
 
-    g_changeNumbers[key] = 1;
-    return 1;
+    // No CN file exists -- brand-new app. Native Steam (sub_138A16FB0) returns 0
+    // for unknown apps. Returning 1 would make Steam think cloud is ahead of the
+    // client (serverCN=1 > clientCN=0), confusing the initial sync direction.
+    g_changeNumbers[key] = 0;
+    return 0;
 }
 
 // Lazy load; ++ on a missing key would silently regress to 1.

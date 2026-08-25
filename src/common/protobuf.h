@@ -37,6 +37,7 @@ public:
     // For uint32 UFS fields, use ClampFileSizeToUint32 (Steam truncates mod 2^32).
     void WriteVarint(uint32_t fieldNum, uint64_t value);
     void WriteFixed64(uint32_t fieldNum, uint64_t value);
+    void WriteFixed32(uint32_t fieldNum, uint32_t value);
     void WriteBytes(uint32_t fieldNum, const uint8_t* data, size_t len);
     void WriteString(uint32_t fieldNum, std::string_view str);
     void WriteSubmessage(uint32_t fieldNum, const Writer& sub);

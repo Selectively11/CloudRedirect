@@ -11,7 +11,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationIcon>steam_logo3.ico</ApplicationIcon>
     <Version>$(ReleaseVersion)</Version>
-    <InformationalVersion>$(ReleaseVersion)+win.$(WindowsRevision)+core.$(CoreGeneration)</InformationalVersion>
+    <!-- User-facing display version (carries the optional pre-release suffix).
+         Read at runtime via AssemblyInformationalVersionAttribute; the build
+         metadata after '+' is stripped for display. -->
+    <InformationalVersion>$(ReleaseVersion)$(ReleasePrerelease)+win.$(WindowsRevision)+core.$(CoreGeneration)</InformationalVersion>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -61,10 +64,16 @@
              Condition="!Exists('$(NativeCliSource)')" />
   </Target>
 
+  <!-- 32-bit Steam Cloud manager tool + its steam_api.dll, EMBEDDED into the
+       single-file exe so we ship one file only. They are extracted side by side
+       to a temp dir on demand (see EmbeddedCloud760) and the 64-bit UI spawns the
+       32-bit tool from there. This is the same steam_api.dll that
+       SteamCloudFileManagerLite ships. -->
   <ItemGroup>
-    <EmbeddedResource Include="Resources\payloads\**\*">
-      <LogicalName>$([System.String]::Copy('payloads/%(RecursiveDir)%(Filename)%(Extension)').Replace('\\','/'))</LogicalName>
-    </EmbeddedResource>
+    <None Remove="native\cloud760_tool.exe" />
+    <None Remove="native\steam_api.dll" />
+    <EmbeddedResource Include="native\cloud760_tool.exe" LogicalName="cloud760_tool.exe" />
+    <EmbeddedResource Include="native\steam_api.dll" LogicalName="steam_api.dll" />
   </ItemGroup>
 
 </Project>

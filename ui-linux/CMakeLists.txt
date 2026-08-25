@@ -14,6 +14,8 @@ if(NOT CR_RELEASE_VERSION)
             file(READ "${_vp}" VERSION_PROPS_CONTENT)
             string(REGEX MATCH "<ReleaseVersion>([^<]+)</ReleaseVersion>" _ "${VERSION_PROPS_CONTENT}")
             set(CR_RELEASE_VERSION "${CMAKE_MATCH_1}")
+            string(REGEX MATCH "<ReleasePrerelease>([^<]*)</ReleasePrerelease>" _ "${VERSION_PROPS_CONTENT}")
+            set(CR_PRERELEASE "${CMAKE_MATCH_1}")
             break()
         endif()
     endforeach()
@@ -25,7 +27,7 @@ endif()
 
 # ── Generate version string ─────────────────────────────────────────────
 if(CR_VERSION_OVERRIDE)
-    set(CR_VERSION "${CR_RELEASE_VERSION}+${CR_VERSION_OVERRIDE}")
+    set(CR_VERSION "${CR_RELEASE_VERSION}${CR_PRERELEASE}+${CR_VERSION_OVERRIDE}")
 else()
     execute_process(
         COMMAND git rev-parse --short=7 HEAD
@@ -36,9 +38,9 @@ else()
         RESULT_VARIABLE GIT_RESULT
     )
     if(GIT_RESULT EQUAL 0)
-        set(CR_VERSION "${CR_RELEASE_VERSION}+${GIT_SHA}")
+        set(CR_VERSION "${CR_RELEASE_VERSION}${CR_PRERELEASE}+${GIT_SHA}")
     else()
-        set(CR_VERSION "${CR_RELEASE_VERSION}")
+        set(CR_VERSION "${CR_RELEASE_VERSION}${CR_PRERELEASE}")
     endif()
 endif()
 message(STATUS "CloudRedirect UI version: ${CR_VERSION}")
@@ -71,6 +73,8 @@ qt_add_qml_module(cloud-redirect-ui
         qml/pages/AppsPage.qml
         qml/pages/BackupsPage.qml
         qml/pages/CloudProviderPage.qml
+        qml/pages/StatsPage.qml
+        qml/pages/MigrationPage.qml
 )
 
 target_include_directories(cloud-redirect-ui PRIVATE src)

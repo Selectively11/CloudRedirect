@@ -3,6 +3,7 @@
 
 #include "cloud_provider.h"
 #include <cstdint>
+#include <future>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -60,30 +61,56 @@ enum class StateFetchStatus {
     NotFound,       // State file does not exist on provider (new app or pre-migration)
     FetchFailed,
     ParseFailed,
+    Timeout,        // Bounded fetch exceeded its deadline (provider slow); caller should
+                    // serve local/last-known state and let the background fetch finish.
 };
 
 struct StateFetchResult {
     StateFetchStatus status = StateFetchStatus::FetchFailed;
     CloudAppState state;
-    std::string etag; // For conditional writes (OneDrive)
 };
 
 void AppState_Init(ICloudProvider* provider);
 void AppState_Shutdown();
 
 // Handles migration from old cn.cloudredirect + manifest.cloudredirect.
+// Always performs a live provider fetch. Read-modify-write callers (any fetch
+// that precedes a PublishCloudState) must use this, not the cached serve
+// accessor, to avoid clobbering a concurrent cross-machine update with a stale base.
 StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId);
 
-// If etag is non-empty, uses conditional write (OneDrive).
+// Lightweight CN-only probe: downloads just the CN metadata file without parsing
+// the full manifest. Used by the repeat-call cache to check if cloud changed.
+uint64_t FetchCloudCN(uint32_t accountId, uint32_t appId);
+
+// Time-bounded live fetch (worker + deadline); timeout warms serve cache for next call.
+StateFetchResult FetchCloudStateBounded(uint32_t accountId, uint32_t appId,
+                                        int deadlineMs);
+
+// Serve-path cache accessor: returns cached state if fresh + no foreign session, else live fetch.
+// Not for read-modify-write callers.
+StateFetchResult FetchCloudStateForServe(uint32_t accountId, uint32_t appId);
+
+// Report this client's own Steam id so the serve cache treats only foreign-client
+// sessions as contention. See g_ownClientId in app_state.cpp.
+void NoteOwnClientId(uint64_t clientId);
+
+// Publish cloud state. Refuses to regress CN (re-checks provider).
+// lockOnly=true skips blob verify/heal (session-release publish only).
 bool PublishCloudState(uint32_t accountId, uint32_t appId,
-                       const CloudAppState& state,
-                       const std::string& etag = "");
+                       const CloudAppState& state, bool lockOnly = false);
 
 std::string SerializeState(const CloudAppState& state);
 bool DeserializeState(const std::string& json, CloudAppState& outState);
 
 // Release the session lock in the cloud state (called on ExitSyncDone).
+// Blocks until any pending async publish completes before releasing.
 void ReleaseCloudSession(uint32_t accountId, uint32_t appId, uint64_t clientId);
+
+// Deferred cloud-publish barrier; waited on by session release + next BeginBatch.
+void SetPendingPublish(uint32_t accountId, uint32_t appId,
+                       std::shared_future<void> fut);
+void WaitForPendingPublish(uint32_t accountId, uint32_t appId);
 
 CloudAppState MigrateFromLegacy(uint64_t cn,
                                  const std::unordered_map<std::string, FileEntry>& legacyFiles);

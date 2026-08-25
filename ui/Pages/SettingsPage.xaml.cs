@@ -15,7 +15,6 @@ public partial class SettingsPage : Page
 {
     private const string ReleasesUrl = "https://github.com/Selectively11/CloudRedirect/releases";
 
-    private string? _latestDownloadUrl;
     private bool _languageLoading;
     private bool _syncLoading;
     /// <summary>
@@ -25,15 +24,13 @@ public partial class SettingsPage : Page
     /// language different from what's actually on disk.
     /// </summary>
     private int _lastSavedLanguageIndex;
-    /// <summary>
-    /// Language options: display key -> culture code (or "system").
-    /// </summary>
     private static readonly (string ResourceKey, string Code)[] LanguageOptions =
     [
         ("Settings_SystemDefault", "system"),
         ("Settings_LanguageEnglish", "en"),
         ("Settings_LanguageSpanish", "es"),
         ("Settings_LanguagePortuguese", "pt-BR"),
+        ("Settings_LanguageSimplifiedChinese", "zh-CN"),
     ];
 
     public SettingsPage()
@@ -47,39 +44,28 @@ public partial class SettingsPage : Page
         };
     }
 
-    /// <summary>
-    /// Snapshot of everything LoadSettingsAsync gathers off the UI thread.
-    /// All disk reads (settings.json language, settings.json mode,
-    /// config.json sync toggles) happen in Task.Run; the dispatcher
-    /// continuation only mutates controls.
-    /// </summary>
+    /// <summary>Off-thread snapshot of settings.json + config.json state.</summary>
     private sealed record SettingsSnapshot(
         string Language,
-        string? Mode,
         bool? SyncAchievements,
         bool? SyncPlaytime,
         bool? SyncLuas,
         bool? AutoUpdateDll,
+        bool? ShowNonSteamGame,
         bool? ParentalIgnorePlaytime,
         bool? ParentalBypassPlaytime);
 
-    // M15: Move language/mode/sync-toggle config reads off the UI thread.
-    // Loaded used to call ReadLanguageSetting + ReadModeSetting +
-    // LoadSyncToggles synchronously, which can stall on a slow disk
-    // (network drive, AV scan). Mirror DashboardPage.LoadStatusAsync:
-    // gather a snapshot in Task.Run, apply controls afterward.
+    // M15: Read config off UI thread to avoid slow-disk stall.
     private async Task LoadSettingsAsync()
     {
         var snapshot = await Task.Run(() =>
         {
             var lang = ReadLanguageSetting();
-            var mode = Services.SteamDetector.ReadModeSetting();
 
-            bool? a = null, p = null, l = null, u = null, pip = null, pbp = null;
-            if (mode == "cloud_redirect")
-                ReadSyncTogglesInto(ref a, ref p, ref l, ref u, ref pip, ref pbp);
+            bool? a = null, p = null, l = null, u = null, nsg = null, pip = null, pbp = null;
+            ReadSyncTogglesInto(ref a, ref p, ref l, ref u, ref nsg, ref pip, ref pbp);
 
-            return new SettingsSnapshot(lang, mode, a, p, l, u, pip, pbp);
+            return new SettingsSnapshot(lang, a, p, l, u, nsg, pip, pbp);
         });
 
         ApplySettingsSnapshot(snapshot);
@@ -89,19 +75,14 @@ public partial class SettingsPage : Page
     {
         ApplyLanguageSelector(snap.Language);
 
-        ParentalSection.Visibility = Visibility.Visible;
-        if (snap.Mode == "cloud_redirect")
-        {
-            SyncSection.Visibility = Visibility.Visible;
-            ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas, snap.AutoUpdateDll,
-                             snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime);
-        }
-        else
-        {
-            SyncSection.Visibility = Visibility.Collapsed;
-            ApplySyncToggles(false, false, false, false,
-                             snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime);
-        }
+        ShowNonSteamGameCard.Visibility = Visibility.Collapsed;
+        SyncLuasCard.Visibility = Visibility.Collapsed;
+
+        ExtraSection.Visibility = Visibility.Visible;
+        ExperimentalSection.Visibility = Visibility.Visible;
+
+        ApplySyncToggles(snap.SyncAchievements, snap.SyncPlaytime, snap.SyncLuas, snap.AutoUpdateDll,
+                         snap.ShowNonSteamGame, snap.ParentalIgnorePlaytime, snap.ParentalBypassPlaytime);
     }
 
     private void ApplyLanguageSelector(string saved)
@@ -130,7 +111,7 @@ public partial class SettingsPage : Page
     }
 
     private void ApplySyncToggles(bool? achievements, bool? playtime, bool? luas, bool? autoUpdateDll,
-                                   bool? parentalIgnorePlaytime, bool? parentalBypassPlaytime)
+                                   bool? showNonSteamGame, bool? parentalIgnorePlaytime, bool? parentalBypassPlaytime)
     {
         _syncLoading = true;
         try
@@ -139,6 +120,7 @@ public partial class SettingsPage : Page
             if (playtime == true) SyncPlaytimeToggle.IsChecked = true;
             if (luas == true) SyncLuasToggle.IsChecked = true;
             if (autoUpdateDll == true) AutoUpdateDllToggle.IsChecked = true;
+            if (showNonSteamGame == true) ShowNonSteamGameToggle.IsChecked = true;
             if (parentalIgnorePlaytime == true) ParentalIgnorePlaytimeToggle.IsChecked = true;
             if (parentalBypassPlaytime == true) ParentalBypassPlaytimeToggle.IsChecked = true;
         }
@@ -148,13 +130,9 @@ public partial class SettingsPage : Page
         }
     }
 
-    /// <summary>
-    /// Reads the sync toggle booleans from config.json on the calling
-    /// thread. Used by LoadSettingsAsync inside Task.Run so the dispatcher
-    /// path never opens config.json synchronously.
-    /// </summary>
+    /// <summary>Reads sync toggles from config.json (called inside Task.Run).</summary>
     private static void ReadSyncTogglesInto(ref bool? achievements, ref bool? playtime, ref bool? luas, ref bool? autoUpdateDll,
-                                              ref bool? parentalIgnorePlaytime, ref bool? parentalBypassPlaytime)
+                                              ref bool? showNonSteamGame, ref bool? parentalIgnorePlaytime, ref bool? parentalBypassPlaytime)
     {
         try
         {
@@ -175,6 +153,10 @@ public partial class SettingsPage : Page
                 autoUpdateDll = u.ValueKind == JsonValueKind.True;
             else
                 autoUpdateDll = true; // default on when key absent
+            if (root.TryGetProperty("show_non_steam_game", out var nsg))
+                showNonSteamGame = nsg.ValueKind == JsonValueKind.True;
+            else
+                showNonSteamGame = true; // default on when key absent
             if (root.TryGetProperty("parental_ignore_playtime", out var pip) && pip.ValueKind == JsonValueKind.True)
                 parentalIgnorePlaytime = true;
             if (root.TryGetProperty("parental_bypass_playtime", out var pbp) && pbp.ValueKind == JsonValueKind.True)
@@ -185,6 +167,16 @@ public partial class SettingsPage : Page
 
     private void LoadAbout()
     {
+        // Use informational version (has pre-release suffix); strip build metadata; fall back to assembly version.
+        var informational = Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (!string.IsNullOrEmpty(informational))
+        {
+            var plus = informational.IndexOf('+');
+            VersionText.Text = plus >= 0 ? informational.Substring(0, plus) : informational;
+            return;
+        }
+
         var version = Assembly.GetExecutingAssembly().GetName().Version;
         VersionText.Text = version != null
             ? S.Format("Settings_VersionFormat", version.Major, version.Minor, version.Build)
@@ -265,7 +257,6 @@ public partial class SettingsPage : Page
         if (!Directory.Exists(dir))
             Directory.CreateDirectory(dir);
 
-        // Read existing settings to preserve other fields
         JsonElement existing = default;
         if (File.Exists(path))
         {
@@ -284,7 +275,6 @@ public partial class SettingsPage : Page
             writer.WriteStartObject();
             writer.WriteString("language", code);
 
-            // Copy any other properties from the existing file
             if (existing.ValueKind == JsonValueKind.Object)
             {
                 foreach (var prop in existing.EnumerateObject())
@@ -333,82 +323,27 @@ public partial class SettingsPage : Page
         }
     }
 
-    /// <summary>
-    /// Persists the three sync toggles into config.json via ConfigHelper
-    /// (which preserves caller-unowned keys and atomic-writes). Throws on
-    /// real I/O failure so the caller can revert UI state and surface
-    /// the error.
-    /// </summary>
+    /// <summary>Persists sync toggles to config.json; throws on I/O failure for caller to revert.</summary>
     private void SaveSyncToggles()
     {
         var path = GetConfigPath();
+
+        // schema_fetch / experimental_schema_fetch are retired: stay in the strip list so a
+        // saved config drops the stale keys, but no longer written back.
         Services.ConfigHelper.SaveConfig(path,
             new[] { "sync_achievements", "sync_playtime", "sync_luas", "auto_update_dll",
-                    "parental_ignore_playtime", "parental_bypass_playtime" },
+                    "show_non_steam_game", "parental_ignore_playtime", "parental_bypass_playtime",
+                    "schema_fetch", "experimental_schema_fetch" },
             writer =>
             {
                 writer.WriteBoolean("sync_achievements", SyncAchievementsToggle.IsChecked == true);
                 writer.WriteBoolean("sync_playtime", SyncPlaytimeToggle.IsChecked == true);
                 writer.WriteBoolean("sync_luas", SyncLuasToggle.IsChecked == true);
                 writer.WriteBoolean("auto_update_dll", AutoUpdateDllToggle.IsChecked == true);
+                writer.WriteBoolean("show_non_steam_game", ShowNonSteamGameToggle.IsChecked == true);
                 writer.WriteBoolean("parental_ignore_playtime", ParentalIgnorePlaytimeToggle.IsChecked == true);
                 writer.WriteBoolean("parental_bypass_playtime", ParentalBypassPlaytimeToggle.IsChecked == true);
             });
-    }
-
-    private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
-    {
-        UpdateButton.IsEnabled = false;
-        UpdateButton.Content = S.Get("Settings_Checking");
-        UpdateStatusText.Text = S.Get("Settings_ContactingGitHub");
-        DownloadButton.Visibility = Visibility.Collapsed;
-        _latestDownloadUrl = null;
-
-        try
-        {
-            var result = await AppUpdater.CheckAsync();
-
-            if (result == null)
-            {
-                UpdateHeaderText.Text = S.Get("Settings_CheckForUpdates");
-                UpdateStatusText.Text = S.Format("Settings_FailedToCheck", "no response from GitHub");
-                return;
-            }
-
-            var localVersion = Assembly.GetExecutingAssembly().GetName().Version;
-            var local3 = localVersion != null
-                ? new Version(localVersion.Major, localVersion.Minor, localVersion.Build)
-                : new Version(0, 0, 0);
-
-            if (result.UpdateAvailable)
-            {
-                UpdateHeaderText.Text = S.Format("Settings_UpdateAvailableFormat", result.TagName ?? "");
-                UpdateStatusText.Text = S.Format("Settings_NewerVersionAvailable", local3);
-                _latestDownloadUrl = ReleasesUrl;
-                DownloadButton.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                UpdateHeaderText.Text = S.Get("Settings_UpToDate");
-                UpdateStatusText.Text = S.Format("Settings_LatestVersionFormat", local3);
-            }
-        }
-        catch (Exception ex)
-        {
-            UpdateHeaderText.Text = S.Get("Settings_CheckForUpdates");
-            UpdateStatusText.Text = S.Format("Settings_FailedToCheck", ex.Message);
-        }
-        finally
-        {
-            UpdateButton.IsEnabled = true;
-            UpdateButton.Content = S.Get("Settings_Check");
-        }
-    }
-
-    private void DownloadUpdate_Click(object sender, RoutedEventArgs e)
-    {
-        var url = _latestDownloadUrl ?? ReleasesUrl;
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true })?.Dispose();
     }
 
     private async void ResetData_Click(object sender, RoutedEventArgs e)

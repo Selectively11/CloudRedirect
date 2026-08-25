@@ -1,0 +1,94 @@
+<Page x:Class="CloudRedirect.Pages.NewsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      ScrollViewer.CanContentScroll="False">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel MaxWidth="800">
+
+            <Border x:Name="UpdateBanner"
+                    Visibility="Collapsed"
+                    Background="#332F7A2F"
+                    BorderBrush="#FF6A9F42"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="16"
+                    Margin="0,0,0,16">
+                <DockPanel>
+                    <ui:Button Content="{res:Loc Dashboard_UpdateNow}"
+                               Appearance="Success"
+                               DockPanel.Dock="Right"
+                               VerticalAlignment="Center"
+                               Click="UpdateDll_Click" />
+                    <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock Text="{res:Loc Dashboard_UpdateAvailable}"
+                                   FontWeight="SemiBold" FontSize="14"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc Dashboard_UpdateAvailableDescription}"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <TextBlock Text="{res:Loc News_WhatsNew}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,24" />
+
+            <!-- Achievement and playtime sync -->
+            <ui:CardControl Margin="0,0,0,12">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc News_AchievementSync_Title}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc News_AchievementSync_Description}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+            </ui:CardControl>
+
+            <!-- Show Lua game in status -->
+            <ui:CardControl Margin="0,0,0,12">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc News_ShowLuaGame_Title}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc News_ShowLuaGame_Description}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+            </ui:CardControl>
+
+            <!-- 760 Clean Up -->
+            <ui:CardControl Margin="0,0,0,12">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc News_760CleanUp_Title}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc News_760CleanUp_Description}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+            </ui:CardControl>
+
+            <!-- And more -->
+            <ui:CardControl Margin="0,0,0,12">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc News_AndMore_Title}" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{res:Loc News_AndMore_Description}"
+                                   TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+            </ui:CardControl>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

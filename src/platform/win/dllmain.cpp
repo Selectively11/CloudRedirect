@@ -53,17 +53,17 @@ int CloudOnSendPkt(void* thisptr, const uint8_t* data, uint32_t size, void* recv
 
             if (recvPktFn) {
                 CloudIntercept::SetSendPktAddr(recvPktFn);
-
-                // recvPktFn = RecvPkt slot (RVA 0x1CAB48); saved orig at RVA 0x1CAB20.
-                uintptr_t recvPktGlobal = (uintptr_t)recvPktFn;
-                uintptr_t payloadBase = recvPktGlobal - 0x1CAB48;
-                uintptr_t savedOrigAddr = payloadBase + 0x1CAB20;
-                CloudIntercept::InstallRecvPktMonitor((void*)savedOrigAddr);
             }
+
+            CloudIntercept::InstallRecvPktDetour();
 
             CloudIntercept::InstallManifestPinHook();
 
             CloudIntercept::InstallReleaseStateNop();
+
+            CloudIntercept::InstallManifestEndpointOverride();
+
+            CloudIntercept::InstallGamesPlayedHook();
 
             LOG("CloudRedirect fully initialized with hooks");
         } catch (const std::exception& ex) {

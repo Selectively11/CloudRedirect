@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -27,7 +28,7 @@ public partial class MainWindow : FluentWindow
 
                 _ = CheckForAutoUpdateAsync();
 
-                var mode = await Task.Run(() => Services.SteamDetector.ReadModeSetting());
+                var mode = await Task.Run(() => MigrateLegacyMode());
                 ApplyMode(mode);
 
                 bool needsSetup = await Task.Run(() => NeedsSetup());
@@ -36,6 +37,8 @@ public partial class MainWindow : FluentWindow
                     RootNavigation.Navigate(typeof(Pages.ChoiceModePage));
                 else if (needsSetup)
                     RootNavigation.Navigate(typeof(Pages.SetupPage));
+                // else if (ShouldShowNews())
+                //     RootNavigation.Navigate(typeof(Pages.NewsPage));
                 else
                     RootNavigation.Navigate(typeof(Pages.DashboardPage));
             }
@@ -43,18 +46,73 @@ public partial class MainWindow : FluentWindow
         };
     }
 
-    public void ApplyMode(string? mode)
+    private static string? MigrateLegacyMode()
     {
-        var cloudOnly = mode == "cloud_redirect";
-        var vis = cloudOnly ? Visibility.Visible : Visibility.Collapsed;
+        var mode = Services.SteamDetector.ReadModeSetting();
+
+        if (mode == null)
+            return null;
+
+        if (mode != "cloud_redirect")
+        {
+            try
+            {
+                Services.ModeService.PersistMode("cloud_redirect", cloudRedirectEnabled: true);
+                mode = "cloud_redirect";
+            }
+            catch { }
+        }
+
+        Services.ModeService.SaveClientType("thirdparty");
+
+        return mode;
+    }
+
+    public void ApplyMode(string? mode, string? clientType = null)
+    {
+        var configured = mode == "cloud_redirect";
+        var vis = configured ? Visibility.Visible : Visibility.Collapsed;
         NavCloudProvider.Visibility = vis;
         NavApps.Visibility = vis;
         NavCleanup.Visibility = vis;
+        NavCloud760.Visibility = vis;
 
-        // Hide the mode chooser once fully committed to cloud_redirect
-        NavChoiceMode.Visibility = cloudOnly ? Visibility.Collapsed : Visibility.Visible;
+        NavManifestPinning.Visibility = Visibility.Collapsed;
+        NavChoiceMode.Visibility = Visibility.Collapsed;
 
         RootNavigation.UpdateLayout();
+    }
+
+    /// <summary>True on first run of a new release version; writes a .news-seen marker.</summary>
+    private static bool ShouldShowNews()
+    {
+        try
+        {
+            var informational = Assembly.GetExecutingAssembly()
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (string.IsNullOrEmpty(informational)) return false;
+
+            var plus = informational.IndexOf('+');
+            var version = plus >= 0 ? informational.Substring(0, plus) : informational;
+
+            if (version.Contains("-TEST", StringComparison.OrdinalIgnoreCase)) return false;
+
+            var markerPath = Path.Combine(Services.SteamDetector.GetConfigDir(), ".news-seen");
+
+            if (File.Exists(markerPath))
+            {
+                var seen = File.ReadAllText(markerPath).Trim();
+                if (seen == version) return false;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(markerPath)!);
+            File.WriteAllText(markerPath, version);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -91,7 +149,7 @@ public partial class MainWindow : FluentWindow
             var versionStr = result.TagName?.TrimStart('v') ?? result.TagName ?? "unknown";
             var body = result.Body?.Trim() ?? "";
 
-            UpdateBannerTitle.Text = $"Update available -- v{versionStr}";
+            UpdateBannerTitle.Text = $"Update available - v{versionStr}";
             UpdateBannerStatus.Text = "A new version of CloudRedirect is ready to install.";
 
             if (!string.IsNullOrEmpty(body))
@@ -145,7 +203,6 @@ public partial class MainWindow : FluentWindow
 
         if (error != null)
         {
-            // Show error, restore buttons so user can retry
             UpdateBannerTitle.Text = "Update failed";
             UpdateBannerStatus.Text = error;
             UpdateProgressBar.Visibility = Visibility.Collapsed;

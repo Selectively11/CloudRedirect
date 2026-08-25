@@ -19,47 +19,47 @@ namespace CloudRedirect.Services;
 /// </summary>
 public static class Dialog
 {
-    public static Task ShowInfoAsync(string title, string message)
+    // Collapse empty footer buttons so only the close "OK" button is visible.
+    private static Task ShowAcknowledgeAsync(string title, string message, ControlAppearance appearance)
     {
         var box = new MessageBox
         {
             Title = title,
             Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
-            CloseButtonText = S.Get("Dialog_OK")
+            CloseButtonText = S.Get("Dialog_OK"),
+            CloseButtonAppearance = appearance,
         };
+
+        box.Loaded += (_, _) => CollapseEmptyFooterButtons(box);
         return box.ShowDialogAsync();
     }
+
+    // Scoped to Wpf.Ui.Controls.Button (the footer buttons) so the title-bar
+    // close (X) and other chrome are never touched.
+    private static void CollapseEmptyFooterButtons(DependencyObject root)
+    {
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if (child is Button btn)
+            {
+                var text = (btn.Content as string) ?? (btn.Content as TextBlock)?.Text;
+                if (string.IsNullOrWhiteSpace(text) && btn.Icon is null)
+                    btn.Visibility = Visibility.Collapsed;
+            }
+            CollapseEmptyFooterButtons(child);
+        }
+    }
+
+    public static Task ShowInfoAsync(string title, string message)
+        => ShowAcknowledgeAsync(title, message, ControlAppearance.Primary);
 
     public static Task ShowWarningAsync(string title, string message)
-    {
-        // CloseButtonText defaults to "Close" in WPF-UI's MessageBox, so
-        // setting only PrimaryButtonText leaves a redundant second button
-        // that does the same thing as the primary "OK". Suppress it.
-        var box = new MessageBox
-        {
-            Title = title,
-            Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
-            PrimaryButtonText = S.Get("Dialog_OK"),
-            PrimaryButtonAppearance = ControlAppearance.Caution,
-            IsPrimaryButtonEnabled = true,
-            CloseButtonText = string.Empty
-        };
-        return box.ShowDialogAsync();
-    }
+        => ShowAcknowledgeAsync(title, message, ControlAppearance.Caution);
 
     public static Task ShowErrorAsync(string title, string message)
-    {
-        var box = new MessageBox
-        {
-            Title = title,
-            Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
-            PrimaryButtonText = S.Get("Dialog_OK"),
-            PrimaryButtonAppearance = ControlAppearance.Danger,
-            IsPrimaryButtonEnabled = true,
-            CloseButtonText = string.Empty
-        };
-        return box.ShowDialogAsync();
-    }
+        => ShowAcknowledgeAsync(title, message, ControlAppearance.Danger);
 
     public static async Task<bool> ConfirmAsync(string title, string message)
     {

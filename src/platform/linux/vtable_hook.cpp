@@ -514,6 +514,120 @@ void** VtableHook::FindRemoteStorageVtable(uintptr_t steamBase, size_t steamSize
     return vtableFuncs;
 }
 
+void** VtableHook::FindVtableByRTTIName(const char* mangledName,
+                                       uintptr_t steamBase, size_t steamSize)
+{
+    const size_t nameLen = strlen(mangledName);
+
+    // 1) RTTI type-name string (.rodata, never relocated).
+    const uint8_t* rttiStr = FindBytes(mangledName, nameLen + 1, steamBase, steamSize);
+    if (!rttiStr)
+    {
+        Log::Error("RTTI string '%s' not found in steamclient.so", mangledName);
+        return nullptr;
+    }
+    uintptr_t rttiStrAddr = reinterpret_cast<uintptr_t>(rttiStr);
+    uintptr_t rttiStrVaddr = rttiStrAddr - steamBase;  // file vaddr (pre-relocation)
+    Log::Debug("RTTI '%s' at %p (vaddr 0x%zx)", mangledName, rttiStr, (size_t)rttiStrVaddr);
+
+    // 2) typeinfo: name_ptr holds relocated absolute or unrelocated file vaddr.
+    const uintptr_t* nameField = FindPointerValue(rttiStrAddr, rttiStrVaddr,
+                                                  steamBase, steamSize);
+    if (!nameField)
+    {
+        Log::Error("typeinfo for '%s' not found (rel=0x%zx unrel=0x%zx)",
+                   mangledName, (size_t)rttiStrAddr, (size_t)rttiStrVaddr);
+        return nullptr;
+    }
+    const uintptr_t* typeinfo = nameField - 1;  // typeinfo starts one slot before name
+    uintptr_t typeinfoAddr = reinterpret_cast<uintptr_t>(typeinfo);
+    bool relocated = (*nameField == rttiStrAddr);
+    Log::Debug("typeinfo for '%s' at %p (%s)", mangledName, typeinfo,
+               relocated ? "relocated" : "unrelocated");
+
+    // 3) Wait for .data.rel.ro relocations if pending (vtable typeinfo ptr is
+    // the runtime absolute typeinfoAddr only once relocated).
+    if (!relocated)
+    {
+        volatile uintptr_t* nameSlot = const_cast<volatile uintptr_t*>(nameField);
+        int waitMs = 0;
+        const int maxWaitMs = 30000;
+        while (*nameSlot != rttiStrAddr && waitMs < maxWaitMs)
+        {
+            usleep(50000);
+            waitMs += 50;
+        }
+        if (*nameSlot != rttiStrAddr)
+        {
+            Log::Error("relocations did not complete for '%s' after %dms", mangledName, waitMs);
+            return nullptr;
+        }
+    }
+
+    // 4) vtable: scan for [offset_to_top=0, typeinfo_ptr] header.
+    for (int r = 0; r < g_readableCount; r++)
+    {
+        if (g_readableRanges[r].end <= steamBase ||
+            g_readableRanges[r].start >= steamBase + steamSize)
+            continue;
+
+        const uintptr_t* scanStart = reinterpret_cast<const uintptr_t*>(
+            (g_readableRanges[r].start + sizeof(uintptr_t) - 1) & ~(sizeof(uintptr_t) - 1));
+        const uintptr_t* scanEnd = reinterpret_cast<const uintptr_t*>(
+            g_readableRanges[r].end & ~(sizeof(uintptr_t) - 1));
+
+        for (const uintptr_t* p = scanStart; p + 1 < scanEnd; p++)
+        {
+            if (*p == 0 && *(p + 1) == typeinfoAddr)
+            {
+                void** vtableFuncs = reinterpret_cast<void**>(const_cast<uintptr_t*>(p + 2));
+                if (!CanReadMemory(vtableFuncs, sizeof(void*)))
+                    continue;
+                Log::Info("vtable for '%s' at %p (offset 0x%zx)", mangledName,
+                          vtableFuncs, reinterpret_cast<uintptr_t>(vtableFuncs) - steamBase);
+                return vtableFuncs;
+            }
+        }
+    }
+
+    Log::Error("vtable for '%s' not found (typeinfo=%p)", mangledName, typeinfo);
+    return nullptr;
+}
+
+void* VtableHook::FindGlobalWithVtable(void* vtablePtr,
+                                       uintptr_t steamBase, size_t steamSize)
+{
+    uintptr_t target = reinterpret_cast<uintptr_t>(vtablePtr);
+
+    // Default instances live in writable .data/.bss. Scan writable ranges.
+    for (int r = 0; r < g_writableCount; r++)
+    {
+        if (g_writableRanges[r].end <= steamBase ||
+            g_writableRanges[r].start >= steamBase + steamSize)
+            continue;
+
+        const uintptr_t* scanStart = reinterpret_cast<const uintptr_t*>(
+            (g_writableRanges[r].start + sizeof(uintptr_t) - 1) & ~(sizeof(uintptr_t) - 1));
+        const uintptr_t* scanEnd = reinterpret_cast<const uintptr_t*>(
+            g_writableRanges[r].end & ~(sizeof(uintptr_t) - 1));
+
+        for (const uintptr_t* p = scanStart; p + 2 < scanEnd; p++)
+        {
+            // First word == vtable, next two words == 0 (arena / has_bits).
+            if (*p == target && *(p + 1) == 0 && *(p + 2) == 0)
+            {
+                void* inst = reinterpret_cast<void*>(const_cast<uintptr_t*>(p));
+                Log::Info("default instance for vtable %p at %p (offset 0x%zx)",
+                          vtablePtr, inst, reinterpret_cast<uintptr_t>(inst) - steamBase);
+                return inst;
+            }
+        }
+    }
+
+    Log::Error("default instance for vtable %p not found", vtablePtr);
+    return nullptr;
+}
+
 bool VtableHook::InstallCloudEnabledHook(void** vtable, CloudEnabledHookInfo& info)
 {
     size_t slotIndex = ResolveCloudEnabledSlot(vtable, 0, UINTPTR_MAX);

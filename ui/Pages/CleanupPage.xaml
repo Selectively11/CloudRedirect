@@ -17,6 +17,25 @@
                        TextWrapping="Wrap"
                        Margin="0,0,0,24" />
 
+            <Border x:Name="OstContextBanner"
+                    Visibility="Collapsed"
+                    Background="{DynamicResource ControlFillColorDefaultBrush}"
+                    BorderBrush="{DynamicResource SystemAccentColorPrimaryBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="16"
+                    Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Text="{res:Loc Cleanup_OstBanner_Title}"
+                               FontSize="14" FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                    <TextBlock Text="{res:Loc Cleanup_OstBanner_Description}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0" />
+                </StackPanel>
+            </Border>
+
             <StackPanel x:Name="ScanCleanPanel">
 
                 <WrapPanel Margin="0,0,0,16">

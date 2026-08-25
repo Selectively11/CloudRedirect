@@ -3,6 +3,7 @@
 
 #include <string>
 #include <cstdint>
+#include <map>
 
 namespace HttpUtil {
 
@@ -23,6 +24,8 @@ std::string UnixToIso8601(int64_t ts);
 struct HttpResp {
     int status = 0;
     std::string body;
+    std::string location;  // Location response header (resumable upload, redirects)
+    std::map<std::string, std::string> headers;  // all response headers, keys lower-cased
 };
 
 } // namespace HttpUtil

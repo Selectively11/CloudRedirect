@@ -92,13 +92,13 @@ void Deployer::checkPrerequisites()
 {
     QString home = realHomePath();
 
-    QString slsDir = home + "/.local/share/SLSsteam";
+    QString slsDir = xdgDataHome() + "/SLSsteam";
     m_slssteamInstalled = QFile::exists(slsDir + "/SLSsteam.so");
 
     m_slsCloudBlocked = true;
     if (m_slssteamInstalled) {
         QStringList configPaths = {
-            home + "/.config/SLSsteam/config.yaml",
+            xdgConfigHome() + "/SLSsteam/config.yaml",
             home + "/.var/app/com.valvesoftware.Steam/.config/SLSsteam/config.yaml",
         };
         for (const auto &configPath : configPaths) {
@@ -129,7 +129,7 @@ void Deployer::checkPrerequisites()
         }
     }
 
-    QString crDir = home + "/.local/share/CloudRedirect";
+    QString crDir = crDataDir();
     m_soDeployPath = crDir + "/cloud_redirect.so";
     m_cliDeployPath = crDir + "/cloud_redirect_cli";
 
@@ -143,8 +143,8 @@ void Deployer::checkPrerequisites()
         m_soSourcePath = appDir + "/cloud_redirect.so";
     else if (QFile::exists("/app/share/cloud_redirect/cloud_redirect.so"))
         m_soSourcePath = "/app/share/cloud_redirect/cloud_redirect.so";
-    else if (QFile::exists(home + "/.local/share/cloud_redirect/cloud_redirect.so"))
-        m_soSourcePath = home + "/.local/share/cloud_redirect/cloud_redirect.so";
+    else if (QFile::exists(xdgDataHome() + "/cloud_redirect/cloud_redirect.so"))
+        m_soSourcePath = xdgDataHome() + "/cloud_redirect/cloud_redirect.so";
 
     if (!bundledCli.isEmpty() && QFile::exists(bundledCli))
         m_cliSourcePath = bundledCli;
@@ -152,8 +152,8 @@ void Deployer::checkPrerequisites()
         m_cliSourcePath = appDir + "/cloud_redirect_cli";
     else if (QFile::exists("/app/share/cloud_redirect/cloud_redirect_cli"))
         m_cliSourcePath = "/app/share/cloud_redirect/cloud_redirect_cli";
-    else if (QFile::exists(home + "/.local/share/cloud_redirect/cloud_redirect_cli"))
-        m_cliSourcePath = home + "/.local/share/cloud_redirect/cloud_redirect_cli";
+    else if (QFile::exists(xdgDataHome() + "/cloud_redirect/cloud_redirect_cli"))
+        m_cliSourcePath = xdgDataHome() + "/cloud_redirect/cloud_redirect_cli";
 
     m_alreadyDeployed = QFile::exists(m_soDeployPath);
 
@@ -248,7 +248,7 @@ bool Deployer::deploy()
         return false;
     }
 
-    QString crDir = realHomePath() + "/.local/share/CloudRedirect";
+    QString crDir = crDataDir();
     QDir().mkpath(crDir);
 
     if (QFile::exists(m_soDeployPath)) {
@@ -286,7 +286,7 @@ bool Deployer::deploy()
         }
     }
 
-    QString configDir = realHomePath() + "/.config/CloudRedirect";
+    QString configDir = crConfigDir();
     QDir().mkpath(configDir);
 
     m_alreadyDeployed = true;
@@ -311,7 +311,7 @@ bool Deployer::update()
         return false;
     }
 
-    QString crDir = realHomePath() + "/.local/share/CloudRedirect";
+    QString crDir = crDataDir();
     QDir().mkpath(crDir);
 
     if (QFile::exists(m_soDeployPath)) {
@@ -368,13 +368,13 @@ bool Deployer::purgeAll()
 {
     undeploy();
 
-    QString configDir = realHomePath() + "/.config/CloudRedirect";
+    QString configDir = crConfigDir();
     QDir configQDir(configDir);
     if (configQDir.exists()) {
         configQDir.removeRecursively();
     }
 
-    QString dataDir = realHomePath() + "/.local/share/CloudRedirect";
+    QString dataDir = crDataDir();
     QDir dataQDir(dataDir);
     if (dataQDir.exists()) {
         dataQDir.removeRecursively();

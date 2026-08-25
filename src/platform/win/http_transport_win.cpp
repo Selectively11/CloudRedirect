@@ -7,6 +7,8 @@
 
 #include <Windows.h>
 #include <winhttp.h>
+#include <cctype>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -31,6 +33,15 @@ public:
         return true;
     }
 
+    // Scale send/receive timeouts with body size so multi-MB PUTs survive a slow link
+    // without making small requests wait on the 10s session default.
+    static void TuneTimeoutsForBody(HINTERNET hReq, size_t bodyBytes) {
+        if (bodyBytes <= 256 * 1024) return; // small requests keep the fast default
+        int sendMs = 60000;    // allow a multi-MB body to finish uploading
+        int receiveMs = 30000; // allow Drive to commit and reply
+        WinHttpSetTimeouts(hReq, 5000, 5000, sendMs, receiveMs);
+    }
+
     void Shutdown() override {
         if (m_session) {
             WinHttpCloseHandle(m_session);
@@ -39,6 +50,7 @@ public:
     }
 
     bool IsReady() const override { return m_session != nullptr; }
+    void SetOptions(const TransportOptions& opts) override { m_opts = opts; }
 
     HttpResp Request(const char* method, const char* host,
                      const std::string& path,
@@ -65,6 +77,7 @@ public:
                                       WINHTTP_ADDREQ_FLAG_ADD);
         }
 
+        TuneTimeoutsForBody(hReq, body.size());
         BOOL ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
             body.empty() ? nullptr : (void*)body.data(), (DWORD)body.size(),
             (DWORD)body.size(), 0);
@@ -78,6 +91,8 @@ public:
                 WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeLen, WINHTTP_NO_HEADER_INDEX);
             resp.status = (int)code;
             ReadBody(hReq, resp.body);
+            ReadLocationHeader(hReq, resp.location);
+            ReadAllHeaders(hReq, resp.headers);
         }
 
         WinHttpCloseHandle(hReq);
@@ -100,13 +115,14 @@ public:
             : "/";
 
         bool isHttps = fullUrl.substr(0, schemeEnd) == "https";
-        if (!isHttps) {
+        if (!isHttps && !(m_opts.allowInsecureHttp && fullUrl.substr(0, schemeEnd) == "http")) {
             LOG("%s BLOCKED non-HTTPS request to %s", m_logTag, fullUrl.c_str());
             return {};
         }
         if (!m_session) return {};
 
-        INTERNET_PORT port = INTERNET_DEFAULT_HTTPS_PORT;
+        INTERNET_PORT port = isHttps ? INTERNET_DEFAULT_HTTPS_PORT
+                                     : INTERNET_DEFAULT_HTTP_PORT;
         size_t colonPos = host.find(':');
         if (colonPos != std::string::npos) {
             port = (INTERNET_PORT)atoi(host.substr(colonPos + 1).c_str());
@@ -117,12 +133,22 @@ public:
         HINTERNET hConn = WinHttpConnect(m_session, wHost.c_str(), port, 0);
         if (!hConn) return {};
 
+        DWORD openFlags = WINHTTP_FLAG_ESCAPE_DISABLE;
+        if (isHttps) openFlags |= WINHTTP_FLAG_SECURE;
         auto wMethod = Widen(method);
         auto wPath = Widen(path);
         HINTERNET hReq = WinHttpOpenRequest(hConn, wMethod.c_str(), wPath.c_str(),
-            nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-            WINHTTP_FLAG_SECURE | WINHTTP_FLAG_ESCAPE_DISABLE);
+            nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, openFlags);
         if (!hReq) { WinHttpCloseHandle(hConn); return {}; }
+
+        if (isHttps && m_opts.allowInsecureTls) {
+            DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA
+                           | SECURITY_FLAG_IGNORE_CERT_CN_INVALID
+                           | SECURITY_FLAG_IGNORE_CERT_DATE_INVALID
+                           | SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+            WinHttpSetOption(hReq, WINHTTP_OPTION_SECURITY_FLAGS,
+                             &secFlags, sizeof(secFlags));
+        }
 
         for (auto& h : hdrs) {
             auto wh = Widen(h);
@@ -131,6 +157,7 @@ public:
         }
 
         HttpResp resp;
+        TuneTimeoutsForBody(hReq, body.size());
         BOOL ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
             body.empty() ? nullptr : (void*)body.data(), (DWORD)body.size(),
             (DWORD)body.size(), 0);
@@ -144,6 +171,8 @@ public:
                 WINHTTP_HEADER_NAME_BY_INDEX, &code, &codeLen, WINHTTP_NO_HEADER_INDEX);
             resp.status = (int)code;
             ReadBody(hReq, resp.body);
+            ReadLocationHeader(hReq, resp.location);
+            ReadAllHeaders(hReq, resp.headers);
         }
 
         WinHttpCloseHandle(hReq);
@@ -227,6 +256,58 @@ public:
     }
 
 private:
+    void ReadLocationHeader(HINTERNET hReq, std::string& location) {
+        DWORD size = 0;
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+            WINHTTP_NO_OUTPUT_BUFFER, &size, WINHTTP_NO_HEADER_INDEX);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || size == 0) return;
+        std::wstring wLoc(size / sizeof(wchar_t), 0);
+        if (!WinHttpQueryHeaders(hReq, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+                wLoc.data(), &size, WINHTTP_NO_HEADER_INDEX)) return;
+        while (!wLoc.empty() && wLoc.back() == 0) wLoc.pop_back();
+        if (wLoc.empty()) return;
+        int n = WideCharToMultiByte(CP_UTF8, 0, wLoc.c_str(), (int)wLoc.size(),
+                                     nullptr, 0, nullptr, nullptr);
+        if (n <= 0) return;
+        location.resize(n);
+        WideCharToMultiByte(CP_UTF8, 0, wLoc.c_str(), (int)wLoc.size(),
+                             location.data(), n, nullptr, nullptr);
+    }
+
+    // Query the full raw header block and fold it into a lower-cased map so
+    // callers can read S3 response headers (x-amz-version-id, etag, ...).
+    void ReadAllHeaders(HINTERNET hReq, std::map<std::string, std::string>& out) {
+        DWORD size = 0;
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_RAW_HEADERS_CRLF,
+            WINHTTP_HEADER_NAME_BY_INDEX, WINHTTP_NO_OUTPUT_BUFFER, &size,
+            WINHTTP_NO_HEADER_INDEX);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || size == 0) return;
+        std::wstring wRaw(size / sizeof(wchar_t), 0);
+        if (!WinHttpQueryHeaders(hReq, WINHTTP_QUERY_RAW_HEADERS_CRLF,
+                WINHTTP_HEADER_NAME_BY_INDEX, wRaw.data(), &size,
+                WINHTTP_NO_HEADER_INDEX)) return;
+        int n = WideCharToMultiByte(CP_UTF8, 0, wRaw.c_str(), (int)wRaw.size(),
+                                     nullptr, 0, nullptr, nullptr);
+        if (n <= 0) return;
+        std::string raw(n, 0);
+        WideCharToMultiByte(CP_UTF8, 0, wRaw.c_str(), (int)wRaw.size(),
+                             raw.data(), n, nullptr, nullptr);
+
+        size_t pos = 0;
+        while (pos < raw.size()) {
+            size_t eol = raw.find("\r\n", pos);
+            std::string line = raw.substr(pos, (eol == std::string::npos ? raw.size() : eol) - pos);
+            pos = (eol == std::string::npos) ? raw.size() : eol + 2;
+            size_t colon = line.find(':');
+            if (colon == std::string::npos) continue;  // status line or blank
+            std::string name = line.substr(0, colon);
+            for (char& c : name) c = (char)tolower((unsigned char)c);
+            size_t vs = colon + 1;
+            while (vs < line.size() && (line[vs] == ' ' || line[vs] == '\t')) vs++;
+            out[name] = line.substr(vs);
+        }
+    }
+
     void ReadBody(HINTERNET hReq, std::string& body) {
         DWORD avail, got;
         while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
@@ -245,6 +326,7 @@ private:
 
     const char* m_logTag;
     HINTERNET m_session = nullptr;
+    TransportOptions m_opts;
 };
 
 // Factory function

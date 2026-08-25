@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <cerrno>
 #include <thread>
+#include <chrono>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -32,6 +33,8 @@ static std::atomic<bool> g_running{false};
 static std::atomic<int> g_activeConnections{0};
 static std::atomic<uint64_t> g_maxUploadBytes{256ULL * 1024 * 1024};  // 256 MB default
 static constexpr int MAX_CONCURRENT_CONNECTIONS = 64;
+// At the cap, wait this long for a connection to free before sending 503 (backpressure).
+static constexpr int kAcceptBackpressureMaxMs = 5000;
 static std::thread g_serverThread;
 struct ClientThread {
     std::thread thread;
@@ -601,7 +604,14 @@ bool Start(const std::string& blobRoot, uint32_t accountId) {
             struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
             setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
             setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            // Reject if too many concurrent connections (local DoS protection)
+            // At the cap: backpressure before giving up, so large download bursts
+            // (high-file-count manifests) drain instead of failing the sync.
+            int backpressureMs = 0;
+            while (g_activeConnections.load() >= MAX_CONCURRENT_CONNECTIONS &&
+                   g_running.load() && backpressureMs < kAcceptBackpressureMaxMs) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                backpressureMs += 20;
+            }
             if (g_activeConnections.load() >= MAX_CONCURRENT_CONNECTIONS) {
                 const char* resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
                 send(clientFd, resp, strlen(resp), 0);

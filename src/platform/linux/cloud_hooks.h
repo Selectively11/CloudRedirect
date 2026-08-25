@@ -15,6 +15,10 @@ namespace CloudHooks
     // Must be called after steamclient is loaded. Returns true on success.
     bool ResolveProtobufHelpers(void* steamclientBase, size_t steamclientSize);
 
+    // Install the GamesPlayed observer (playtime tracking) using the resolved
+    // protobuf serializer. Call after ResolveProtobufHelpers succeeds.
+    void InstallGamesPlayedObserver(uintptr_t steamclientBase, size_t steamclientSize);
+
     // Signal hooks to stop and wait for in-flight calls to drain.
     void BeginShutdown();
 }

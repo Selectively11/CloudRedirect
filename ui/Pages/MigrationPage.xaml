@@ -1,0 +1,296 @@
+<Page x:Class="CloudRedirect.Pages.MigrationPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+      xmlns:res="clr-namespace:CloudRedirect.Resources"
+      xmlns:conv="clr-namespace:CloudRedirect.Converters"
+      ScrollViewer.CanContentScroll="False">
+
+    <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVis" />
+        <conv:UrlToImageSourceConverter x:Key="UrlToImageSource" />
+
+        <Style x:Key="CardItemStyle" TargetType="ListBoxItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Focusable" Value="False" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <ContentPresenter />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Page.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
+        <StackPanel MaxWidth="800">
+
+            <TextBlock Text="{res:Loc Migration_Title}"
+                       FontSize="28" FontWeight="SemiBold"
+                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                       Margin="0,0,0,8" />
+            <TextBlock Text="{res:Loc Migration_Description}"
+                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,24" />
+
+            <!-- Active provider indicator -->
+            <ui:CardControl x:Name="ActiveProviderBar"
+                            Icon="{ui:SymbolIcon CloudCheckmark24}"
+                            Visibility="Collapsed"
+                            Margin="0,0,0,24">
+                <ui:CardControl.Header>
+                    <StackPanel>
+                        <TextBlock Text="{res:Loc Migration_ActiveProvider}"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                        <TextBlock x:Name="ActiveProviderText"
+                                   Text=""
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </ui:CardControl.Header>
+            </ui:CardControl>
+
+            <!-- ── Config panel ── -->
+            <StackPanel x:Name="ConfigPanel">
+
+                <Border Background="{DynamicResource ControlFillColorDefaultBrush}"
+                        CornerRadius="8"
+                        Padding="20"
+                        Margin="0,0,0,16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="{res:Loc Migration_Source}"
+                                       FontSize="13" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Margin="0,0,0,6" />
+                            <ComboBox x:Name="SourceCombo"
+                                      HorizontalAlignment="Stretch"
+                                      SelectionChanged="Provider_SelectionChanged" />
+                        </StackPanel>
+
+                        <ui:SymbolIcon Grid.Column="1"
+                                       Symbol="ArrowRight24"
+                                       FontSize="24"
+                                       VerticalAlignment="Bottom"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Margin="16,0,16,4" />
+
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="{res:Loc Migration_Destination}"
+                                       FontSize="13" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       Margin="0,0,0,6" />
+                            <ComboBox x:Name="DestCombo"
+                                      HorizontalAlignment="Stretch"
+                                      SelectionChanged="Provider_SelectionChanged" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Validation / status message -->
+                <TextBlock x:Name="ValidationText"
+                           Text=""
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,12" />
+
+                <!-- Loading indicator for source scan -->
+                <StackPanel x:Name="ScanLoadingPanel"
+                            Visibility="Collapsed"
+                            Orientation="Horizontal"
+                            Margin="0,0,0,12">
+                    <ui:ProgressRing IsIndeterminate="True" Width="20" Height="20" Margin="0,0,8,0" />
+                    <TextBlock Text="{res:Loc Migration_ScanningSource}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+
+                <!-- Source apps list (populated after scan) -->
+                <TextBlock x:Name="SourceAppsHeader"
+                           Text=""
+                           FontSize="14" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Visibility="Collapsed"
+                           Margin="0,0,0,8" />
+
+                <ListBox x:Name="SourceAppList"
+                         BorderThickness="0"
+                         Background="Transparent"
+                         Padding="0"
+                         Visibility="Collapsed"
+                         MaxHeight="240"
+                         ItemContainerStyle="{StaticResource CardItemStyle}"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.CanContentScroll="True"
+                         VirtualizingPanel.IsVirtualizing="True"
+                         VirtualizingPanel.VirtualizationMode="Recycling"
+                         VirtualizingPanel.ScrollUnit="Pixel">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Margin="0,0,0,6">
+                                <ui:CardControl>
+                                    <ui:CardControl.Header>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+
+                                            <Border Grid.Column="0"
+                                                    Width="92" Height="43"
+                                                    CornerRadius="4"
+                                                    Margin="0,0,12,0"
+                                                    VerticalAlignment="Center"
+                                                    ClipToBounds="True">
+                                                <Border.Background>
+                                                    <ImageBrush ImageSource="{Binding HeaderUrl, Converter={StaticResource UrlToImageSource}}"
+                                                                Stretch="UniformToFill"
+                                                                RenderOptions.BitmapScalingMode="HighQuality" />
+                                                </Border.Background>
+                                            </Border>
+
+                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding DisplayName}"
+                                                           FontSize="15" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Text="{Binding AppId}"
+                                                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                                           FontSize="12"
+                                                           Margin="0,3,0,0" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </ui:CardControl.Header>
+                                </ui:CardControl>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <ui:Button x:Name="StartButton"
+                           Content="{res:Loc Migration_StartMigration}"
+                           Icon="{ui:SymbolIcon ArrowSync24}"
+                           Appearance="Primary"
+                           Click="StartButton_Click"
+                           IsEnabled="False"
+                           Margin="0,16,0,0" />
+            </StackPanel>
+
+            <!-- ── Progress panel ── -->
+            <StackPanel x:Name="ProgressPanel" Visibility="Collapsed">
+
+                <Border Background="{DynamicResource ControlFillColorDefaultBrush}"
+                        CornerRadius="8"
+                        Padding="20"
+                        Margin="0,0,0,16">
+                    <StackPanel>
+                        <TextBlock x:Name="ProgressTitle"
+                                   Text="Migrating..."
+                                   FontSize="18" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                   Margin="0,0,0,12" />
+
+                        <ProgressBar x:Name="ProgressBar"
+                                     Minimum="0" Maximum="100" Value="0"
+                                     Height="6"
+                                     Margin="0,0,0,10" />
+
+                        <TextBlock x:Name="ProgressStatus"
+                                   Text="Starting..."
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                   Margin="0,0,0,4" />
+
+                        <TextBlock x:Name="ProgressSpeed"
+                                   Text=""
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                   Margin="0,0,0,4" />
+
+                        <TextBlock x:Name="ProgressDetail"
+                                   Text=""
+                                   FontSize="12"
+                                   Foreground="{DynamicResource TextFillColorTertiaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <ui:Button x:Name="CancelButton"
+                           Content="{res:Loc Migration_Cancel}"
+                           Icon="{ui:SymbolIcon Dismiss24}"
+                           Appearance="Danger"
+                           Click="CancelButton_Click" />
+            </StackPanel>
+
+            <!-- ── Result panel ── -->
+            <StackPanel x:Name="ResultPanel" Visibility="Collapsed">
+
+                <Border x:Name="ResultBorder"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        Padding="16"
+                        Margin="0,0,0,16">
+                    <DockPanel>
+                        <Border x:Name="ResultIconBadge"
+                                DockPanel.Dock="Left"
+                                Width="40" Height="40"
+                                CornerRadius="20"
+                                Margin="0,0,16,0"
+                                VerticalAlignment="Top">
+                            <ui:SymbolIcon x:Name="ResultIcon"
+                                           Symbol="Checkmark24"
+                                           FontSize="20"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock x:Name="ResultTitle"
+                                       FontSize="15" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                                       Margin="0,0,0,4" />
+                            <TextBlock x:Name="ResultSummary"
+                                       TextWrapping="Wrap"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+
+                <WrapPanel>
+                    <ui:Button Content="{res:Loc Migration_Back}"
+                               Icon="{ui:SymbolIcon ArrowUndo24}"
+                               Click="BackButton_Click"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="RetryButton"
+                               Content="{res:Loc Migration_RetryFailed}"
+                               Icon="{ui:SymbolIcon ArrowRepeatAll24}"
+                               Appearance="Caution"
+                               Click="RetryButton_Click"
+                               Visibility="Collapsed"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="SwitchProviderButton"
+                               Content="{res:Loc Migration_SwitchProvider}"
+                               Icon="{ui:SymbolIcon ArrowSwap24}"
+                               Appearance="Primary"
+                               Click="SwitchProviderButton_Click"
+                               Visibility="Collapsed" />
+                </WrapPanel>
+
+            </StackPanel>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

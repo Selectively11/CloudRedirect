@@ -39,4 +39,12 @@ void ClearFailedWorkForPrefix(const std::string& prefix);
 // Report error via installed reporter.
 void ShowErrorDialog(const std::string& message);
 
+// Set the base unit (ms) for exponential retry backoff: delay = unit << (retries-1).
+// Default 1000ms. Tests set 0 for deterministic, fast retries.
+void SetRetryBackoffUnitMs(int unitMs);
+
+// Set the number of background worker threads (clamped to >= 1).
+// Default 8. Tests set 1 for deterministic, single-worker repro.
+void SetWorkerThreadCount(int count);
+
 } // namespace CloudWorkQueue

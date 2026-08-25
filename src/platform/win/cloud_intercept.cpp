@@ -1,17 +1,23 @@
 #include "cloud_intercept.h"
 #include "metadata_sync.h"
 #include "rpc_handlers.h"
+#include "stats_handlers.h"
+#include "stats_store.h"
 #include "app_state.h"
 #include "protobuf.h"
 #include "parental_bypass.h"
 #include "steam_kv_injector.h"
+#include "sc_resolver.h"
+#include "sig_scanner.h"
 #include "log.h"
 #include "http_server.h"
 #include "vdf.h"
 #include "http_util.h"
 #include "local_storage.h"
 #include "cloud_storage.h"
+#include "coop_yield.h"
 #include "cloud_provider.h"
+#include "cloud_provider_base.h" // g_uploadInFlightCapBytes
 #include "pending_ops_journal.h"
 #include "json.h"
 #include "legacy_metadata_cleanup.h"
@@ -39,6 +45,8 @@
 #include <limits>
 #include <thread>
 
+namespace AutoCloudScan { std::string GetAppName(const std::string& steamPath, uint32_t appId); }
+
 namespace CloudIntercept {
 
 static void ShutdownImpl();
@@ -48,6 +56,7 @@ static constexpr uint32_t PROTO_FLAG = 0x80000000;
 static constexpr uint32_t EMSG_MASK = 0x7FFFFFFF;
 static constexpr uint32_t EMSG_SERVICE_METHOD = 151;
 static constexpr uint32_t EMSG_SERVICE_METHOD_RESP = 147;
+static constexpr uint32_t EMSG_CLIENT_GET_USER_STATS_RESP = 819;  // schema-fetch response
 static constexpr uint64_t JOBID_NONE = 0xFFFFFFFFFFFFFFFFULL;
 
 static constexpr uint32_t HDR_STEAMID = 1;
@@ -66,6 +75,20 @@ static constexpr uintptr_t RVA_DEPOT_MANIFEST_CNT  = 0x1C3870;  // g_nDepotManif
 
 static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 
+// CMsgClientGamesPlayed EMsg variants
+static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED              = 742;
+static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED_NO_DATABLOB  = 715;
+static constexpr uint32_t EMSG_CLIENT_GAMES_PLAYED_WITH_DATABLOB = 5410;
+// CMsgClientStoreUserStats2 -- sent when a game unlocks an achievement / sets a stat.
+static constexpr uint32_t EMSG_CLIENT_STORE_USER_STATS2        = 5466;
+
+// CMsgClientGamesPlayed protobuf field numbers
+static constexpr uint32_t GP_FIELD_GAMES_PLAYED    = 1;   // repeated GamePlayed (length-delimited)
+// CMsgClientGamesPlayed.GamePlayed field numbers
+static constexpr uint32_t GP_FIELD_GAME_ID         = 2;   // fixed64
+static constexpr uint32_t GP_FIELD_GAME_EXTRA_INFO = 7;   // string
+static constexpr uint32_t GP_FIELD_OWNER_ID        = 12;  // uint32
+
 // steamclient64.dll RVAs for manifest pinning inline detour
 // IDA image base: 0x138000000
 // sub_1384C4040 = CUserAppManager::BuildDepotDependency
@@ -76,33 +99,78 @@ static constexpr uint32_t EMSG_CLIENT_PICSPRODUCTINFO = 8903;
 //   a5 ([rsp+28h]) = output depot vector (DLC/shared depots)
 // Depot vectors: *(QWORD*)vec = array base, *(int*)(vec+16) = count
 // Each entry is 32 bytes: {uint32 depotId, uint32 appId, uint64 manifestId, ...}
-static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4AC9B0;
-
+static constexpr uintptr_t SC_RVA_BUILD_DEPOT_DEPENDENCY = 0x4B13A0;
 static constexpr size_t SC_BDD_STOLEN_BYTES = 14;  // first 14 bytes of prologue
+
+// CProtoBufMsg::BAsyncSend(uint32_t connectionHandle)
+// Hooks this to inject game_extra_info into CMsgClientGamesPlayed before serialization.
+static constexpr uintptr_t SC_RVA_BASYNC_SEND = 0xCF9590;
+static constexpr size_t SC_BAS_STOLEN_BYTES = 15;   // 5+5+1+4 bytes of prologue
+// CProtoBufMsg layout offsets
+static constexpr uint32_t CPROTOBUFMSG_OFF_DESC   = 0x08;  // typed-body descriptor vtable*
+static constexpr uint32_t CPROTOBUFMSG_OFF_CONN   = 0x1C;  // uint32_t connection handle
+static constexpr uint32_t CPROTOBUFMSG_OFF_EMSG   = 0x20;  // uint32_t EMsg | PROTO_FLAG
+static constexpr uint32_t CPROTOBUFMSG_OFF_BODY   = 0x30;  // protobuf body object*
+
+// g_pJobCur (qword_1397E02C0): current CJob coroutine. CJobID at CJob+32.
+// Only valid on BMainLoop/job thread (yield primitives assert g_pJobCur != NULL).
+static constexpr uintptr_t SC_RVA_JOBCUR_GLOBAL = 0x17E9CC0;
+static constexpr uint32_t  JOB_OFF_JOBID        = 32;
+
+// CJob::BYieldIfTimeSlice (sub_138CE8130): yields if cooperative slice held >10ms.
+//   bool fn(CJob* this, void* ctx, bool* outYielded); asserts this==g_pJobCur.
+static constexpr uintptr_t SC_RVA_YIELD_IF_TIMESLICE = 0xCEF280;
+
+// Schema-fetch injection: send EMsg 818 (schema_local_version=-1) on behalf of
+// an owning SteamID; server replies with 819 -> UserGameStatsSchema_<appid>.bin.
+// RVAs from CAPIJobRequestUserStats (sub_138A45010).
+static constexpr uintptr_t SC_RVA_PBMSG_CTOR      = 0xCFC7D0;   // CProtoBufMsgBase::ctor(this, emsg, 0)
+static constexpr uintptr_t SC_RVA_PBMSG_FINALIZE  = 0xCFF370;   // allocate typed body (sub_138CFF370)
+static constexpr uintptr_t SC_RVA_PBMSG_CLEANUP   = 0xCFCA80;   // destroy msg
+static constexpr uintptr_t SC_RVA_GETUSERSTATS_DESC = 0x16F8830; // CMsgClientGetUserStats body descriptor
+// Typed vtable for CProtoBufMsg<CMsgClientGetUserStats>.
+// Must be at msg[0] after base ctor; base vftable -> serialization crash.
+static constexpr uintptr_t SC_RVA_GETUSERSTATS_VFTABLE = 0x1347988;
+static constexpr uint32_t EMSG_CLIENT_GET_USER_STATS = 818;
 
 // steamclient64.dll RVAs for CCMInterface discovery
 // IDA image base: 0x138000000
-// qword_1397A70E8 = global CSteamEngine* pointer
-static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17C2D08;
+// qword_1397D3628 = global CSteamEngine* pointer
+static constexpr uintptr_t SC_RVA_GLOBAL_ENGINE     = 0x17D3628;
 // CCMInterface vtable RVA (for validation)
-static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x126C518;
-// sub_138D199E0 = CNetPacket->CProtoBufNetPacket wrapper
-static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xCF7960;
-// sub_138D263B0 = CJobMgr::BRouteMsgToJob
-static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD03970;
-// sub_1380EB760 = Release wrapped packet (CProtoBufNetPacket ref-count release)
-static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC010;
+static constexpr uintptr_t SC_RVA_CCMINTERFACE_VT   = 0x1279888;
+// sub_138D022F0 = CNetPacket->CProtoBufNetPacket wrapper
+static constexpr uintptr_t SC_RVA_WRAP_PACKET       = 0xD022F0;
+// sub_138D0DBD0 = CJobMgr::BRouteMsgToJob
+static constexpr uintptr_t SC_RVA_BROUTEMSG         = 0xD0DBD0;
+// sub_1380EC300 = Release wrapped packet (CProtoBufNetPacket ref-count release)
+static constexpr uintptr_t SC_RVA_RELEASE_WRAPPED   = 0x0EC300;
 
 // CClientUnifiedServiceTransport vtable (RTTI resolves at runtime; RVA is fallback)
-static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1249C10;
+static constexpr uintptr_t SC_RVA_SERVICE_TRANSPORT_VT = 0x1256DF0;
 // protobuf ParseFromArray, 3-arg (msgObj, data, int size)
-static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBC5940;
-// sub_138BE7A40 = protobuf SerializeToArray (writes body to raw bytes)
-static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBC5D50;
+static constexpr uintptr_t SC_RVA_PARSE_FROM_ARRAY  = 0xBD03F0;
+// sub_138BD0800 = protobuf SerializeToArray (writes body to raw bytes)
+static constexpr uintptr_t SC_RVA_SERIALIZE_TO_ARRAY = 0xBD0800;
 // CUser playtime state helpers
-static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9BB3C0;
-static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9CB870;
-static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9CE6A0;
+static constexpr uintptr_t SC_RVA_GET_APP_MINUTES_PLAYED_DATA = 0x9C37A0;
+static constexpr uintptr_t SC_RVA_FLUSH_APP_MINUTES_PLAYED = 0x9D3C40;
+static constexpr uintptr_t SC_RVA_SET_APP_LAST_PLAYED_TIME = 0x9D6A70;
+// Live playtime update: synthesized GetLastPlayedTimes response.
+// Build 1784669098 RVAs:
+static constexpr uintptr_t SC_RVA_PLAYTIME_WRITER    = 0x9CFDA0;
+static constexpr uintptr_t SC_RVA_MSG_CTOR           = 0xCFC7D0;
+static constexpr uintptr_t SC_RVA_MSG_INIT           = 0xCFF370;  // unused; same as PBMSG_FINALIZE
+static constexpr uintptr_t SC_RVA_MSG_DTOR           = 0xCFCA80;
+static constexpr uintptr_t SC_RVA_RESP_DESCRIPTOR    = 0x16D5590;
+static constexpr uintptr_t SC_RVA_RESP_WRAPPER_VT    = 0x1334340;
+// off_1396E8248: pointer to "Software\\Valve\\Steam\\LastPlayedTimesSyncTime"
+static constexpr uintptr_t SC_RVA_REGKEY_SYNCTIME    = 0x16E8248;
+// CUser member offsets used by the writer path
+static constexpr uint32_t USER_OFF_REGISTRY          = 3272;   // CUser+0xCC8: registry obj (sync-time write)
+// Inner CPlayer_GetLastPlayedTimes_Response message offsets
+static constexpr uint32_t RESP_OFF_GAMES_COUNT       = 24;     // repeated games: element count
+static constexpr uint32_t RESP_OFF_GAMES_ARRAY       = 32;     // repeated games: array base ptr
 // CSteamEngine layout offsets
 static constexpr uint32_t ENGINE_OFF_JOBMGR          = 592;    // CJobMgr embedded at CSteamEngine+592
 static constexpr uint32_t ENGINE_OFF_GLOBAL_HANDLE   = 3144;  // uint32_t: global user handle
@@ -115,6 +183,9 @@ static constexpr uint32_t CCM_OFF_CONN_CONTEXT       = 1688;  // connection cont
 // Each entry: { DWORD handle, DWORD pad, QWORD CUser* }
 // CBaseUser layout
 static constexpr uint32_t USER_OFF_CCMINTERFACE     = 72;     // CCMInterface embedded at CBaseUser+0x48
+// Account id in CUser. Resolved at runtime from UserGameStats_%u xref in SaveStatsToDisk.
+// Fallback 570 = build 1782437068 (was 572 on earlier builds).
+static uint32_t USER_OFF_ACCOUNTID = 570;
 
 // Function pointer types for BRouteMsgToJob bypass (Approach D - legacy)
 // sub_138D02530: wraps CNetPacket into CProtoBufNetPacket (parses protobuf header)
@@ -168,9 +239,6 @@ using ParseFromArrayFn = char(__fastcall*)(void* msgBody, const char* data, int 
 //   r8  = buffer size (int)
 //   returns end pointer on old Steam, flag on Steam >= 1778281814
 using SerializeToArrayFn = uintptr_t(__fastcall*)(void* msgBody, void* outBuf, int size);
-using GetAppMinutesPlayedDataFn = unsigned int*(__fastcall*)(int64_t userPtr, unsigned int appId, char create);
-using FlushAppMinutesPlayedFn = int64_t(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int* record);
-using SetAppLastPlayedTimeFn = void(__fastcall*)(int64_t userPtr, unsigned int appId, unsigned int lastPlayed);
 
 // Job routing info struct passed as 4th arg to BRouteMsgToJob
 // Layout from RecvPkt assembly (naturally aligned, 24 bytes, no padding needed):
@@ -190,17 +258,17 @@ static_assert(offsetof(JobRouteInfo, flags) == 20, "");
 // This function takes rcx = pointer-to-pointer, reads *rcx to get a pointer,
 // then does InterlockedIncrement64 on that second pointer.
 // RecvPkt calls this with &unk_139797BD8 before calling BRouteMsgToJob.
-static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDBBFD0;
+static constexpr uintptr_t SC_RVA_REFCOUNT_HELPER   = 0xDC2D70;
 // Global that holds the pointer-to-counter for the refcount helper
-static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17B2A18;
+static constexpr uintptr_t SC_RVA_REFCOUNT_GLOBAL   = 0x17B7E38;
 // sub_138D28CD0 = CUtlSortedVector::Find (looks up a CJob by jobId)
-static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD06410;
+static constexpr uintptr_t SC_RVA_FIND_JOB          = 0xD0CDB0;
 
 // SEH exception filter for crash diagnostics
 static thread_local uintptr_t s_crashFaultAddr = 0;
 
 // Forward declarations
-static void InstallServiceMethodHook();
+void InstallServiceMethodHook();  // also declared in cloud_intercept.h (CR_InstallVtableHooks)
 static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId);
 static bool __fastcall NotificationWrapperHook(void* thisptr, const char* methodName, void* request);
 static bool __fastcall NotificationDirectHook(void* thisptr, const char* methodName, void* bodyObj, int* flags);
@@ -253,11 +321,50 @@ static LONG WINAPI CrashExcFilter(PEXCEPTION_POINTERS pExc) {
 
 static uintptr_t g_payloadBase = 0;
 static uintptr_t g_steamClientBase = 0;           // steamclient64.dll base address
+
+// Auto-resolved addresses from steamclient64.dll pattern scanning.
+// Populated once in RunAutoResolver(). Zero = not resolved (use hardcoded fallback).
+static ScResolver::ResolvedAddrs g_resolved = {};
+static std::atomic<bool> g_resolverRan{false};
+
+// Use resolved address if available, else 0 (subsystem must gate on this).
+// No hardcoded fallback — a wrong RVA causes silent corruption or crashes.
+#define SC_RESOLVE(field) (g_resolved.field)
+
+static void RunAutoResolver() {
+    if (g_resolverRan.exchange(true)) return;
+    if (!g_steamClientBase) {
+        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+        if (!hSC) return;
+        g_steamClientBase = (uintptr_t)hSC;
+    }
+    g_resolved = ScResolver::Resolve(g_steamClientBase);
+    ScResolver::LogComparison(g_resolved, g_steamClientBase);
+
+    SteamKvInjector::ResolvedKvAddrs kv;
+    kv.globalEnginePtrPtr  = reinterpret_cast<void**>(g_resolved.globalEngine);
+    kv.getAppInfo          = g_resolved.getAppInfo;
+    kv.getSection          = g_resolved.getSection;
+    kv.readConfigU64       = g_resolved.readConfigU64;
+    kv.kvFindKey           = g_resolved.kvFindKey;
+    kv.kvGetUint64         = g_resolved.kvGetUint64;
+    kv.kvGetInt            = g_resolved.kvGetInt;
+    kv.kvSetUint64         = g_resolved.kvSetUint64;
+    kv.kvSetInt            = g_resolved.kvSetInt;
+    kv.kvSetString         = g_resolved.kvSetString;
+    kv.appInfoCacheOffset  = g_resolved.engineOffAppInfoCache;
+    SteamKvInjector::Configure(kv);
+}
+
 static std::string g_steamPath;
-static RecvPktFn g_originalRecvPkt = nullptr;
-static void** g_recvPktSlot = nullptr;            // address of the patched RecvPkt vtable slot, for shutdown restore
-static void* g_cmInterface = nullptr;             // real CCMInterface* (found via CSteamEngine)
+static std::string g_manifestEndpoint;
+static RecvPktFn g_originalRecvPkt = nullptr;       // trampoline to original RecvPkt (via inline detour)
+static uint8_t* g_recvPktDetourSite = nullptr;      // address of hooked RecvPkt prologue (for shutdown restore)
+static uint8_t  g_recvPktOrigBytes[15] = {};        // original bytes we overwrote
+static uint8_t* g_recvPktTrampoline = nullptr;      // executable trampoline page
+static std::atomic<void*> g_cmInterface{nullptr};  // real CCMInterface* (found via CSteamEngine)
 static std::atomic<bool> g_shuttingDown{false};
+static std::atomic<bool> g_cloudSaveOnly{false};    // third-party mode (no SteamTools DLL)
 static std::atomic<bool> g_cmInterfaceFound{false}; // whether we've found the real CCMInterface
 static std::thread g_luaSyncThread;                  // deferred lua sync (waits for accountId)
 static std::thread g_startupMetadataThread;          // deferred startup playtime/stats restore
@@ -283,10 +390,27 @@ static void ScheduleStartupMetadataSync() {
     // Manifest system fetches CN/manifest on-demand per app; no bulk startup sync.
     if (!CloudStorage::IsCloudActive()) return;
     LOG("[StartupSync] Cloud active; metadata will be fetched on-demand per app");
+
+    // Reset stats cache on account switch (prevents cross-account inheritance).
+    uint32_t accountId = GetAccountId();
+    bool switched = StatsStore::ResetForAccountSwitch(accountId);
+
+    // Re-run native imports now that accountId is known. Once per login.
+    static std::atomic<bool> s_postLoginImportStarted{false};
+    if (switched) s_postLoginImportStarted.store(false);
+    if (!s_postLoginImportStarted.exchange(true)) {
+        std::thread t([]() {
+            if (g_shuttingDown.load(std::memory_order_acquire)) return;
+            StatsStore::RetryNativeImportsAfterLogin();
+        });
+        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            t.detach();
+        else
+            g_bgThreads.push_back(std::move(t));
+    }
 }
 
-#define g_syncAchievements MetadataSync::syncAchievements
-#define g_syncPlaytime MetadataSync::syncPlaytime
 #define g_syncLuas MetadataSync::syncLuas
 
 static std::atomic<bool> g_parentalBypassPlaytime{false};
@@ -300,6 +424,7 @@ static std::atomic<bool> g_cloudRedirectEnabled{true};
 // Config lives in Steam folder (per-system), NOT AppData (per-user).
 static std::atomic<bool> g_manifestPinsEnabled{false};
 static std::atomic<bool> g_autoComment{true};  // when true, ignore lua setManifestid lines
+static std::atomic<bool> g_showNonSteamGame{true};  // show LUA games as "Playing non-Steam game" in friends
 static std::unordered_set<uint32_t> g_pinnedApps;  // per-app overrides: always respect lua pins for these apps
 static std::unordered_map<uint32_t, std::unordered_map<uint32_t, uint64_t>> g_manifestPins;  // appId -> {depotId -> manifestId}
 
@@ -327,6 +452,26 @@ static NotificationSlot8Fn g_originalSlot8 = nullptr;       // saved original sl
 static ParseFromArrayFn g_parseFromArray = nullptr;          // sub_138BD0210
 static SerializeToArrayFn g_serializeToArray = nullptr;      // sub_138BD07E0
 static std::atomic<bool> g_vtableHookInstalled{false};
+static std::atomic<bool> g_needsSeed{false};
+
+// Schema-fetch injection primitives (resolved at hook install from steamclient64).
+using PbMsgCtorFn     = void*(__fastcall*)(void* self, int emsg, int unk);
+using PbMsgFinalizeFn = void(__fastcall*)(void* self);
+using PbMsgCleanupFn  = void(__fastcall*)(void* self);
+static PbMsgCtorFn     g_pbMsgCtor = nullptr;
+static PbMsgFinalizeFn g_pbMsgFinalize = nullptr;
+static PbMsgCleanupFn  g_pbMsgCleanup = nullptr;
+static void*           g_getUserStatsDesc = nullptr;   // off_1396E4460 (resolved)
+static void*           g_getUserStatsVtbl = nullptr;   // typed CProtoBufMsg vftable (resolved)
+static std::atomic<uint32_t> g_liveConnHandle{0};    // generic CM conn from BAsyncSend
+static std::atomic<uint32_t> g_statsConnHandle{0};   // CM conn from Steam's own 818 (preferred)
+// Session fields copied from Steam's GetUserStats header onto injected 818s.
+// CM drops requests missing steamid + client_sessionid.
+// Header layout: +16 presence, +104 steamid, +112 sessionid, +156 realm, +208 jobid_source
+static std::atomic<uint64_t> g_hdrSteamId{0};
+static std::atomic<uint32_t> g_hdrSessionId{0};
+static std::atomic<uint32_t> g_hdrRealm{0};
+static std::atomic<bool>     g_hdrCaptured{false};
 static uintptr_t g_serviceTransportVtableEa = 0;             // resolved via RTTI at install; 0 = unresolved, fall back to RVA
 
 // CClientUnifiedServiceTransport vtable slot offsets (stable interface contract).
@@ -346,6 +491,25 @@ struct HookGuard {
     HookGuard& operator=(const HookGuard&) = delete;
 };
 
+// Re-entrancy probe: detects slot-5 RPC firing while CompleteBatch holds g_queueMutex.
+static std::atomic<int>      g_reentCompleteInFlight{0};
+static std::atomic<uint32_t> g_reentCompleteThreadId{0};
+
+struct CompleteBatchInFlightMark {
+    bool active = false;
+    explicit CompleteBatchInFlightMark(bool on) : active(on) {
+        if (active) {
+            g_reentCompleteThreadId.store((uint32_t)GetCurrentThreadId(), std::memory_order_release);
+            g_reentCompleteInFlight.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+    ~CompleteBatchInFlightMark() {
+        if (active) g_reentCompleteInFlight.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    CompleteBatchInFlightMark(const CompleteBatchInFlightMark&) = delete;
+    CompleteBatchInFlightMark& operator=(const CompleteBatchInFlightMark&) = delete;
+};
+
 // namespace state (auto-detected from stplug-in directory)
 static std::unordered_set<uint32_t> g_namespaceApps;
 static std::mutex g_namespaceAppsMutex;
@@ -358,6 +522,73 @@ bool IsNamespaceApp(uint32_t appId) {
 static bool HasNamespaceApps() {
     std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
     return !g_namespaceApps.empty();
+}
+
+static std::vector<uint32_t> GetNamespaceApps() {
+    std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
+    return std::vector<uint32_t>(g_namespaceApps.begin(), g_namespaceApps.end());
+}
+
+uint32_t GetAccountId();  // defined later
+void RequestSchemaForApp(uint32_t appId, bool forceRefresh = false);  // defined later
+
+// "Mark as private": reads PrivateApps_<accountId> from localconfig.vdf.
+// Cached 5s to avoid re-reading on every GamesPlayed broadcast.
+static std::mutex g_privateAppsMutex;
+static std::unordered_set<uint32_t> g_privateApps;
+static std::chrono::steady_clock::time_point g_privateAppsLoaded{};
+
+static void RefreshPrivateAppsLocked() {
+    g_privateApps.clear();
+    uint32_t accountId = GetAccountId();
+    if (!accountId || g_steamPath.empty()) return;
+
+    std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
+        + "\\config\\localconfig.vdf";
+    auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
+    HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    std::string content;
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
+        content.resize(fileSize);
+        DWORD bytesRead = 0;
+        ReadFile(hFile, (LPVOID)content.data(), fileSize, &bytesRead, nullptr);
+        content.resize(bytesRead);
+    }
+    CloseHandle(hFile);
+
+    // Find:  "PrivateApps_<accountId>"   "[480,2499870,...]"
+    std::string key = "\"PrivateApps_" + std::to_string(accountId) + "\"";
+    size_t k = content.find(key);
+    if (k == std::string::npos) return;
+    size_t lb = content.find('[', k);
+    size_t rb = (lb == std::string::npos) ? std::string::npos : content.find(']', lb);
+    if (lb == std::string::npos || rb == std::string::npos) return;
+
+    // Parse comma-separated appIds inside the brackets.
+    size_t i = lb + 1;
+    while (i < rb) {
+        while (i < rb && !isdigit((unsigned char)content[i])) ++i;
+        if (i >= rb) break;
+        uint32_t id = (uint32_t)strtoul(content.c_str() + i, nullptr, 10);
+        if (id) g_privateApps.insert(id);
+        while (i < rb && isdigit((unsigned char)content[i])) ++i;
+    }
+}
+
+bool IsPrivateApp(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_privateAppsMutex);
+    auto now = std::chrono::steady_clock::now();
+    if (g_privateAppsLoaded.time_since_epoch().count() == 0 ||
+        now - g_privateAppsLoaded > std::chrono::seconds(5)) {
+        RefreshPrivateAppsLocked();
+        g_privateAppsLoaded = now;
+    }
+    return g_privateApps.count(appId) > 0;
 }
 
 void AddNamespaceApp(uint32_t appId) {
@@ -394,40 +625,7 @@ void SetNamespaceApps(const uint32_t* appIds, uint32_t count,
     g_namespaceApps = std::move(next);
 }
 
-// per-app launch timestamp for internal playtime tracking
-static std::mutex g_launchTimeMutex;
-static std::unordered_map<uint32_t, time_t> g_launchTimes;
-static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime;
-static std::unordered_map<uint32_t, uint64_t> g_launchVdfPlaytime2wks;
-
-static uint32_t ClampToUint32(uint64_t value) {
-    return value > (std::numeric_limits<uint32_t>::max)()
-        ? (std::numeric_limits<uint32_t>::max)()
-        : static_cast<uint32_t>(value);
-}
-
 static uintptr_t FindCurrentUser();
-
-static uintptr_t ResolveCurrentUserForRestore(const char* featureTag, uint32_t appId) {
-    if (!g_steamClientBase) {
-        HMODULE hSC = GetModuleHandleA("steamclient64.dll");
-        if (!hSC) {
-            LOG("[%s] In-memory restore skipped for app %u: steamclient64.dll not loaded", featureTag, appId);
-            return 0;
-        }
-        g_steamClientBase = (uintptr_t)hSC;
-    }
-
-    uintptr_t userPtr = 0;
-    for (int attempt = 0; attempt < 20 && !userPtr && !g_shuttingDown.load(); ++attempt) {
-        userPtr = FindCurrentUser();
-        if (!userPtr) Sleep(100);
-    }
-    if (!userPtr) {
-        LOG("[%s] In-memory restore skipped for app %u: current CUser not available", featureTag, appId);
-    }
-    return userPtr;
-}
 
 static uintptr_t FindCurrentUser() {
     if (!g_steamClientBase) {
@@ -436,7 +634,9 @@ static uintptr_t FindCurrentUser() {
         g_steamClientBase = (uintptr_t)hSC;
     }
 
-    uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+    uintptr_t engineGlobal = SC_RESOLVE(globalEngine);
+    if (!engineGlobal) return 0;
+    uintptr_t* pEngineGlobal = (uintptr_t*)engineGlobal;
     uintptr_t engine = 0;
     __try { engine = *pEngineGlobal; } __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
     if (!engine) return 0;
@@ -471,143 +671,116 @@ static uintptr_t FindCurrentUser() {
     return userPtr;
 }
 
-void RecordLaunchTime(uint32_t appId) {
-    std::lock_guard<std::mutex> lock(g_launchTimeMutex);
-    g_launchTimes[appId] = time(nullptr);
+// Scan for CUser accountId offset: find UserGameStats_%u string -> code xref ->
+// backward scan for mov reg32,[reg+disp32] -> disp32 is the offset. 0 on failure.
+static uint32_t ScanUserAccountIdOffset() {
+    HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+    if (!hSC) return 0;
+    uintptr_t base = (uintptr_t)hSC;
 
-    // Snapshot VDF playtime at launch while the file is stable
-    uint64_t vdfPT = 0;
-    uint64_t vdfPT2wks = 0;
-    uint32_t accountId = GetAccountId();
-    if (accountId) {
-        std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
-            + "\\config\\localconfig.vdf";
-        // Wide-API: CreateFileA's ACP narrowing breaks non-ASCII profile paths (Cyrillic/CJK), which would silently skip the playtime baseline.
-        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
-        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD fileSize = GetFileSize(hFile, nullptr);
-            std::string vdfContent;
-            if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
-                vdfContent.resize(fileSize);
-                DWORD bytesRead = 0;
-                ReadFile(hFile, (LPVOID)vdfContent.data(), fileSize, &bytesRead, nullptr);
-                vdfContent.resize(bytesRead);
-            }
-            CloseHandle(hFile);
+    MODULEINFO mi = {};
+    if (!GetModuleInformation(GetCurrentProcess(), hSC, &mi, sizeof(mi)))
+        return 0;
+    const uint8_t* img = (const uint8_t*)base;
+    size_t imgSize = mi.SizeOfImage;
 
-            std::string appIdStr = std::to_string(appId);
-            const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-            VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
-                [&](const VdfUtil::FieldInfo& fi) {
-                    if (fi.key == "Playtime")
-                        vdfPT = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                    else if (fi.key == "Playtime2wks")
-                        vdfPT2wks = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                    return true;
-                });
+    // Step 1: find "UserGameStats_%u" in .rdata (may be mid-string; walk back to NUL).
+    const char needle[] = "UserGameStats_%u";
+    const size_t needleLen = sizeof(needle) - 1;  // exclude NUL
+    uintptr_t matchAddr = 0;
+    for (size_t i = 0; i + needleLen < imgSize; i++) {
+        if (memcmp(img + i, needle, needleLen) == 0) {
+            matchAddr = base + i;
+            break;
         }
     }
-    g_launchVdfPlaytime[appId] = vdfPT;
-    g_launchVdfPlaytime2wks[appId] = vdfPT2wks;
-    LOG("[Playtime] Recorded launch time for app %u (vdfBaseline=%llu min, vdf2wks=%llu min)",
-        appId, vdfPT, vdfPT2wks);
+    if (!matchAddr) {
+        LOG("[Scan] UserGameStats string not found");
+        return 0;
+    }
+
+    // Walk backward to the start of the containing C string (first NUL before match).
+    uintptr_t strAddr = matchAddr;
+    const uint8_t* matchPtr = img + (matchAddr - base);
+    while (matchPtr > img && *(matchPtr - 1) != 0) {
+        matchPtr--;
+        strAddr--;
+    }
+    LOG("[Scan] UserGameStats needle at sc+0x%llX, containing string at sc+0x%llX: \"%.64s\"",
+        (unsigned long long)(matchAddr - base), (unsigned long long)(strAddr - base),
+        (const char*)(img + (strAddr - base)));
+
+    // Step 2: find QWORD pointer to this string in .rdata/.data (off_XXXX entry).
+    uintptr_t ptrAddr = 0;
+    for (size_t i = 0; i + 8 <= imgSize; i += 8) {
+        if (*(const uintptr_t*)(img + i) == strAddr) {
+            ptrAddr = base + i;
+            break;
+        }
+    }
+    if (!ptrAddr) {
+        LOG("[Scan] UserGameStats string pointer not found");
+        return 0;
+    }
+
+    // Step 3: find RIP-relative xref: 48 8B 15 XX XX XX XX (mov rdx, [rip+disp32]).
+    uintptr_t xrefAddr = 0;
+    for (size_t i = 0; i + 7 < imgSize; i++) {
+        if (img[i] == 0x48 && img[i+1] == 0x8B && img[i+2] == 0x15) {
+            int32_t disp = *(const int32_t*)(img + i + 3);
+            uintptr_t target = (base + i + 7) + disp;
+            if (target == ptrAddr) {
+                xrefAddr = base + i;
+                break;
+            }
+        }
+    }
+    if (!xrefAddr) {
+        LOG("[Scan] UserGameStats code xref not found");
+        return 0;
+    }
+
+    // Step 4: walk backward for `mov r32, [reg+disp32]` (accountId load, disp in 256..4096).
+    const uint8_t* scan = (const uint8_t*)xrefAddr;
+    const uint8_t* scanStart = scan - 64;
+    if (scanStart < img) scanStart = img;
+    for (const uint8_t* p = scan - 3; p >= scanStart; p--) {
+        // mov r32, [r64+disp32]: opcode 8B, ModR/M = XX_reg_101 (mod=10, rm=101=rbp/r13
+        // won't appear here, rm varies). ModR/M mod=10 means [reg+disp32].
+        // With REX.B (0x41): source is R8-R15.
+        uint8_t op = *p;
+        bool hasRex = (op >= 0x40 && op <= 0x4F);
+        const uint8_t* modrm_p = hasRex ? p + 1 : p;
+        if (*modrm_p != 0x8B) continue;
+        uint8_t modrm = *(modrm_p + 1);
+        uint8_t mod = (modrm >> 6) & 3;
+        uint8_t rm  = modrm & 7;
+        if (mod != 2) continue;  // mod=10: [reg+disp32]
+        // rm=4 means SIB byte follows (skip, more complex addressing)
+        if (rm == 4) continue;
+        int32_t offset;
+        memcpy(&offset, modrm_p + 2, 4);
+        if (offset >= 256 && offset <= 4096) {
+            uint32_t result = (uint32_t)offset;
+            LOG("[Scan] Resolved USER_OFF_ACCOUNTID = %u (0x%X) from code at sc+0x%llX",
+                result, result, (unsigned long long)(p - img));
+            return result;
+        }
+    }
+    LOG("[Scan] Could not extract accountId offset from nearby instructions");
+    return 0;
 }
 
-struct LaunchInfo { time_t launchTime; uint64_t vdfBaseline; uint64_t vdfBaseline2wks; };
-static LaunchInfo PopLaunchInfo(uint32_t appId) {
-    std::lock_guard<std::mutex> lock(g_launchTimeMutex);
-    LaunchInfo info = {0, 0, 0};
-    auto it = g_launchTimes.find(appId);
-    if (it != g_launchTimes.end()) {
-        info.launchTime = it->second;
-        g_launchTimes.erase(it);
-    }
-    auto it2 = g_launchVdfPlaytime.find(appId);
-    if (it2 != g_launchVdfPlaytime.end()) {
-        info.vdfBaseline = it2->second;
-        g_launchVdfPlaytime.erase(it2);
-    }
-    auto it3 = g_launchVdfPlaytime2wks.find(appId);
-    if (it3 != g_launchVdfPlaytime2wks.end()) {
-        info.vdfBaseline2wks = it3->second;
-        g_launchVdfPlaytime2wks.erase(it3);
-    }
-    return info;
+// Read account id from CUser when no RPC header is available yet. SEH-isolated.
+static uint32_t ReadAccountIdFromUser() {
+    uintptr_t user = FindCurrentUser();
+    if (!user) return 0;
+    uint32_t acct = 0;
+    __try { acct = *(uint32_t*)(user + USER_OFF_ACCOUNTID); }
+    __except(EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return acct;
 }
 
-bool RestorePlaytimeState(uint32_t appId, uint64_t playtime, uint64_t playtime2wks) {
-    if (!playtime && !playtime2wks) return false;
-
-    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
-    if (!userPtr) return false;
-
-    auto getData = (GetAppMinutesPlayedDataFn)(g_steamClientBase + SC_RVA_GET_APP_MINUTES_PLAYED_DATA);
-    auto flushData = (FlushAppMinutesPlayedFn)(g_steamClientBase + SC_RVA_FLUSH_APP_MINUTES_PLAYED);
-
-    unsigned int* record = nullptr;
-    __try {
-        record = getData((int64_t)userPtr, appId, 1);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG("[Playtime] In-memory restore exception creating record for app %u: code=0x%08lX",
-            appId, GetExceptionCode());
-        return false;
-    }
-    if (!record) {
-        LOG("[Playtime] In-memory restore failed for app %u: no playtime record", appId);
-        return false;
-    }
-
-    uint32_t total32 = ClampToUint32(playtime);
-    uint32_t twoWks32 = ClampToUint32(playtime2wks ? playtime2wks : playtime);
-    uint32_t oldTotal = 0;
-    uint32_t oldTwoWks = 0;
-
-    __try {
-        oldTotal = record[1];
-        oldTwoWks = record[2];
-        if (oldTotal > total32) total32 = oldTotal;
-        if (oldTwoWks > twoWks32) twoWks32 = oldTwoWks;
-        record[1] = total32;
-        record[2] = twoWks32;
-        record[3] = 0;
-        record[4] = 0;
-        record[5] = 0;
-        record[6] = 0;
-        flushData((int64_t)userPtr, appId, record);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG("[Playtime] In-memory restore exception applying record for app %u: code=0x%08lX",
-            appId, GetExceptionCode());
-        return false;
-    }
-
-    LOG("[Playtime] Seeded in-memory playtime for app %u: total %u->%u, 2wks %u->%u",
-        appId, oldTotal, total32, oldTwoWks, twoWks32);
-    return true;
-}
-
-bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed) {
-    if (!lastPlayed) return false;
-
-    uintptr_t userPtr = ResolveCurrentUserForRestore("Playtime", appId);
-    if (!userPtr) return false;
-
-    auto setLastPlayed = (SetAppLastPlayedTimeFn)(g_steamClientBase + SC_RVA_SET_APP_LAST_PLAYED_TIME);
-
-    uint32_t lastPlayed32 = ClampToUint32(lastPlayed);
-    __try {
-        setLastPlayed((int64_t)userPtr, appId, lastPlayed32);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG("[Playtime] In-memory LastPlayed restore exception for app %u: code=0x%08lX",
-            appId, GetExceptionCode());
-        return false;
-    }
-
-    LOG("[Playtime] Seeded in-memory LastPlayed for app %u: %u", appId, lastPlayed32);
-    return true;
-}
 
 // cave replacement buffer globals (still needed for passthrough SteamTools hook)
 
@@ -615,11 +788,17 @@ bool RestoreLastPlayedState(uint32_t appId, uint64_t lastPlayed) {
 // SteamID extracted from first packet header
 static std::atomic<uint64_t> g_steamId{0};
 static std::atomic<int32_t> g_sessionId{0};
+// True once g_steamId came from a real packet header (authoritative over CUser fallback).
+static std::atomic<bool> g_steamIdFromHeader{false};
 
 void SetAccountId(uint32_t accountId) {
     // SteamID: universe=1, type=1, instance=1
     uint64_t steamId = (uint64_t)accountId | (1ULL << 32) | (1ULL << 52) | (1ULL << 56);
     g_steamId.store(steamId, std::memory_order_relaxed);
+    // Unblock disk reads immediately so GetPlaytime can serve from the
+    // local cache before the cloud pull finishes.
+    if (accountId != 0)
+        StatsStore::ResetForAccountSwitch(accountId);
 }
 
 // recursion guard
@@ -714,6 +893,120 @@ static uint64_t GetJobIdSource(const std::vector<PB::Field>& header) {
     return f ? f->varintVal : JOBID_NONE;
 }
 
+// Coroutine_IsActive(): resolved by name from vstdlib_s64.dll. Returns true when the
+// calling thread's coroutine depth > 1 (yield-safe). Fail-closed if unresolved.
+typedef bool(__cdecl* CoroutineIsActiveFn)();
+static std::atomic<CoroutineIsActiveFn> g_coroutineIsActive{nullptr};
+static std::atomic<bool> g_coroutineIsActiveResolved{false};
+
+static CoroutineIsActiveFn ResolveCoroutineIsActive() {
+    if (g_coroutineIsActiveResolved.load(std::memory_order_acquire))
+        return g_coroutineIsActive.load(std::memory_order_acquire);
+    CoroutineIsActiveFn fn = nullptr;
+    HMODULE vstd = GetModuleHandleW(L"vstdlib_s64.dll");
+    if (vstd) {
+        fn = reinterpret_cast<CoroutineIsActiveFn>(
+            GetProcAddress(vstd, "Coroutine_IsActive"));
+    }
+    g_coroutineIsActive.store(fn, std::memory_order_release);
+    g_coroutineIsActiveResolved.store(true, std::memory_order_release);
+    LOG("[CoopYield] Coroutine_IsActive resolved: %p (vstdlib=%p)",
+        (void*)fn, (void*)vstd);
+    return fn;
+}
+
+// Safe wrapper: true only if the coroutine engine is resolved AND reports the
+// current thread's coroutine is active (yieldable). SEH-isolated so a bad call
+// can never escalate. Fails closed (returns false) on any uncertainty.
+static bool CoroutineActiveNow() {
+    CoroutineIsActiveFn fn = ResolveCoroutineIsActive();
+    if (!fn) return false;
+    bool active = false;
+    __try {
+        active = fn();
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        active = false;
+    }
+    return active;
+}
+
+// Jobid of the running coroutine (correlates outbound 818 with injected 819).
+// SEH-isolated: no C++ objects in scope.
+static uint64_t ReadCurrentJobId() {
+    uintptr_t addr = SC_RESOLVE(jobCurGlobal);
+    if (!addr) return 0;
+    uint64_t jobId = 0;
+    __try {
+        uintptr_t jobCur = *(uintptr_t*)addr;
+        if (jobCur) jobId = *(uint64_t*)(jobCur + JOB_OFF_JOBID);
+    } __except(EXCEPTION_EXECUTE_HANDLER) { jobId = 0; }
+    return jobId;
+}
+
+// Read-only probe of g_pJobCur (non-NULL = on cooperative job fiber, yield legal).
+static uintptr_t ReadCurrentJobPtr() {
+    uintptr_t addr = SC_RESOLVE(jobCurGlobal);
+    if (!addr) return 0;
+    uintptr_t jobCur = 0;
+    __try {
+        jobCur = *(uintptr_t*)addr;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { jobCur = 0; }
+    return jobCur;
+}
+
+// CJob::BYieldIfTimeSlice signature (fastcall): (CJob* this, void* ctx, bool* out).
+typedef bool(__fastcall* YieldIfTimeSliceFn)(void* job, void* ctx, bool* outYielded);
+
+// Leaf SEH helper: invoke yield primitive. Separate for MSVC SEH/C++ unwinding split.
+static bool InvokeYieldPrimitive(uintptr_t job) {
+    auto fn = (YieldIfTimeSliceFn)SC_RESOLVE(yieldIfTimeSlice);
+    if (!fn) return false;
+    __try {
+        fn((void*)job, nullptr, nullptr);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Cooperative yield hook. Skips if not on job thread (g_pJobCur==NULL) or coroutine
+// inactive. Stale RVA fails closed (no yield, hook disabled).
+static void CooperativeYieldCurrentJob() {
+    if (!g_steamClientBase) return;
+    uintptr_t job = ReadCurrentJobPtr();
+    if (!job) return;  // not on the job thread (e.g. a worker) -> nothing to yield
+    // Must verify coroutine active: yielding inactive corrupts stack (coroutine.cpp:434).
+    if (!CoroutineActiveNow()) return;  // not at a legal yield point -> skip safely
+    if (!InvokeYieldPrimitive(job)) {
+        LOG("[CoopYield] yield primitive faulted; disabling cooperative yield");
+        // DisableYieldHook (not Set): called from inside the hook itself.
+        CoopYield::DisableYieldHook();
+    }
+}
+
+static bool LooksLikeFunctionPrologue(const uint8_t* p);  // fwd decl (defined below)
+
+// Register cooperative yield hook for UploadBatch (prevents pipe-stall on big saves).
+// Prologue-gated: stale RVA disables yield gracefully. Separate function for MSVC C2712.
+static void RegisterCooperativeYieldHook() {
+    uintptr_t yieldAddr = SC_RESOLVE(yieldIfTimeSlice);
+    if (!yieldAddr) {
+        CoopYield::SetYieldHook(nullptr);
+        LOG("[CoopYield] WARNING: YieldIfTimeSlice not resolved; "
+            "cooperative yield DISABLED (uploads will use the blocking wait)");
+        return;
+    }
+    auto yieldFn = reinterpret_cast<const uint8_t*>(yieldAddr);
+    if (LooksLikeFunctionPrologue(yieldFn)) {
+        CoopYield::SetYieldHook(&CooperativeYieldCurrentJob);
+        LOG("[CoopYield] cooperative job-yield registered at %p", (void*)yieldAddr);
+    } else {
+        CoopYield::SetYieldHook(nullptr);
+        LOG("[CoopYield] WARNING: yield primitive prologue check failed at %p; "
+            "cooperative yield DISABLED (uploads will use the blocking wait)", (void*)yieldAddr);
+    }
+}
+
 static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header, const PB::Writer& body) {
     uint32_t emsgRaw = emsg | PROTO_FLAG;
     uint32_t headerLen = (uint32_t)header.Size();
@@ -726,13 +1019,8 @@ static std::vector<uint8_t> BuildPacket(uint32_t emsg, const PB::Writer& header,
     return pkt;
 }
 
-// CCMInterface discovery via CSteamEngine global
-//
-// Traversal: qword_139781D38 (global CSteamEngine*)
-//   ΓåÆ engine+3144 (uint32 global user handle)
-//   ΓåÆ engine+3296 (CUtlSortedVector user map)
-//     ΓåÆ array[i] where handle matches ΓåÆ CUser*
-//   ΓåÆ CUser+72 (CCMInterface embedded in CBaseUser)
+// CCMInterface discovery: CSteamEngine* -> engine+3144 (handle) -> engine+3296
+// (user map) -> matching CUser* -> CUser+72 (CCMInterface embedded).
 static void* FindCCMInterface() {
     uintptr_t userPtr = FindCurrentUser();
     if (!userPtr) return nullptr;
@@ -741,7 +1029,8 @@ static void* FindCCMInterface() {
     uintptr_t ccm = userPtr + USER_OFF_CCMINTERFACE;
 
     // Validate by checking vtable matches CCMInterface::vftable
-    uintptr_t expectedVtable = g_steamClientBase + SC_RVA_CCMINTERFACE_VT;
+    uintptr_t expectedVtable = SC_RESOLVE(ccmInterfaceVtable);
+    if (!expectedVtable) return nullptr;
     uintptr_t actualVtable = 0;
     __try { actualVtable = *(uintptr_t*)ccm; } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
 
@@ -762,22 +1051,19 @@ static void TryFindCCMInterface() {
     void* ccm = FindCCMInterface();
     if (!ccm) return;
 
-    // Atomically claim the "first finder" role - only one thread proceeds.
-    // This prevents double vtable patching which would overwrite the saved
-    // original slot pointers with our hook addresses, causing crash on restore.
+    // Claim first-finder atomically. Write pointer before flag (release ordering).
     bool expected = false;
+    g_cmInterface.store(ccm, std::memory_order_release);
     if (!g_cmInterfaceFound.compare_exchange_strong(expected, true,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
         return; // another thread already found it
     }
 
-    g_cmInterface = ccm;
-
     LOG("[CCM] Found real CCMInterface: %p", ccm);
 
     // Log details for debugging (wrapped in SEH - raw pointer dereferences for diagnostics only)
     __try {
-        uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine);
         uintptr_t engine = *pEngineGlobal;
         uint32_t handle = *(uint32_t*)(engine + ENGINE_OFF_GLOBAL_HANDLE);
 
@@ -790,11 +1076,11 @@ static void TryFindCCMInterface() {
     }
 
     // Resolve BRouteMsgToJob bypass function pointers (computed from base + RVA, no dereferences)
-    g_wrapPacket     = (WrapPacketFn)(g_steamClientBase + SC_RVA_WRAP_PACKET);
-    g_bRouteMsgToJob = (BRouteMsgToJobFn)(g_steamClientBase + SC_RVA_BROUTEMSG);
-    g_releaseWrapped = (ReleaseWrappedFn)(g_steamClientBase + SC_RVA_RELEASE_WRAPPED);
-    g_refCountHelper = (RefCountHelperFn)(g_steamClientBase + SC_RVA_REFCOUNT_HELPER);
-    g_refCountGlobalPtr = (volatile int64_t**)(g_steamClientBase + SC_RVA_REFCOUNT_GLOBAL);
+    g_wrapPacket     = (WrapPacketFn)SC_RESOLVE(wrapPacket);
+    g_bRouteMsgToJob = (BRouteMsgToJobFn)SC_RESOLVE(bRouteMsgToJob);
+    g_releaseWrapped = (ReleaseWrappedFn)SC_RESOLVE(releaseWrapped);
+    g_refCountHelper = (RefCountHelperFn)SC_RESOLVE(refCountHelper);
+    g_refCountGlobalPtr = (volatile int64_t**)SC_RESOLVE(refCountGlobal);
     LOG("[CCM]   WrapPacket=%p BRouteMsgToJob=%p ReleaseWrapped=%p",
         g_wrapPacket, g_bRouteMsgToJob, g_releaseWrapped);
 
@@ -803,7 +1089,7 @@ static void TryFindCCMInterface() {
         LOG("[CCM]   RefCountHelper=%p RefCountGlobal=%p (*=%p)",
             g_refCountHelper, g_refCountGlobalPtr,
             g_refCountGlobalPtr ? (void*)*g_refCountGlobalPtr : nullptr);
-        uintptr_t engine = *(uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t engine = *(uintptr_t*)SC_RESOLVE(globalEngine);
         LOG("[CCM]   CJobMgr (engine+%u)=%p  ConnCtx (ccm+%u)=%p",
             ENGINE_OFF_JOBMGR, (void*)(engine + ENGINE_OFF_JOBMGR),
             CCM_OFF_CONN_CONTEXT, *(void**)((uintptr_t)ccm + CCM_OFF_CONN_CONTEXT));
@@ -824,7 +1110,7 @@ struct QueuedInjection {
     uint32_t pktSize;
     CNetPacket* pktStruct; // malloc'd CNetPacket
     uint64_t jobIdTarget;  // job to route the response to
-    uint32_t emsg;         // EMsg type (147 = response, 152 = send-to-client)
+    uint32_t emsg;         // EMsg type (147 service-method resp, 819 legacy user-stats resp)
     char methodName[128];
 };
 
@@ -837,8 +1123,79 @@ static thread_local bool t_drainingInjectQueue = false;
 
 static void ProcessQueuedInjection(QueuedInjection* ctx); // defined below
 
-// Drain the inject queue on the calling network thread. Safe to call from OnSendPkt
-// or RecvPktMonitorHook. Caller must already be on the network thread.
+// Live playtime-update queue. Writer touches CUser map, must run on net thread.
+static std::queue<std::vector<uint8_t>> g_playtimeUpdateQueue;
+static std::mutex g_playtimeUpdateMutex;
+static void ApplyLastPlayedUpdate(const std::vector<uint8_t>& respBody); // defined below
+
+// Enqueue a serialized playtime response body. Thread-safe.
+static void QueueLastPlayedUpdate(const std::vector<uint8_t>& respBody) {
+    if (respBody.empty()) return;
+    std::lock_guard<std::mutex> lock(g_playtimeUpdateMutex);
+    g_playtimeUpdateQueue.push(respBody);
+}
+
+// Drain queued playtime updates. Caller MUST be on Steam's network thread.
+static void DrainPlaytimeUpdateQueueOnNetThread() {
+    std::vector<std::vector<uint8_t>> batch;
+    {
+        std::lock_guard<std::mutex> lock(g_playtimeUpdateMutex);
+        while (!g_playtimeUpdateQueue.empty()) {
+            batch.push_back(std::move(g_playtimeUpdateQueue.front()));
+            g_playtimeUpdateQueue.pop();
+        }
+    }
+    if (!batch.empty())
+        LOG("Drain: flushing %zu pending playtime push(es)", batch.size());
+    for (auto& body : batch)
+        ApplyLastPlayedUpdate(body);
+}
+
+// ── Schema-request queue ──────────────────────────────────────────────────
+// BAsyncSend requires the network thread (pipe/coroutine TLS). Background threads
+// enqueue (appId, owner) pairs; drained a few per net-thread tick.
+struct SchemaSendItem { uint32_t appId; uint64_t owner; };
+static std::queue<SchemaSendItem> g_schemaSendQueue;
+static std::mutex g_schemaSendMutex;
+static bool SendSchemaRequest(uint32_t appId, uint64_t ownerId, uint32_t connHandle); // fwd
+
+// Compile-time kill-switch: set to 0 to completely disable proactive schema
+// fetching (leaves the rest of the DLL intact). Kept as an emergency guard.
+#define SCHEMA_FETCH_ENABLED 1
+
+// Reentrancy guard: BAsyncSend re-enters the hook -> DrainSchemaQueue recursion.
+static thread_local bool t_drainingSchemaQueue = false;
+
+// Drain a small batch of queued schema requests on the calling network thread.
+// Called from the recv/send hooks (which already run on the net thread).
+static void DrainSchemaQueueOnNetThread() {
+#if !SCHEMA_FETCH_ENABLED
+    return;
+#endif
+    if (!MetadataSync::SchemaFetchEnabled()) return;
+    if (t_drainingSchemaQueue) return;          // prevent reentrancy via BAsyncSend
+    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+    if (!g_hdrCaptured.load(std::memory_order_relaxed)) return;  // need session fields
+    // Prefer stats conn handle; fall back to generic live handle.
+    uint32_t conn = g_statsConnHandle.load(std::memory_order_relaxed);
+    if (conn == 0) conn = g_liveConnHandle.load(std::memory_order_relaxed);
+    if (conn == 0) return;
+    t_drainingSchemaQueue = true;
+    constexpr int kMaxPerTick = 2;   // gentle: a couple of sends per net tick
+    for (int i = 0; i < kMaxPerTick; ++i) {
+        SchemaSendItem item;
+        {
+            std::lock_guard<std::mutex> lock(g_schemaSendMutex);
+            if (g_schemaSendQueue.empty()) break;
+            item = g_schemaSendQueue.front();
+            g_schemaSendQueue.pop();
+        }
+        SendSchemaRequest(item.appId, item.owner, conn);
+    }
+    t_drainingSchemaQueue = false;
+}
+
+// Drain inject queue on network thread.
 static void DrainInjectQueueOnNetThread() {
     if (t_drainingInjectQueue) return;
     t_drainingInjectQueue = true;
@@ -876,9 +1233,7 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
         return;
     }
 
-    // Wrap CNetPacket into CProtoBufNetPacket.
-    // WrapPacket takes ownership of pktStruct via refcount on success;
-    // caller frees pktStruct on failure.
+    // WrapPacket takes ownership via refcount; caller frees on failure.
     void* wrappedPkt = nullptr;
     __try {
         wrappedPkt = g_wrapPacket(ctx->pktStruct, 1);
@@ -919,10 +1274,10 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     void* jobMgr = nullptr;
     void* connCtx = nullptr;
     __try {
-        uintptr_t* pEngineGlobal = (uintptr_t*)(g_steamClientBase + SC_RVA_GLOBAL_ENGINE);
+        uintptr_t* pEngineGlobal = (uintptr_t*)SC_RESOLVE(globalEngine);
         uintptr_t engine = *pEngineGlobal;
         jobMgr = (void*)(engine + ENGINE_OFF_JOBMGR);
-        connCtx = *(void**)((uintptr_t)g_cmInterface + CCM_OFF_CONN_CONTEXT);
+        connCtx = *(void**)((uintptr_t)g_cmInterface.load(std::memory_order_acquire) + CCM_OFF_CONN_CONTEXT);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         LOG("[INJECT]   EXCEPTION reading engine/connCtx: code=0x%08X", GetExceptionCode());
         __try { g_releaseWrapped(wrappedPkt); } __except(EXCEPTION_EXECUTE_HANDLER) {}
@@ -941,35 +1296,46 @@ static void ProcessQueuedInjection(QueuedInjection* ctx) {
     LOG("[INJECT]   jobMgr=%p route: tgt=%llu emsg=%d flags=%d",
         jobMgr, (unsigned long long)ctx->jobIdTarget, route.emsg, route.flags);
 
-    // Pre-check: verify job still exists. BRouteMsgToJob silently no-ops on a
-    // missing slot but returns 1, which would log a false success while the
-    // game's pending download silently fails.
-    using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
-    FindJobFn findJob = (FindJobFn)(g_steamClientBase + SC_RVA_FIND_JOB);
-    int jobSlot = -1;
-    bool findJobThrew = false;
-    __try {
-        void* slotMap = (void*)((uintptr_t)jobMgr + 0x200);
-        jobSlot = findJob(slotMap, &route.jobidTarget);
-        if (jobSlot >= 0) {
-            uintptr_t slotArr = *(uintptr_t*)((uintptr_t)jobMgr + 0x230);
-            void* cjobPtr = *(void**)(slotArr + (uintptr_t)jobSlot * 24 + 8);
-            uint32_t jobState = cjobPtr ? *(uint32_t*)((uintptr_t)cjobPtr + 0x84) : 999;
-            LOG("[INJECT]   FindJob slot=%d cjob=%p state=%u", jobSlot, cjobPtr, jobState);
+    // RESPONSE routes by jobid_target; NOTIFICATION (JOBID_NONE) routes by name.
+    // Skip pre-check for notifications to avoid dropping server pushes.
+    bool isNotification = (ctx->jobIdTarget == JOBID_NONE);
+    if (!isNotification) {
+        // Pre-check: verify the waiting job still exists. BRouteMsgToJob silently
+        // no-ops on a missing slot but returns 1 (false success), masking a
+        // dropped response.
+        using FindJobFn = int(__fastcall*)(void* slotMap, void* pJobId);
+        FindJobFn findJob = (FindJobFn)SC_RESOLVE(findJob);
+        int jobSlot = -1;
+        bool findJobThrew = false;
+        if (!findJob) {
+            LOG("[INJECT]   FindJob not resolved, skipping pre-check");
+            findJobThrew = true;  // treat as if threw -- skip the drop-on-miss logic
         } else {
-            LOG("[INJECT]   FindJob: job not found (slot=%d) -- timed out, dropping inject for %s",
-                jobSlot, ctx->methodName);
+            __try {
+                void* slotMap = (void*)((uintptr_t)jobMgr + 0x200);
+                jobSlot = findJob(slotMap, &route.jobidTarget);
+                if (jobSlot >= 0) {
+                    uintptr_t slotArr = *(uintptr_t*)((uintptr_t)jobMgr + 0x230);
+                    void* cjobPtr = *(void**)(slotArr + (uintptr_t)jobSlot * 24 + 8);
+                    uint32_t jobState = cjobPtr ? *(uint32_t*)((uintptr_t)cjobPtr + 0x84) : 999;
+                    LOG("[INJECT]   FindJob slot=%d cjob=%p state=%u", jobSlot, cjobPtr, jobState);
+                } else {
+                    LOG("[INJECT]   FindJob: job not found (slot=%d) -- timed out, dropping inject for %s",
+                        jobSlot, ctx->methodName);
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                LOG("[INJECT]   EXCEPTION in FindJob: code=0x%08X", GetExceptionCode());
+                findJobThrew = true;
+            }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {
-        LOG("[INJECT]   EXCEPTION in FindJob: code=0x%08X", GetExceptionCode());
-        findJobThrew = true;
-    }
-    if (jobSlot < 0 && !findJobThrew) {
-        // Drop without routing: BRouteMsgToJob would log a misleading "success" otherwise.
-        __try { g_releaseWrapped(wrappedPkt); } __except(EXCEPTION_EXECUTE_HANDLER) {}
-        VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
-        delete ctx;
-        return;
+        if (jobSlot < 0 && !findJobThrew) {
+            __try { g_releaseWrapped(wrappedPkt); } __except(EXCEPTION_EXECUTE_HANDLER) {}
+            VirtualFree(ctx->pktBuf, 0, MEM_RELEASE);
+            delete ctx;
+            return;
+        }
+    } else {
+        LOG("[INJECT]   notification %s: routing by target_job_name (no waiting job)", ctx->methodName);
     }
 
     // Increment refcount (matches RecvPkt at 0x13859D4CC)
@@ -1031,9 +1397,9 @@ static void DrainInjectQueueOnShutdown() {
 
 static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
                            int32_t eresult, const PB::Writer& body) {
-    if (!g_wrapPacket || !g_bRouteMsgToJob || !g_releaseWrapped || !g_cmInterface) {
+    if (!g_wrapPacket || !g_bRouteMsgToJob || !g_releaseWrapped || !g_cmInterface.load(std::memory_order_acquire)) {
         LOG("[INJECT] Cannot inject: wrapPacket=%p bRouteMsgToJob=%p releaseWrapped=%p cmInterface=%p",
-            g_wrapPacket, g_bRouteMsgToJob, g_releaseWrapped, g_cmInterface);
+            g_wrapPacket, g_bRouteMsgToJob, g_releaseWrapped, g_cmInterface.load(std::memory_order_relaxed));
         return false;
     }
 
@@ -1074,8 +1440,7 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     LOG("[INJECT] Deferring %s response: eresult=%d body=%zu bytes pkt=%zu bytes",
         methodName.c_str(), eresult, body.Size(), pktData.size());
 
-    // Queue for the network thread to drain: BRouteMsgToJob requires the
-    // network thread's coroutine manager, and the job hasn't yielded yet.
+    // Queue for the network thread to drain (BRouteMsgToJob requires net-thread TLS).
     auto* ctx = new QueuedInjection();
     ctx->pktBuf = pktBuf;
     ctx->pktSize = (uint32_t)pktData.size();
@@ -1095,29 +1460,158 @@ static bool InjectResponse(uint64_t jobIdTarget, const std::string& methodName,
     return true;
 }
 
+// Inject a raw EMsg 819 response to the waiting job (header: steamid + jobid_target only).
+static bool InjectLegacyUserStatsResponse(uint64_t jobIdTarget, uint32_t appId,
+                                          const std::vector<uint8_t>& body) {
+    if (!g_wrapPacket || !g_bRouteMsgToJob || !g_releaseWrapped || !g_cmInterface.load(std::memory_order_acquire))
+        return false;
 
+    // 819 header: steamid + jobid_target (= outbound 818's jobid_source).
+    PB::Writer hdr;
+    if (g_steamId.load()) hdr.WriteFixed64(HDR_STEAMID, g_steamId.load());
+    hdr.WriteFixed64(HDR_JOBID_TARGET, jobIdTarget);
+
+    // BuildPacket frames with empty body; append pre-serialized 819 bytes after.
+    PB::Writer emptyBody;
+    auto pktData = BuildPacket(EMSG_CLIENT_GET_USER_STATS_RESP, hdr, emptyBody);
+    pktData.insert(pktData.end(), body.begin(), body.end());
+
+    uint8_t* pktBuf = (uint8_t*)VirtualAlloc(nullptr, pktData.size(),
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pktBuf) return false;
+    memcpy(pktBuf, pktData.data(), pktData.size());
+
+    auto* fakePkt = (CNetPacket*)malloc(sizeof(CNetPacket));
+    if (!fakePkt) { VirtualFree(pktBuf, 0, MEM_RELEASE); return false; }
+    memset(fakePkt, 0, sizeof(CNetPacket));
+    fakePkt->pubData = pktBuf;
+    fakePkt->cubData = (uint32_t)pktData.size();
+    fakePkt->m_cRef = 1;
+
+    auto* ctx = new QueuedInjection();
+    ctx->pktBuf = pktBuf;
+    ctx->pktSize = (uint32_t)pktData.size();
+    ctx->pktStruct = fakePkt;
+    ctx->jobIdTarget = jobIdTarget;
+    ctx->emsg = EMSG_CLIENT_GET_USER_STATS_RESP;
+    snprintf(ctx->methodName, sizeof(ctx->methodName), "ClientGetUserStatsResponse(app=%u)", appId);
+
+    {
+        std::lock_guard<std::mutex> lock(g_injectMutex);
+        g_injectQueue.push(ctx);
+    }
+    LOG("[Stats] Queued legacy 819 for app=%u jobid=%llu (%zu bytes)",
+        appId, (unsigned long long)jobIdTarget, pktData.size());
+    return true;
+}
+
+// Feed synthesized GetLastPlayedTimes response to Steam's writer (sub_1389C7930).
+// Direct-write: NotifyLastPlayedTimes#1 isn't in GMapJobTypesByName. Net thread only.
+static void ApplyLastPlayedUpdate(const std::vector<uint8_t>& respBody) {
+    if (!g_parseFromArray || respBody.empty()) return;
+
+    uintptr_t pUser = FindCurrentUser();
+    if (!pUser) {
+        LOG("[Stats] ApplyLastPlayedUpdate: no current user");
+        return;
+    }
+
+    // Stack CProtoBufMsg: [0]=vtable, [1]=descriptor, [6]=inner body (from init).
+    uintptr_t wrapper[11] = {0};
+    using MsgCtorFn = void(__fastcall*)(void* self, int a2, int a3);
+    using MsgInitFn = void(__fastcall*)(void* self);
+    using MsgDtorFn = void(__fastcall*)(void* self);
+    using WriterFn  = uint32_t(__fastcall*)(uintptr_t pUser, uintptr_t gamesArray, int count);
+    using RegWriteFn = void(__fastcall*)(void* reg, int type, const char* key, uint32_t val);
+
+    uintptr_t ctorAddr = SC_RESOLVE(pbMsgCtor);
+    uintptr_t initAddr = SC_RESOLVE(pbMsgFinalize);
+    uintptr_t dtorAddr = SC_RESOLVE(pbMsgCleanup);
+    uintptr_t writerAddr = SC_RESOLVE(playtimeWriter);
+    uintptr_t wrapVt = SC_RESOLVE(respWrapperVtable);
+    uintptr_t descAddr = SC_RESOLVE(respDescriptor);
+    if (!ctorAddr || !initAddr || !dtorAddr || !writerAddr || !wrapVt || !descAddr) {
+        LOG("[Stats] ApplyLastPlayedUpdate: skipped (playtime subsystem not resolved)");
+        return;
+    }
+    auto msgCtor = (MsgCtorFn)ctorAddr;
+    auto msgInit = (MsgInitFn)initAddr;
+    auto msgDtor = (MsgDtorFn)dtorAddr;
+    auto writer  = (WriterFn)writerAddr;
+
+    __try {
+        msgCtor(wrapper, 0, 0);
+        wrapper[0] = wrapVt;
+        wrapper[1] = descAddr;
+        msgInit(wrapper);
+
+        uintptr_t inner = wrapper[6]; // m_pProtoBufBody (the inner MessageLite)
+        if (!inner) {
+            LOG("[Stats] ApplyLastPlayedUpdate: inner body alloc failed");
+            msgDtor(wrapper);
+            return;
+        }
+
+        if (!g_parseFromArray((void*)inner, (const char*)respBody.data(), (int)respBody.size())) {
+            LOG("[Stats] ApplyLastPlayedUpdate: ParseFromArray failed (%zu bytes)", respBody.size());
+            msgDtor(wrapper);
+            return;
+        }
+
+        // sub_1389DA1D0: v2 = *(inner+32); games = (v2 ? v2+8 : 0); count = *(inner+24)
+        uintptr_t arrayBase = *(uintptr_t*)(inner + RESP_OFF_GAMES_ARRAY);
+        int count = *(int*)(inner + RESP_OFF_GAMES_COUNT);
+        uintptr_t games = arrayBase ? (arrayBase + 8) : 0;
+
+        if (games && count > 0) {
+            uint32_t syncTime = writer(pUser, games, count);
+            // Persist LastPlayedTimesSyncTime (sub_1389DA1D0 tail).
+            __try {
+                uintptr_t reg = pUser + USER_OFF_REGISTRY;
+                auto regWrite = (RegWriteFn)(*(uintptr_t*)(*(uintptr_t*)reg + 80));
+                uintptr_t keyPtr = SC_RESOLVE(regKeySyncTime);
+                if (keyPtr) {
+                    const char* key = *(const char**)keyPtr;
+                    regWrite((void*)reg, 3, key, syncTime);
+                } else {
+                    LOG("[Stats] RegKeySyncTime not resolved");
+                }
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                LOG("[Stats] ApplyLastPlayedUpdate: sync-time write threw (non-fatal)");
+            }
+            LOG("[Stats] ApplyLastPlayedUpdate: pushed %d game(s) to live client map", count);
+        } else {
+            LOG("[Stats] ApplyLastPlayedUpdate: no games parsed (count=%d)", count);
+        }
+
+        msgDtor(wrapper);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[Stats] ApplyLastPlayedUpdate: EXCEPTION code=0x%08X", GetExceptionCode());
+    }
+}
 
 uint32_t GetAccountId() {
-    return (uint32_t)(g_steamId.load() & 0xFFFFFFFF);
+    uint64_t sid = g_steamId.load();
+    if (sid != 0) return (uint32_t)(sid & 0xFFFFFFFF);
+
+    // Fallback: read from CUser and seed g_steamId (individual/desktop SteamID64).
+    uint32_t acct = ReadAccountIdFromUser();
+    if (acct != 0) {
+        uint64_t full = (uint64_t)acct | (1ULL << 32) | (1ULL << 52) | (1ULL << 56);
+        uint64_t expected = 0;
+        if (g_steamId.compare_exchange_strong(expected, full))
+            LOG("[NS] Account id %u read from CUser (no packet scraped yet)", acct);
+    }
+    return acct;
 }
 
 const std::string& GetSteamPath() {
     return g_steamPath;
 }
 
-// Service-method vtable hook (Approach E)
-//
-// Hooks slot 4/5 of CClientUnifiedServiceTransport's vtable to intercept
-// Cloud RPCs inside the sync job's own coroutine context.
-// For namespace apps: serialize request, call handler, deserialize response.
-// For non-namespace apps: passthrough to original function.
-//
-// CProtoBufMsg layout:
-//   +40: CMsgProtoBufHeader* (header, 248 bytes)
-//   +48: body protobuf message object
-//
-// CMsgProtoBufHeader relevant fields:
-//   +16: has_bits, +24: appid, +116: routing_appid, +216: eresult, +220: error_code
+// Service-method vtable hook (Approach E): intercept Cloud RPCs via slot 4/5.
+// CProtoBufMsg layout: +40 header*, +48 body*
+// CMsgProtoBufHeader: +16 has_bits, +24 appid, +116 routing_appid, +216 eresult, +220 error_code
 
 // Serialize a protobuf message body object to raw bytes
 // SEH helpers (cannot use __try in functions with C++ objects)
@@ -1256,10 +1750,15 @@ static std::optional<RpcResult> DispatchCloudRpc(
 // call slot 4 directly, so handling here avoids the slot-5 deferred queue.
 // Flags layout (int[68]): [0]=routing_appid, [1]=mode, [2]=error_code, [3]=eresult, [4..67]=error_message
 static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* methodName,
-                                                 void* requestBody, void* responseBody, int* flags) {
+                                                  void* requestBody, void* responseBody, int* flags) {
     HookGuard guard;
     if (g_shuttingDown.load(std::memory_order_acquire))
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
+
+    // cloudSaveOnly: drain playtime updates here (no RecvPkt/SendPkt hooks).
+    if (g_cloudSaveOnly.load(std::memory_order_relaxed))
+        DrainPlaytimeUpdateQueueOnNetThread();
+
     if (!methodName) {
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
@@ -1286,6 +1785,35 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
             }
         }
         return result;
+    }
+
+    // Player.GetUserStats#1 (slot 4, raw bodies). Third-party uses raw schemaFetch flag.
+    if (strcmp(methodName, StatsHandlers::RPC_GET_USER_STATS) == 0
+        && (g_cloudSaveOnly.load(std::memory_order_relaxed)
+            ? MetadataSync::schemaFetch.load(std::memory_order_relaxed)
+            : MetadataSync::SchemaFetchEnabled())) {
+        if (requestBody && responseBody && g_serializeToArray) {
+            auto reqBytes = SerializeBodyToBytes(requestBody);
+            auto reqFields = PB::Parse(reqBytes.data(), reqBytes.size());
+            uint32_t appId = 0;
+            if (auto* f = PB::FindField(reqFields, 2)) appId = (uint32_t)f->varintVal; // appid #2
+            LOG("[Stats] slot4 GetUserStats seen: app=%u namespace=%d", appId, IsNamespaceApp(appId) ? 1 : 0);
+            if (appId != 0 && IsNamespaceApp(appId)) {
+                auto res = StatsHandlers::HandleGetUserStats(appId, reqFields);
+                if (res.body.Size() > 0 &&
+                    ParseBytesToBody(responseBody, res.body.Data().data(), res.body.Size())) {
+                    if (flags) { flags[2] = 1; flags[3] = res.eresult; }
+                    LOG("[Stats] GetUserStats app=%u handled locally via slot4 (%zu bytes)",
+                        appId, res.body.Size());
+                    return true;
+                }
+                LOG("[Stats] GetUserStats app=%u slot4 NOT handled (bodySize=%zu) -> passthrough",
+                    appId, res.body.Size());
+            }
+        } else {
+            LOG("[Stats] slot4 GetUserStats: missing req/resp/serializer -> passthrough");
+        }
+        return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
     if (strncmp(methodName, "Cloud.", 6) != 0) {
@@ -1330,8 +1858,14 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
         return g_originalSlot4(thisptr, methodName, requestBody, responseBody, flags);
     }
 
+    // FileDownload handled by DispatchCloudRpc below (calling original double-handles).
+
     // NAMESPACE APP: handle locally, synchronously
-    LOG("[Slot4] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
+    auto slot4Start = std::chrono::steady_clock::now();
+    LOG("[Slot4] INTERCEPT %s app=%u (%zu bytes) flags-before=[%d,%d,%d,%d]:",
+        methodName, appId, reqBytes.size(),
+        flags ? flags[0] : -1, flags ? flags[1] : -1,
+        flags ? flags[2] : -1, flags ? flags[3] : -1);
 #ifdef DEBUG_VERBOSE_LOGGING
     SpyLogFields("[Slot4-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
 #endif
@@ -1356,19 +1890,69 @@ static bool __fastcall ServiceMethodDirectHook(void* thisptr, const char* method
         }
     }
 
-    // Flags layout (from IDA decompilation of sub_138914710 / sub_138914A30):
-    //   [0-1]: __int64 (routing/request context, leave untouched)
-    //   [2]:   int  - transport success flag (1 = OK, 0 = transport failure -> triggers k_EResultTimeout=16)
-    //   [3]:   int  - eresult from response header (1 = k_EResultOK, 108 = k_EResultDisabled)
-    //   [4+]:  char[] - error message string (null-terminated)
+    // Flags: [0-1]=context, [2]=transport_ok, [3]=eresult, [4+]=error_msg
     if (flags) {
         flags[2] = 1;  // transport_success = true (MUST be 1, or caller returns k_EResultTimeout!)
         flags[3] = result.eresult;
         flags[4] = 0;  // error_message = "" (null terminator)
     }
 
-    LOG("[Slot4] %s handled synchronously", methodName);
+    auto slot4Ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - slot4Start).count();
+    LOG("[Slot4] %s handled in %lldms flags-after=[%d,%d,%d,%d]",
+        methodName, (long long)slot4Ms,
+        flags ? flags[0] : -1, flags ? flags[1] : -1,
+        flags ? flags[2] : -1, flags ? flags[3] : -1);
     return true;
+}
+
+// ── Native Cloud spy ──────────────────────────────────────────────────────
+// CR_SPY_APPID: log native cloud RPCs for a non-namespace app (read-only).
+static uint32_t g_spyAppId = []() -> uint32_t {
+    char buf[32] = {0};
+    DWORD n = GetEnvironmentVariableA("CR_SPY_APPID", buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return 0;
+    return (uint32_t)strtoul(buf, nullptr, 10);
+}();
+
+// Decode + log a Cloud.GetAppFileChangelist response: per-file path_prefix_index
+// plus the path_prefixes table, which together reveal native's per-root entries.
+static void SpyLogChangelistResponse(const char* tag, uint32_t appId,
+                                     const uint8_t* data, size_t len) {
+    auto fields = PB::Parse(data, len);
+    uint64_t cn = 0; uint32_t isDelta = 0;
+    std::vector<std::string> prefixes;
+    struct SpyFile { std::string leaf; uint32_t prefixIdx; uint32_t persist; uint32_t platforms; uint64_t size; };
+    std::vector<SpyFile> files;
+    for (const auto& f : fields) {
+        if (f.fieldNum == 1 && f.wireType == PB::Varint) cn = f.varintVal;
+        else if (f.fieldNum == 3 && f.wireType == PB::Varint) isDelta = (uint32_t)f.varintVal;
+        else if (f.fieldNum == 4 && f.wireType == PB::LengthDelimited)
+            prefixes.emplace_back((const char*)f.data, f.dataLen);
+        else if (f.fieldNum == 2 && f.wireType == PB::LengthDelimited) {
+            auto sub = PB::Parse(f.data, f.dataLen);
+            SpyFile sf{};
+            for (const auto& g : sub) {
+                if (g.fieldNum == 1 && g.wireType == PB::LengthDelimited)
+                    sf.leaf.assign((const char*)g.data, g.dataLen);
+                else if (g.fieldNum == 4 && g.wireType == PB::Varint) sf.size = g.varintVal;
+                else if (g.fieldNum == 5 && g.wireType == PB::Varint) sf.persist = (uint32_t)g.varintVal;
+                else if (g.fieldNum == 6 && g.wireType == PB::Varint) sf.platforms = (uint32_t)g.varintVal;
+                else if (g.fieldNum == 7 && g.wireType == PB::Varint) sf.prefixIdx = (uint32_t)g.varintVal;
+            }
+            files.push_back(std::move(sf));
+        }
+    }
+    LOG("[SPY-CL] %s app=%u CN=%llu is_delta=%u nfiles=%zu nprefixes=%zu",
+        tag, appId, (unsigned long long)cn, isDelta, files.size(), prefixes.size());
+    for (size_t i = 0; i < prefixes.size(); ++i)
+        LOG("[SPY-CL]   prefix[%zu] = '%s'", i, prefixes[i].c_str());
+    for (const auto& sf : files) {
+        const char* pfx = sf.prefixIdx < prefixes.size() ? prefixes[sf.prefixIdx].c_str() : "<oob>";
+        LOG("[SPY-CL]   file leaf='%s' prefixIdx=%u prefix='%s' persist=%u platforms=0x%X size=%llu",
+            sf.leaf.c_str(), sf.prefixIdx, pfx, sf.persist, sf.platforms,
+            (unsigned long long)sf.size);
+    }
 }
 
 // The actual vtable hook function - replaces CClientUnifiedServiceTransport::vtable[5]
@@ -1402,6 +1986,96 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
                     }
                     if (ParseBytesToBody(respBody, newResp.Data().data(), newResp.Size()))
                         LOG("[Parental] Stripped restrictions from GetSignedParentalSettings (slot5)");
+                }
+            }
+        }
+        return result;
+    }
+
+    // Native stats / playtime service RPCs.
+    // Player.GetUserStats#1: answer namespace apps from our store for the achievement page.
+    if (strcmp(methodName, StatsHandlers::RPC_GET_USER_STATS) == 0
+        && (g_cloudSaveOnly.load(std::memory_order_relaxed)
+            ? MetadataSync::schemaFetch.load(std::memory_order_relaxed)
+            : MetadataSync::SchemaFetchEnabled())) {
+        if (request && response) {
+            void* reqBody = *(void**)((uintptr_t)request + 48);
+            if (reqBody) {
+                auto reqBytes = SerializeBodyToBytes(reqBody);
+                auto reqFields = PB::Parse(reqBytes.data(), reqBytes.size());
+                // appid = field 2 in CPlayer_GetUserStats_Request
+                uint32_t appId = 0;
+                if (auto* f = PB::FindField(reqFields, 2)) appId = (uint32_t)f->varintVal;
+                LOG("[Stats] slot5 GetUserStats seen: app=%u namespace=%d", appId, IsNamespaceApp(appId) ? 1 : 0);
+                if (appId != 0 && IsNamespaceApp(appId)) {
+                    auto res = StatsHandlers::HandleGetUserStats(appId, reqFields);
+                    void* respBody = *(void**)((uintptr_t)response + 48);
+                    if (respBody && res.body.Size() > 0 &&
+                        ParseBytesToBody(respBody, res.body.Data().data(), res.body.Size())) {
+                        if (flags) *flags = 0;
+                        LOG("[Stats] GetUserStats app=%u handled locally (%zu bytes)",
+                            appId, res.body.Size());
+                        return true;
+                    }
+                    LOG("[Stats] GetUserStats app=%u NOT handled (respBody=%p bodySize=%zu) -> passthrough",
+                        appId, *(void**)((uintptr_t)response + 48), res.body.Size());
+                }
+            } else {
+                LOG("[Stats] slot5 GetUserStats: null reqBody -> passthrough");
+            }
+        }
+        return g_originalSlot5(thisptr, methodName, request, response, flags);
+    }
+
+    // Third-party: bypass StGate — playtime data should appear in library.
+    if (strcmp(methodName, StatsHandlers::RPC_GET_LAST_PLAYED) == 0
+        && (g_cloudSaveOnly.load(std::memory_order_relaxed)
+            ? MetadataSync::syncPlaytime.load(std::memory_order_relaxed)
+            : MetadataSync::PlaytimeEnabled())) {
+        bool result = g_originalSlot5(thisptr, methodName, request, response, flags);
+        LOG("[Stats] slot5 GetLastPlayedTimes seen: serverResult=%d", result ? 1 : 0);
+        if (result && response) {
+            void* respBody = *(void**)((uintptr_t)response + 48);
+            if (respBody) {
+                // Parse the request to honor min_last_played.
+                std::vector<PB::Field> reqFields;
+                if (request) {
+                    void* reqBody = *(void**)((uintptr_t)request + 48);
+                    if (reqBody) {
+                        auto reqBytes = SerializeBodyToBytes(reqBody);
+                        reqFields = PB::Parse(reqBytes.data(), reqBytes.size());
+                    }
+                }
+                auto ours = StatsHandlers::HandleGetLastPlayedTimes(reqFields);
+                if (ours.body.Size() > 0) {
+                    // Append our games[] (field 1) to the server's response.
+                    auto respBytes = SerializeBodyToBytes(respBody);
+                    PB::Writer merged;
+                    // keep all existing fields verbatim
+                    auto existing = PB::Parse(respBytes.data(), respBytes.size());
+                    for (const auto& f : existing) {
+                        if (f.wireType == PB::Varint)            merged.WriteVarint(f.fieldNum, f.varintVal);
+                        else if (f.wireType == PB::Fixed64)      merged.WriteFixed64(f.fieldNum, f.varintVal);
+                        else if (f.wireType == PB::Fixed32)      merged.WriteFixed32(f.fieldNum, (uint32_t)f.varintVal);
+                        else if (f.wireType == PB::LengthDelimited) merged.WriteBytes(f.fieldNum, f.data, f.dataLen);
+                    }
+                    // append our games (each game is a length-delimited field 1)
+                    auto ourFields = PB::Parse(ours.body.Data().data(), ours.body.Size());
+                    size_t added = 0;
+                    for (const auto& f : ourFields) {
+                        if (f.fieldNum == 1 && f.wireType == PB::LengthDelimited) {
+                            merged.WriteBytes(1, f.data, f.dataLen);
+                            ++added;
+                        }
+                    }
+                    if (added > 0 &&
+                        ParseBytesToBody(respBody, merged.Data().data(), merged.Size())) {
+                        LOG("[Stats] GetLastPlayedTimes: appended %zu local game(s) to server response", added);
+                    } else {
+                        LOG("[Stats] GetLastPlayedTimes: nothing appended (added=%zu)", added);
+                    }
+                } else {
+                    LOG("[Stats] GetLastPlayedTimes: store had no local games to append");
                 }
             }
         }
@@ -1468,8 +2142,33 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         // Suppress log for high-frequency non-namespace apps (e.g. 2371090 = Steam Game Notes)
         if (appId != 2371090)
             LOG("[VtHook] %s app=%u: not namespace, passing through", methodName, appId);
+
+        // Native Cloud spy (see g_spyAppId): capture native request + response.
+        // Read-only.
+        if (g_spyAppId != 0 && appId == g_spyAppId) {
+            LOG("[SPY] %s app=%u native request (%zu bytes):", methodName, appId, reqBytes.size());
+            SpyLogFields("[SPY-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
+            bool spyResult = g_originalSlot5(thisptr, methodName, request, response, flags);
+            // Inspect the response body only on success: a failed call may leave the
+            // body slot without a constructed message.
+            void* spyRespBody = spyResult ? *(void**)((uintptr_t)response + 48) : nullptr;
+            if (spyRespBody) {
+                auto respBytes = SerializeBodyToBytes(spyRespBody);
+                LOG("[SPY] %s app=%u native response (%zu bytes, result=%d):",
+                    methodName, appId, respBytes.size(), spyResult ? 1 : 0);
+                if (strcmp(methodName, RPC_GET_CHANGELIST) == 0)
+                    SpyLogChangelistResponse("native-response", appId,
+                                             respBytes.data(), respBytes.size());
+                else
+                    SpyLogFields("[SPY-RESP]", respBytes.data(), (uint32_t)respBytes.size());
+            }
+            return spyResult;
+        }
+
         return g_originalSlot5(thisptr, methodName, request, response, flags);
     }
+
+    // FileDownload handled by DispatchCloudRpc below (calling original double-handles).
 
     // NAMESPACE APP: handle locally
     LOG("[VtHook] INTERCEPT %s app=%u (%zu bytes):", methodName, appId, reqBytes.size());
@@ -1477,20 +2176,25 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
     SpyLogFields("[VtHook-REQ]", reqBytes.data(), (uint32_t)reqBytes.size());
 #endif
 
-    // Capture SteamID from request header if not yet captured
-    if (g_steamId.load() == 0) {
+    // Capture SteamID from the request header. Detects account switches.
+    if (!g_steamIdFromHeader.load()) {
         void* reqHeader = *(void**)((uintptr_t)request + 40);
         if (reqHeader) {
-            // CMsgProtoBufHeader: serialize-and-parse to extract steamid.
             auto hdrBytes = SerializeBodyToBytes(reqHeader);
             if (!hdrBytes.empty()) {
                 auto hdrFields = PB::Parse(hdrBytes.data(), hdrBytes.size());
                 auto* sidField = PB::FindField(hdrFields, HDR_STEAMID);
                 if (sidField) {
-                    g_steamId.store(sidField->varintVal);
-                    LOG("[VtHook] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
-                    HttpServer::SetAccountId(GetAccountId());
-                    ScheduleStartupMetadataSync();
+                    uint64_t newSid = sidField->varintVal;
+                    uint64_t prevSid = g_steamId.exchange(newSid);
+                    bool firstCapture = !g_steamIdFromHeader.exchange(true);
+                    bool switched = !firstCapture && prevSid != 0 && prevSid != newSid;
+                    if (firstCapture || switched) {
+                        LOG("[VtHook] Captured SteamID: %llu (accountId=%u)%s", newSid, GetAccountId(),
+                            switched ? " [ACCOUNT SWITCH]" : "");
+                        HttpServer::SetAccountId(GetAccountId());
+                        ScheduleStartupMetadataSync();
+                    }
                 }
                 auto* sessField = PB::FindField(hdrFields, HDR_SESSIONID);
                 if (sessField) {
@@ -1499,6 +2203,34 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
             }
         }
     }
+
+    // Fiber-yield feasibility probe (read-only): log whether we're on the job fiber.
+    bool isCompleteBatch = (strcmp(methodName, RPC_COMPLETE_BATCH) == 0);
+    if (isCompleteBatch || strcmp(methodName, RPC_BEGIN_BATCH) == 0) {
+        uintptr_t jobPtr = ReadCurrentJobPtr();
+        bool coroActive = CoroutineActiveNow();
+        LOG("[FiberProbe] %s app=%u: g_pJobCur=%p (on-fiber=%d) jobid=%llu coro-active=%d",
+            methodName, appId, (void*)jobPtr, jobPtr != 0 ? 1 : 0, ReadCurrentJobId(),
+            coroActive ? 1 : 0);
+    }
+
+    // Re-entrancy probe: detect slot-5 RPC during in-flight CompleteBatch.
+    {
+        int inFlight = g_reentCompleteInFlight.load(std::memory_order_acquire);
+        if (inFlight > 0) {
+            uint32_t curTid  = (uint32_t)GetCurrentThreadId();
+            uint32_t cbTid   = g_reentCompleteThreadId.load(std::memory_order_acquire);
+            LOG("[ReentProbe] %s app=%u began while %d CompleteBatch in-flight "
+                "(this-tid=%u completebatch-tid=%u same-thread=%d)",
+                methodName, appId, inFlight, curTid, cbTid, (curTid == cbTid) ? 1 : 0);
+        }
+    }
+
+    // Mark CompleteBatch as in-flight for the duration of its dispatch (the slow
+    // promote/drain wait), so concurrent slot-5 entries can detect overlap above.
+    CompleteBatchInFlightMark cbMark(isCompleteBatch);
+
+    auto slot5Start = std::chrono::steady_clock::now();
 
     // Call the appropriate handler to build a response body
     auto dispatched = DispatchCloudRpc(methodName, realAppId, innerFields);
@@ -1555,8 +2287,10 @@ static bool __fastcall ServiceMethodHook(void* thisptr, const char* methodName,
         f32[3] = result.eresult;
     }
 
-    LOG("[VtHook] SUCCESS: %s app=%u handled locally (response %zu bytes)",
-        methodName, realAppId, result.body.Size());
+    auto slot5Ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - slot5Start).count();
+    LOG("[VtHook] SUCCESS: %s app=%u handled in %lldms (response %zu bytes)",
+        methodName, realAppId, (long long)slot5Ms, result.body.Size());
     return true;
 }
 
@@ -1588,244 +2322,6 @@ static uint32_t CheckNotificationNamespaceApp(const char* methodName, void* body
     }
 
     return 0;
-}
-
-// On namespace-app exit: read appcache/stats/UserGameStats_{account}_{app}.bin and store as a cross-machine restore blob.
-static void UploadStatsOnExit(uint32_t appId) {
-    if (!CloudStorage::IsCloudActive()) return;
-
-    uint32_t accountId = GetAccountId();
-    if (!accountId) return;
-
-    std::string statsFile = g_steamPath + "appcache\\stats\\UserGameStats_"
-        + std::to_string(accountId) + "_" + std::to_string(appId) + ".bin";
-
-    // Wide-API: CreateFileA narrows via ACP and fails for non-ASCII Steam
-    // install roots, silently skipping stats upload for affected users.
-    auto statsFileWide = FileUtil::Utf8ToPath(statsFile).wstring();
-    HANDLE hFile = CreateFileW(statsFileWide.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        LOG("[Stats] No stats file for app %u, skipping upload", appId);
-        return;
-    }
-
-    LARGE_INTEGER fileSize;
-    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart <= 0 || fileSize.QuadPart > 50 * 1024 * 1024) {
-        LOG("[Stats] Stats file empty or too large for app %u (%lld bytes), skipping upload",
-            appId, fileSize.QuadPart);
-        CloseHandle(hFile);
-        return;
-    }
-
-    std::vector<uint8_t> data(static_cast<size_t>(fileSize.QuadPart));
-    DWORD bytesRead = 0;
-    BOOL readOk = ReadFile(hFile, data.data(), static_cast<DWORD>(data.size()), &bytesRead, nullptr);
-    CloseHandle(hFile);
-
-    if (!readOk || bytesRead != data.size()) {
-        LOG("[Stats] Failed to read stats file for app %u", appId);
-        return;
-    }
-
-    // Steam writes a 38-byte cache{crc,PendingChanges}+END skeleton when no stats
-    // are loaded; uploading it clobbers a richer cloud blob. 64-byte floor matches
-    // PreStage threshold.
-    if (data.size() <= 64) {
-        LOG("[Stats] Skipping upload for app %u: file too small (%zu bytes), likely empty stub",
-            appId, data.size());
-        return;
-    }
-    if (!StatsBlobHasUnlocks(data.data(), data.size())) {
-        LOG("[Stats] Skipping upload for app %u: blob has no unlocked stats/achievements (%zu bytes)",
-            appId, data.size());
-        return;
-    }
-
-    // Account-scoped sentinel (appId=0): keeps blob out of per-app namespace so Steam never resolves it under an AutoCloud root. See cloud_metadata_paths.h.
-    bool ok = CloudStorage::StoreBlob(accountId, kAccountScopeAppId,
-        AccountStatsFilename(appId), data.data(), data.size());
-    LOG("[Stats] Uploaded stats for app %u (%zu bytes, ok=%d)", appId, data.size(), ok);
-
-    if (ok) {
-        CloudStorage::DeleteBlob(accountId, appId, kLegacyStatsMetadataPath);
-    }
-}
-
-// Upload playtime on namespace-app exit. Internal launch->exit delta + launch-time VDF baseline (exit-side VDF is unreliable - Steam may not have written it yet).
-static void UploadPlaytimeOnExit(uint32_t appId) {
-    if (!CloudStorage::IsCloudActive()) return;
-
-    uint32_t accountId = GetAccountId();
-    if (!accountId) return;
-
-    auto info = PopLaunchInfo(appId);
-    time_t now = time(nullptr);
-
-    uint64_t trackedMinutes = 0;
-    uint64_t trackedLastPlayed = (uint64_t)now;
-
-    if (info.launchTime > 0 && now > info.launchTime) {
-        trackedMinutes = (uint64_t)(now - info.launchTime) / 60;
-        LOG("[Playtime] Internal tracking for app %u: %llu minutes (baseline=%llu)", appId, trackedMinutes, info.vdfBaseline);
-    } else {
-        LOG("[Playtime] No internal launch time for app %u, relying on VDF", appId);
-    }
-
-    // Read Steam's cumulative playtime from localconfig.vdf (if available).
-    // Use Win32 API with shared access since Steam may have the file open.
-    uint64_t vdfLastPlayed = 0, vdfPlaytime = 0, vdfPlaytime2wks = 0;
-    {
-        std::string vdfPath = g_steamPath + "userdata\\" + std::to_string(accountId)
-            + "\\config\\localconfig.vdf";
-        // Wide-API parity with the launch-time reader above; see UploadStatsOnExit.
-        auto vdfPathWide = FileUtil::Utf8ToPath(vdfPath).wstring();
-        HANDLE hFile = CreateFileW(vdfPathWide.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD fileSize = GetFileSize(hFile, nullptr);
-            std::string vdfContent;
-            if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
-                vdfContent.resize(fileSize);
-                DWORD bytesRead = 0;
-                ReadFile(hFile, (LPVOID)vdfContent.data(), fileSize, &bytesRead, nullptr);
-                vdfContent.resize(bytesRead);
-            }
-            CloseHandle(hFile);
-
-            std::string appIdStr = std::to_string(appId);
-            const char* sections[] = { "UserLocalConfigStore", "Software", "Valve", "Steam", "Apps", appIdStr.c_str() };
-            bool sectionFound = VdfUtil::ForEachFieldInSection(vdfContent, sections, 6,
-                [&](const VdfUtil::FieldInfo& fi) {
-                    if (fi.key == "LastPlayed")
-                        vdfLastPlayed = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                    else if (fi.key == "Playtime")
-                        vdfPlaytime = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                    else if (fi.key == "Playtime2wks")
-                        vdfPlaytime2wks = strtoull(std::string(fi.value).c_str(), nullptr, 10);
-                    return true;
-                });
-            LOG("[Playtime] VDF for app %u: found=%d Playtime=%llu Playtime2wks=%llu LastPlayed=%llu (read %lu bytes)",
-                appId, sectionFound, vdfPlaytime, vdfPlaytime2wks, vdfLastPlayed, (unsigned long)vdfContent.size());
-        } else {
-            LOG("[Playtime] Cannot open localconfig.vdf for app %u (err=%lu, path=%s)",
-                appId, GetLastError(), vdfPath.c_str());
-        }
-    }
-
-    // Use the launch-time VDF baseline if exit-side read came back empty.
-    // Steam may not have flushed playtime to disk yet at exit time.
-    if (vdfPlaytime == 0 && info.vdfBaseline > 0) {
-        vdfPlaytime = info.vdfBaseline;
-        LOG("[Playtime] Using launch-time VDF baseline for app %u: %llu min", appId, vdfPlaytime);
-    }
-    if (vdfPlaytime2wks == 0 && info.vdfBaseline2wks > 0) {
-        vdfPlaytime2wks = info.vdfBaseline2wks;
-        LOG("[Playtime] Using launch-time 2wks VDF baseline for app %u: %llu min", appId, vdfPlaytime2wks);
-    }
-
-    uint64_t lastPlayed = (trackedLastPlayed > vdfLastPlayed) ? trackedLastPlayed : vdfLastPlayed;
-
-    // Merge with existing blob; CheckBlobExists distinguishes Missing (merge with empty) from Error (abort) - RetrieveBlob alone would silently overwrite on transient failure.
-    uint64_t cloudLastPlayed = 0, cloudPlaytime = 0, cloudPlaytime2wks = 0;
-    auto acctScopeStatus = CloudStorage::CheckBlobExists(
-        accountId, kAccountScopeAppId, AccountPlaytimeFilename(appId));
-    if (acctScopeStatus == ICloudProvider::ExistsStatus::Error) {
-        LOG("[Playtime] account-scope existence check returned Error for app %u; "
-            "aborting upload to avoid stale-merge rollback", appId);
-        return;
-    }
-    std::vector<uint8_t> ptData;
-    if (acctScopeStatus == ICloudProvider::ExistsStatus::Exists) {
-        ptData = CloudStorage::RetrieveBlob(accountId, kAccountScopeAppId,
-                                             AccountPlaytimeFilename(appId));
-        // Empty after Exists means the download itself failed; abort
-        // matches the Error path above (our writer never emits empty).
-        if (ptData.empty()) {
-            LOG("[Playtime] account-scope retrieve returned empty after Exists for app %u; "
-                "aborting upload to avoid stale-merge rollback", appId);
-            return;
-        }
-    }
-    if (!ptData.empty()) {
-        std::string blob(reinterpret_cast<const char*>(ptData.data()), ptData.size());
-        auto parsed = Json::Parse(blob);
-        if (parsed.type == Json::Type::Object) {
-            if (parsed.has("LastPlayed"))
-                cloudLastPlayed = (parsed["LastPlayed"].type == Json::Type::Number)
-                    ? (parsed["LastPlayed"].number() > 0 ? (uint64_t)parsed["LastPlayed"].number() : 0)
-                    : strtoull(parsed["LastPlayed"].str().c_str(), nullptr, 10);
-            if (parsed.has("Playtime"))
-                cloudPlaytime = (parsed["Playtime"].type == Json::Type::Number)
-                    ? (parsed["Playtime"].number() > 0 ? (uint64_t)parsed["Playtime"].number() : 0)
-                    : strtoull(parsed["Playtime"].str().c_str(), nullptr, 10);
-            if (parsed.has("Playtime2wks"))
-                cloudPlaytime2wks = (parsed["Playtime2wks"].type == Json::Type::Number)
-                    ? (parsed["Playtime2wks"].number() > 0 ? (uint64_t)parsed["Playtime2wks"].number() : 0)
-                    : strtoull(parsed["Playtime2wks"].str().c_str(), nullptr, 10);
-        } else {
-            std::istringstream blobStream(blob);
-            std::string blobLine;
-            while (std::getline(blobStream, blobLine)) {
-                size_t tab = blobLine.find('\t');
-                if (tab == std::string::npos) continue;
-                std::string key = blobLine.substr(0, tab);
-                std::string val = blobLine.substr(tab + 1);
-                if (key == "LastPlayed") cloudLastPlayed = strtoull(val.c_str(), nullptr, 10);
-                else if (key == "Playtime") cloudPlaytime = strtoull(val.c_str(), nullptr, 10);
-                else if (key == "Playtime2wks") cloudPlaytime2wks = strtoull(val.c_str(), nullptr, 10);
-            }
-        }
-    }
-    // Steam decays Playtime2wks; never default it to lifetime total.
-    // Clamp corrupt blobs (2wks > total) by zeroing 2wks.
-    // 2wks==total at non-trivial lifetimes is the signature of the prior
-    // "default 2wks to lifetime" bug; recover by zeroing.
-    constexpr uint64_t kTwoWeeksMinutes = 14ULL * 24 * 60;
-    if (cloudPlaytime2wks > cloudPlaytime ||
-        (cloudPlaytime2wks == cloudPlaytime && cloudPlaytime > kTwoWeeksMinutes))
-        cloudPlaytime2wks = 0;
-
-    // Playtime merge: baseline + session, but never less than VDF or cloud
-    uint64_t mergedPlaytime = cloudPlaytime + trackedMinutes;
-    if (vdfPlaytime > mergedPlaytime)
-        mergedPlaytime = vdfPlaytime;
-    if (info.vdfBaseline + trackedMinutes > mergedPlaytime)
-        mergedPlaytime = info.vdfBaseline + trackedMinutes;
-    uint64_t mergedPlaytime2wks = cloudPlaytime2wks + trackedMinutes;
-    if (vdfPlaytime2wks > mergedPlaytime2wks)
-        mergedPlaytime2wks = vdfPlaytime2wks;
-    if (info.vdfBaseline2wks + trackedMinutes > mergedPlaytime2wks)
-        mergedPlaytime2wks = info.vdfBaseline2wks + trackedMinutes;
-    // Never let recent exceed lifetime; safer to under-report than poison cloud.
-    if (mergedPlaytime2wks > mergedPlaytime)
-        mergedPlaytime2wks = mergedPlaytime;
-    uint64_t mergedLastPlayed = (lastPlayed > cloudLastPlayed) ? lastPlayed : cloudLastPlayed;
-
-    if (mergedPlaytime == 0 && mergedPlaytime2wks == 0 && mergedLastPlayed == 0) {
-        LOG("[Playtime] No playtime data for app %u (no tracking, no VDF, no cloud)", appId);
-        return;
-    }
-
-    Json::Value obj = Json::Object();
-    obj.objVal["LastPlayed"] = Json::String(std::to_string(mergedLastPlayed));
-    obj.objVal["Playtime"] = Json::String(std::to_string(mergedPlaytime));
-    obj.objVal["Playtime2wks"] = Json::String(std::to_string(mergedPlaytime2wks));
-    std::string blobStr = Json::Stringify(obj);
-
-    // Account-scoped sentinel (appId=0): keeps blob out of per-app namespace so Steam never resolves it under an AutoCloud root. See cloud_metadata_paths.h.
-    bool ok = CloudStorage::StoreBlob(accountId, kAccountScopeAppId,
-        AccountPlaytimeFilename(appId),
-        reinterpret_cast<const uint8_t*>(blobStr.data()), blobStr.size());
-    LOG("[Playtime] Uploaded playtime for app %u (session=%llu min, baseline=%llu min, baseline2wks=%llu min, vdf=%llu min, vdf2wks=%llu min, cloud=%llu min, cloud2wks=%llu min, total=%llu min, 2wks=%llu min, LastPlayed=%llu, ok=%d)",
-        appId, trackedMinutes, info.vdfBaseline, info.vdfBaseline2wks, vdfPlaytime, vdfPlaytime2wks,
-        cloudPlaytime, cloudPlaytime2wks, mergedPlaytime, mergedPlaytime2wks, mergedLastPlayed, ok);
-
-    if (ok) {
-        CloudStorage::DeleteBlob(accountId, appId, kLegacyPlaytimeMetadataPath);
-    }
 }
 
 // Slot 8 hook - Notification wrapper (e.g. SignalAppExitSyncDone)
@@ -1904,21 +2400,12 @@ static bool __fastcall NotificationWrapperHook(void* thisptr, const char* method
         if (accountId != 0) {
             PendingOpsJournal::RecordExitSyncState(accountId, realAppId,
                 uploadsCompleted, uploadsRequired, clientId);
-            // Release cloud session lock -- server-faithful: sync done, release ownership.
-            CloudStorage::ReleaseCloudSession(accountId, realAppId, clientId);
-        }
-        if (!g_shuttingDown.load(std::memory_order_acquire) && MetadataSync::IsEnabled()) {
-            uint32_t capturedAppId = realAppId;
-            std::thread t([capturedAppId] {
-                if (g_syncAchievements) UploadStatsOnExit(capturedAppId);
-                if (g_syncPlaytime) UploadPlaytimeOnExit(capturedAppId);
-            });
-            std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
-            if (g_shuttingDown.load(std::memory_order_acquire)) {
-                t.detach();
-            } else {
-                g_bgThreads.push_back(std::move(t));
-            }
+            // ExitSyncDone is fire-and-forget (slot 64). Release session off-thread.
+            std::thread([accountId, appId = realAppId, clientId] {
+                CloudStorage::InflightSyncScope guard;
+                if (!guard.entered) return;  // shutting down, skip session release
+                CloudStorage::ReleaseCloudSession(accountId, appId, clientId);
+            }).detach();
         }
         LOG("[VtHook-Notif] %s app=%u: letting Steam process internally", methodName, realAppId);
         return g_originalSlot8(thisptr, methodName, request);
@@ -2045,6 +2532,7 @@ static bool LooksLikeFunctionPrologue(const uint8_t* p) {
     if (b[0] == 0x40 && (b[1] == 0x53 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
     if (b[0] == 0x41 && (b[1] == 0x54 || b[1] == 0x55 || b[1] == 0x56 || b[1] == 0x57)) return true;
     if (b[0] == 0x53 || b[0] == 0x55 || b[0] == 0x56 || b[0] == 0x57) return true;
+    if (b[0] == 0x48 && b[1] == 0x85 && b[2] == 0xC9) return true; // test rcx, rcx (null-guard on this)
     if (b[0] == 0xE9) return true;
     return false;
 }
@@ -2166,18 +2654,30 @@ static void RefuseVtableHook(const char* reasonFmt, ...) {
 
     if (g_vtableHookFailureNotified.exchange(true)) return;
 
-    std::string msg =
-        "CloudRedirect could not install its primary cloud-save interception hook.\n\n"
-        "Most likely a Steam update changed steamclient64.dll layout.\n\n"
-        "Cloud saves may not be redirected for some games.\n\n"
-        "Please report cloud_redirect.log at\n"
-        "https://github.com/anomalyco/CloudRedirect/issues\n\n"
-        "Reason: ";
-    msg += reason;
-    std::thread t([msg]() {
+    uint64_t ver = g_detectedSteamVersion.load(std::memory_order_relaxed);
+    char msg[1024];
+    if (ver != 0) {
+        snprintf(msg, sizeof(msg),
+            "Your Steam client (version %llu) is newer than what "
+            "CloudRedirect supports.\n\n"
+            "Update CloudRedirect to match your Steam version.\n\n"
+            "Cloud saves will not be redirected. STFixer patches will still apply.\n\n"
+            "Reason: %s",
+            ver, reason);
+    } else {
+        snprintf(msg, sizeof(msg),
+            "CloudRedirect could not identify required addresses in "
+            "steamclient64.dll.\n\n"
+            "Update CloudRedirect to match your Steam version.\n\n"
+            "Cloud saves will not be redirected. STFixer patches will still apply.\n\n"
+            "Reason: %s",
+            reason);
+    }
+    std::string msgStr(msg);
+    std::thread t([msgStr]() {
         if (g_shuttingDown.load(std::memory_order_acquire)) return;
-        MessageBoxA(nullptr, msg.c_str(),
-            "CloudRedirect -- Hook Install Failed",
+        MessageBoxA(nullptr, msgStr.c_str(),
+            "CloudRedirect -- Incompatible Steam Update",
             MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
     });
     std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
@@ -2197,27 +2697,53 @@ static std::mutex& GetInstallMutex() {
 }
 
 // Install the vtable hook on CClientUnifiedServiceTransport
-static void InstallServiceMethodHook() {
+void InstallServiceMethodHook() {
     // Serialize concurrent installers (network thread + lua-sync thread)
     // so a partial installer can't have its own hook read back as the original.
     std::lock_guard<std::mutex> installLock(GetInstallMutex());
     InstallServiceMethodHookLocked();
 }
 
+bool VtableHookInstalled() {
+    return g_vtableHookInstalled.load(std::memory_order_acquire);
+}
+
+void SetNeedsSeed(bool v) {
+    g_needsSeed.store(v, std::memory_order_release);
+}
+
+void TriggerDeferredSeed(const std::vector<uint32_t>& apps) {
+    if (!g_needsSeed.exchange(false, std::memory_order_acq_rel)) return;
+    // Set g_diskAccountId BEFORE the seed thread writes any stats files.
+    // Otherwise SeedApps -> WriteAppStats uses the unscoped root path and
+    // MigrateUnscopedFiles has to move them later when the first RPC arrives.
+    uint32_t acct = GetAccountId();
+    if (acct != 0)
+        StatsStore::ResetForAccountSwitch(acct);
+    LOG("[VtHook] Deferred seed: %zu app(s), account=%u", apps.size(), acct);
+    std::thread seed([apps] {
+        if (g_shuttingDown.load(std::memory_order_acquire)) return;
+        StatsStore::SeedApps(apps);
+    });
+    std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+    if (g_shuttingDown.load(std::memory_order_acquire))
+        seed.detach();
+    else
+        g_bgThreads.push_back(std::move(seed));
+}
+
 static void InstallServiceMethodHookLocked() {
     if (g_vtableHookInstalled.load(std::memory_order_acquire) || !g_steamClientBase) return;
 
-    // Validate Parse/Serialize RVAs before relying on them; a Steam update can repoint these into garbage.
-    auto candidateParse     = (ParseFromArrayFn)(g_steamClientBase + SC_RVA_PARSE_FROM_ARRAY);
-    auto candidateSerialize = (SerializeToArrayFn)(g_steamClientBase + SC_RVA_SERIALIZE_TO_ARRAY);
-    if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateParse))) {
-        RefuseVtableHook("ParseFromArray RVA 0x%X does not point at a function prologue (Steam update?)",
-            (unsigned)SC_RVA_PARSE_FROM_ARRAY);
+    // Validate Parse/Serialize addresses before relying on them.
+    auto candidateParse     = (ParseFromArrayFn)SC_RESOLVE(parseFromArray);
+    auto candidateSerialize = (SerializeToArrayFn)SC_RESOLVE(serializeToArray);
+    if (!candidateParse || !LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateParse))) {
+        RefuseVtableHook("ParseFromArray not resolved or failed prologue check");
         return;
     }
-    if (!LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateSerialize))) {
-        RefuseVtableHook("SerializeToArray RVA 0x%X does not point at a function prologue (Steam update?)",
-            (unsigned)SC_RVA_SERIALIZE_TO_ARRAY);
+    if (!candidateSerialize || !LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(candidateSerialize))) {
+        RefuseVtableHook("SerializeToArray not resolved or failed prologue check");
         return;
     }
     g_parseFromArray   = candidateParse;
@@ -2226,12 +2752,31 @@ static void InstallServiceMethodHookLocked() {
     LOG("[VtHook] ParseFromArray=%p SerializeToArray=%p",
         g_parseFromArray, g_serializeToArray);
 
-    // Prefer RTTI walk (build-update-tolerant); fall back to hardcoded RVA if RTTI fails. Validate slot 0 either way.
-    // Resolution stays local; cache to g_serviceTransportVtableEa only on full-install success below.
-    // Reject a cached EA that doesn't belong to the current steamclient image: the
-    // module may have been unloaded and reloaded at a different base (or a fresh
-    // build with shifted layout), in which case the stale absolute pointer would
-    // patch random memory and the real vtable's slots stay un-hooked.
+    // Resolve schema-fetch injection primitives (best-effort; if resolution
+    // fails we just disable schema-fetch, leaving the rest intact).
+    {
+        uintptr_t ctorAddr = SC_RESOLVE(pbMsgCtor);
+        uintptr_t finAddr  = SC_RESOLVE(pbMsgFinalize);
+        uintptr_t clnAddr  = SC_RESOLVE(pbMsgCleanup);
+        uintptr_t descAddr = SC_RESOLVE(getUserStatsDesc);
+        uintptr_t vtblAddr = SC_RESOLVE(getUserStatsVtable);
+        if (ctorAddr && finAddr && clnAddr && descAddr && vtblAddr &&
+            LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(ctorAddr)) &&
+            LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(finAddr)) &&
+            LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(clnAddr))) {
+            g_pbMsgCtor        = (PbMsgCtorFn)ctorAddr;
+            g_pbMsgFinalize    = (PbMsgFinalizeFn)finAddr;
+            g_pbMsgCleanup     = (PbMsgCleanupFn)clnAddr;
+            g_getUserStatsDesc = (void*)descAddr;
+            g_getUserStatsVtbl = (void*)vtblAddr;
+            LOG("[Schema] Fetch primitives resolved (ctor=%p desc=%p vtbl=%p)",
+                (void*)ctorAddr, (void*)descAddr, (void*)vtblAddr);
+        } else {
+            LOG("[Schema] Fetch primitives not resolved -- schema auto-fetch disabled");
+        }
+    }
+
+    // Prefer RTTI walk; fall back to RVA. Reject cached EA outside current image range.
     uintptr_t vtableEa = g_serviceTransportVtableEa;
     if (vtableEa) {
         bool inRange = false;
@@ -2264,17 +2809,18 @@ static void InstallServiceMethodHookLocked() {
             }
         }
         if (!vtableEa) {
-            const uintptr_t fallback = g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT;
-            uintptr_t slot0 = 0;
-            __try { slot0 = *reinterpret_cast<uintptr_t*>(fallback); }
-            __except (EXCEPTION_EXECUTE_HANDLER) { slot0 = 0; }
-            if (slot0 && LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(slot0))) {
-                LOG("[VtHook] RTTI resolution failed, falling back to hardcoded RVA 0x%X -> %p",
-                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)fallback);
-                vtableEa = fallback;
-            } else {
-                RefuseVtableHook("RTTI walk + hardcoded RVA 0x%X both failed (slot0=%p not a function prologue) -- Steam update?",
-                    (unsigned)SC_RVA_SERVICE_TRANSPORT_VT, (void*)slot0);
+            const uintptr_t fallback = SC_RESOLVE(serviceTransportVtable);
+            if (fallback) {
+                uintptr_t slot0 = 0;
+                __try { slot0 = *reinterpret_cast<uintptr_t*>(fallback); }
+                __except (EXCEPTION_EXECUTE_HANDLER) { slot0 = 0; }
+                if (slot0 && LooksLikeFunctionPrologue(reinterpret_cast<const uint8_t*>(slot0))) {
+                    LOG("[VtHook] RTTI resolution failed, falling back to resolved RVA -> %p", (void*)fallback);
+                    vtableEa = fallback;
+                }
+            }
+            if (!vtableEa) {
+                RefuseVtableHook("RTTI walk + resolver both failed -- Steam update?");
                 return;
             }
         }
@@ -2401,6 +2947,10 @@ static void InstallServiceMethodHookLocked() {
     } else {
         LOG("[VtHook] WARNING: Some hooks failed! slot4=%d slot5=%d slot7=%d slot8=%d", slot4Ok, slot5Ok, slot7Ok, slot8Ok);
     }
+
+    // Register the cooperative yield (kept in its own function: this one uses __try
+    // and so cannot also host std::function object unwinding -- MSVC C2712).
+    RegisterCooperativeYieldHook();
 }
 
 // SEH helper: read vector header (can't mix SEH with C++ object unwinding)
@@ -2509,6 +3059,82 @@ static __int64 __fastcall BuildDepotDependencyHook(__int64* a1, unsigned int a2,
     return result;
 }
 
+static bool TryHandleSchemaResponse(const uint8_t* data, uint32_t size);  // fwd decl
+
+// Inject the on-disk schema into an incoming 819 that lacks one, so Steam registers
+// the achievement page for lua-unlocked games Valve won't serve stats for.
+static void TryInjectSchemaInto819(CNetPacket* pkt) {
+    if (!MetadataSync::SchemaFetchEnabled()) return;
+    PacketView p;
+    if (!ParsePacket(pkt->pubData, pkt->cubData, p)) return;
+
+    auto bodyFields = PB::Parse(p.bodyData, p.bodyLen);
+    const PB::Field* gameIdF = PB::FindField(bodyFields, 1);
+    if (!gameIdF) return;
+    uint32_t appId = (uint32_t)(gameIdF->varintVal & 0xFFFFFF);
+    if (appId == 0 || !IsNamespaceApp(appId)) return;
+
+    // Already has a schema -- nothing to do.
+    const PB::Field* schemaF = PB::FindField(bodyFields, 4);
+    if (schemaF && schemaF->wireType == PB::LengthDelimited && schemaF->dataLen > 0)
+        return;
+
+    // Load schema from disk.
+    std::string schemaPath = g_steamPath + "appcache\\stats\\UserGameStatsSchema_"
+        + std::to_string(appId) + ".bin";
+    HANDLE hFile = CreateFileA(schemaPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == 0 || fileSize == INVALID_FILE_SIZE) { CloseHandle(hFile); return; }
+    std::vector<uint8_t> schema(fileSize);
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, schema.data(), fileSize, &bytesRead, nullptr) || bytesRead != fileSize) {
+        CloseHandle(hFile);
+        return;
+    }
+    CloseHandle(hFile);
+
+    // Rebuild body with schema injected. Preserve all original fields except
+    // eresult (force to OK) and schema (replace from disk).
+    PB::Writer newBody;
+    for (auto& f : bodyFields) {
+        if (f.fieldNum == 2) continue; // eresult -- we force OK below
+        if (f.fieldNum == 4) continue; // schema -- replaced from disk
+        if (f.wireType == PB::Varint)
+            newBody.WriteVarint(f.fieldNum, f.varintVal);
+        else if (f.wireType == PB::Fixed64)
+            newBody.WriteFixed64(f.fieldNum, f.varintVal);
+        else if (f.wireType == PB::Fixed32)
+            newBody.WriteFixed32(f.fieldNum, (uint32_t)f.varintVal);
+        else if (f.wireType == PB::LengthDelimited)
+            newBody.WriteBytes(f.fieldNum, f.data, f.dataLen);
+    }
+    newBody.WriteVarint(2, 1); // eresult = OK
+    newBody.WriteBytes(4, schema.data(), schema.size());
+
+    // Rebuild entire packet: [emsg(4)][hdrLen(4)][header][body]
+    uint32_t emsgRaw = (EMSG_CLIENT_GET_USER_STATS_RESP | PROTO_FLAG);
+    uint32_t headerLen = p.headerLen;
+    size_t newPktSize = 8 + headerLen + newBody.Size();
+    uint8_t* newBuf = (uint8_t*)VirtualAlloc(nullptr, newPktSize,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!newBuf) return;
+    memcpy(newBuf, &emsgRaw, 4);
+    memcpy(newBuf + 4, &headerLen, 4);
+    memcpy(newBuf + 8, p.headerData, headerLen);
+    memcpy(newBuf + 8 + headerLen, newBody.Data().data(), newBody.Size());
+
+    // Swap the packet data. The old buffer is owned by Steam's allocator so we
+    // can't free it -- just replace the pointer. The new buffer leaks (one per
+    // 819 response for namespace apps, tiny -- ~40KB, once per app per session).
+    pkt->pubData = newBuf;
+    pkt->cubData = (uint32_t)newPktSize;
+
+    LOG("[Schema] Injected disk schema (%u bytes) into 819 for namespace app %u",
+        fileSize, appId);
+}
+
 // RecvPkt monitor hook (logging + Approach D injection drain)
 static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     HookGuard guard;
@@ -2516,6 +3142,8 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
         return g_originalRecvPkt(thisptr, pkt);
     // Drain on the network-recv thread (valid Coroutine_Continue TLS).
     DrainInjectQueueOnNetThread();
+    DrainSchemaQueueOnNetThread();   // schema sends must run on the net thread
+    DrainPlaytimeUpdateQueueOnNetThread(); // live playtime push (touches CUser map)
 
     if (!pkt || !pkt->pubData || pkt->cubData < 8)
         return g_originalRecvPkt(thisptr, pkt);
@@ -2523,6 +3151,14 @@ static int64_t __fastcall RecvPktMonitorHook(void* thisptr, CNetPacket* pkt) {
     uint32_t emsgRaw;
     memcpy(&emsgRaw, pkt->pubData, 4);
     uint32_t emsg = emsgRaw & EMSG_MASK;
+
+    // Capture our injected schema-fetch responses (legacy EMsg 819).
+    if (emsg == EMSG_CLIENT_GET_USER_STATS_RESP) {
+        TryHandleSchemaResponse(pkt->pubData, pkt->cubData);
+        // Inject schema from disk for namespace apps if Valve's 819 has none.
+        TryInjectSchemaInto819(pkt);
+        return g_originalRecvPkt(thisptr, pkt);   // let Steam process it too
+    }
 
     if (emsg != EMSG_SERVICE_METHOD_RESP)
         return g_originalRecvPkt(thisptr, pkt);
@@ -2930,7 +3566,7 @@ static void SyncLuaFiles() {
     int extracted = 0, addedToCloud = 0;
     bool manifestChanged = false;
 
-    // Extract cloud luas we don't have locally; never delete or tombstone.
+    // Extract cloud luas missing locally; never delete or tombstone.
     for (auto& [filename, entry] : cloudManifest) {
         if (!IsValidLuaFilename(filename)) {
             LOG("[LuaSync] Skipping invalid manifest entry: %s", filename.c_str());
@@ -3145,14 +3781,6 @@ static void UploadLuaOnShutdown() {
         archiveFiles.size(), cloudManifest.size());
 }
 
-// Supported Steam client versions - patches and RVAs are only valid for these builds. Index 0 is the newest.
-static constexpr uint64_t SUPPORTED_STEAM_VERSIONS[] = { 1781041600ULL, 1780352834ULL, 1779918128ULL, 1779486452ULL, 1778281814ULL };
-
-static bool IsSupportedSteamVersion(uint64_t v) {
-    for (uint64_t s : SUPPORTED_STEAM_VERSIONS)
-        if (v == s) return true;
-    return false;
-}
 
 static uint64_t ReadSteamVersion(const std::string& steamDir) {
     std::string manifest = steamDir + "package\\steam_client_win64.manifest";
@@ -3209,81 +3837,6 @@ static bool IsSelfUnlockingLua(const std::string& filePath, uint32_t appId) {
     return false;
 }
 
-// Stage cached UserGameStats into appcache/stats/ before Steam's one-shot startup load.
-static void PreStageStatsFromLocalCache(const std::string& steamPath) {
-    std::string storageRoot = steamPath + "cloud_redirect\\storage\\";
-    std::string statsRoot = steamPath + "appcache\\stats\\";
-
-    auto storageRootWide = FileUtil::Utf8ToPath(storageRoot).wstring();
-    DWORD attrs = GetFileAttributesW(storageRootWide.c_str());
-    if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY))
-        return;
-
-    auto statsRootWide = FileUtil::Utf8ToPath(statsRoot).wstring();
-    if (GetFileAttributesW(statsRootWide.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::error_code ec;
-        std::filesystem::create_directories(FileUtil::Utf8ToPath(statsRoot), ec);
-    }
-
-    int staged = 0;
-    int skipped = 0;
-    WIN32_FIND_DATAW acctFd;
-    HANDLE hAcct = FindFirstFileW((storageRootWide + L"*").c_str(), &acctFd);
-    if (hAcct == INVALID_HANDLE_VALUE) return;
-    do {
-        if (!(acctFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        std::wstring acctName = acctFd.cFileName;
-        if (acctName == L"." || acctName == L"..") continue;
-        bool allDigits = !acctName.empty();
-        for (wchar_t c : acctName) { if (c < L'0' || c > L'9') { allDigits = false; break; } }
-        if (!allDigits) continue;
-
-        std::wstring statsDir = storageRootWide + acctName + L"\\0\\UserGameStats\\";
-        if (GetFileAttributesW(statsDir.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-
-        WIN32_FIND_DATAW appFd;
-        HANDLE hApp = FindFirstFileW((statsDir + L"*.bin").c_str(), &appFd);
-        if (hApp == INVALID_HANDLE_VALUE) continue;
-        do {
-            if (appFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            std::wstring appBin = appFd.cFileName;
-            if (appBin.size() < 5) continue;
-            std::wstring appStem = appBin.substr(0, appBin.size() - 4);
-            bool appDigits = !appStem.empty();
-            for (wchar_t c : appStem) { if (c < L'0' || c > L'9') { appDigits = false; break; } }
-            if (!appDigits) continue;
-
-            std::wstring srcPath = statsDir + appBin;
-            std::wstring dstPath = statsRootWide + L"UserGameStats_" + acctName + L"_" + appStem + L".bin";
-
-            // Steam writes a 38 B empty stub for unloaded apps; skip anything bigger.
-            WIN32_FILE_ATTRIBUTE_DATA dstAttr{};
-            bool dstExists = GetFileAttributesExW(dstPath.c_str(),
-                GetFileExInfoStandard, &dstAttr) != 0;
-            if (dstExists) {
-                ULARGE_INTEGER dstSize;
-                dstSize.LowPart = dstAttr.nFileSizeLow;
-                dstSize.HighPart = dstAttr.nFileSizeHigh;
-                if (dstSize.QuadPart > 64) {
-                    skipped++;
-                    continue;
-                }
-            }
-
-            if (CopyFileW(srcPath.c_str(), dstPath.c_str(), FALSE)) {
-                staged++;
-            } else {
-                LOG("[PreStage] CopyFile failed: %ls -> %ls (err=%lu)",
-                    srcPath.c_str(), dstPath.c_str(), GetLastError());
-            }
-        } while (FindNextFileW(hApp, &appFd));
-        FindClose(hApp);
-    } while (FindNextFileW(hAcct, &acctFd));
-    FindClose(hAcct);
-
-    if (staged > 0 || skipped > 0)
-        LOG("[PreStage] Staged %d UserGameStats files from local cache (skipped %d non-empty)", staged, skipped);
-}
 
 // DLL auto-update: check GitHub for a newer cloud_redirect.dll, replace on disk.
 
@@ -3681,21 +4234,32 @@ static void TryAutoUpdateDll() {
 
 void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCallback) {
     g_notifyCallback = notifyCallback;
+    g_cloudSaveOnly.store(cloudSaveOnly, std::memory_order_relaxed);
     g_steamPath = steamPath;
     if (!g_steamPath.empty() && g_steamPath.back() != '\\')
         g_steamPath += '\\';
 
-    // Read Steam version early (used by version gate below and auto-update).
+    // Read Steam version for diagnostics and auto-update.
     uint64_t detectedVersion = ReadSteamVersion(g_steamPath);
     g_detectedSteamVersion.store(detectedVersion, std::memory_order_relaxed);
-    bool versionOk = (detectedVersion != 0) && IsSupportedSteamVersion(detectedVersion);
     if (detectedVersion != 0)
-        LOG("Steam version: %llu (%s)", detectedVersion, versionOk ? "OK" : "UNSUPPORTED");
+        LOG("Steam version: %llu", detectedVersion);
     else
         LOG("Steam version: UNKNOWN (manifest unreadable)");
 
-    if (MetadataSync::steamToolsPresent.load(std::memory_order_relaxed))
-        PreStageStatsFromLocalCache(g_steamPath);
+    // Run auto-resolver: resolves steamclient64 function/global addresses via
+    // pattern scanning, RTTI walks, and string xrefs. Must run before any hooks
+    // or function-pointer resolution. Falls back to hardcoded RVAs on failure.
+    RunAutoResolver();
+
+    // Resolve CUser::accountId offset from steamclient64 (fallback: 570).
+    {
+        uint32_t scannedOff = ScanUserAccountIdOffset();
+        if (scannedOff != 0)
+            USER_OFF_ACCOUNTID = scannedOff;
+        else
+            LOG("[Scan] USER_OFF_ACCOUNTID: using fallback %u", USER_OFF_ACCOUNTID);
+    }
 
     // Auto-detect namespace apps from {steamPath}\config\stplug-in\*.lua, restricted to self-unlocking luas (base-game addappid for own id).
     std::string pluginDir = g_steamPath + "config\\stplug-in\\*";
@@ -3761,6 +4325,7 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
                 g_manifestPinsEnabled = pinCfg["manifest_pinning"].boolean();
             if (pinCfg["auto_comment"].type == Json::Type::Bool)
                 g_autoComment = pinCfg["auto_comment"].boolean();
+            // show_non_steam_game is per-user, so it lives in the AppData config (read below).
 
             size_t totalPins = 0;
 
@@ -3851,58 +4416,6 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     }
 
     LOG("cloud_redirect=%d", g_cloudRedirectEnabled.load());
-
-    // Steam version gate (after config read so we know the mode).
-    if (!versionOk && !cloudSaveOnly) {
-        bool isCloudMode = g_cloudRedirectEnabled.load();
-        if (isCloudMode) {
-            // CloudRedirect mode: block cloud init, but STFixer still works.
-            if (detectedVersion == 0) {
-                LOG("FATAL: Could not read Steam version from manifest");
-                NotifyUser(CR_NOTIFY_ERROR, "CloudRedirect -- Version Unknown",
-                    "CloudRedirect could not determine the installed Steam version.\n\n"
-                    "CloudRedirect cannot activate. STFixer patches will still apply.");
-            } else {
-                constexpr uint64_t newestSupported = SUPPORTED_STEAM_VERSIONS[0];
-                bool steamIsNewer = detectedVersion > newestSupported;
-                LOG("FATAL: Steam version mismatch! supported_newest=%llu actual=%llu (%s)",
-                    newestSupported, detectedVersion,
-                    steamIsNewer ? "Steam is newer" : "Steam is older");
-                char msg[512];
-                if (steamIsNewer) {
-                    snprintf(msg, sizeof(msg),
-                        "Your Steam client (version %llu) is newer than what "
-                        "CloudRedirect supports (version %llu).\n\n"
-                        "Update CloudRedirect to match your Steam version.\n\n"
-                        "CloudRedirect cannot activate. STFixer patches will still apply.",
-                        detectedVersion, newestSupported);
-                } else {
-                    snprintf(msg, sizeof(msg),
-                        "Your Steam client (version %llu) is older than what "
-                        "CloudRedirect expects (version %llu).\n\n"
-                        "Update Steam to match your CloudRedirect version.\n\n"
-                        "CloudRedirect cannot activate. STFixer patches will still apply.",
-                        detectedVersion, newestSupported);
-                }
-                NotifyUser(CR_NOTIFY_ERROR, "CloudRedirect -- Version Mismatch", msg);
-            }
-            return;  // block cloud init, STFixer patches already applied by payload
-        } else {
-            // STFixer mode: warn once, continue.
-            std::string flagPath = cloudRoot + ".version_warned_" + std::to_string(detectedVersion);
-            if (!std::filesystem::exists(FileUtil::Utf8ToPath(flagPath))) {
-                MessageBoxA(nullptr,
-                    "CloudRedirect is not fully compatible with your Steam client version.\n\n"
-                    "STFixer patches should still work, but consider updating CloudRedirect.\n\n"
-                    "This message will only be shown once.",
-                    "CloudRedirect -- Update Available",
-                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
-                // Write flag so we don't show again
-                std::ofstream(FileUtil::Utf8ToPath(flagPath)) << "1";
-            }
-            LOG("Steam version unsupported but STFixer mode -- continuing with warning");
-        }
-    }
 
     if (!g_cloudRedirectEnabled.load()) {
         LOG("Cloud redirection disabled, skipping cloud init");
@@ -4071,6 +4584,22 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
             LOG("[NS] WARNING: Could not resolve %%APPDATA%%, falling back to steam folder for config");
         }
     }
+    // Read manifest endpoint from settings.json (same directory as config.json).
+    {
+        std::string settingsDir = configPath.substr(0, configPath.rfind('\\') + 1);
+        std::string settingsPath = settingsDir + "settings.json";
+        std::ifstream sf(FileUtil::Utf8ToPath(settingsPath));
+        if (sf) {
+            std::string sStr((std::istreambuf_iterator<char>(sf)), {});
+            sf.close();
+            auto sj = Json::Parse(sStr);
+            if (sj["manifest_endpoint"].type == Json::Type::String)
+                g_manifestEndpoint = sj["manifest_endpoint"].str();
+            if (!g_manifestEndpoint.empty())
+                LOG("[ManifestEP] Configured: %s", g_manifestEndpoint.c_str());
+        }
+    }
+
     std::ifstream configFile(FileUtil::Utf8ToPath(configPath));
     if (configFile) {
         std::string configStr((std::istreambuf_iterator<char>(configFile)), {});
@@ -4125,32 +4654,49 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
             HttpServer::SetMaxUploadMB(mb);
         }
 
-        // Stats/playtime/lua sync requires SteamTools.
+        // Concurrency cap, not a speed knob (see g_uploadInFlightCapBytes). Clamp
+        // 24..64 MB; out-of-range/absent keeps the 24 MB default.
+        if (cfg["upload_inflight_mb"].type == Json::Type::Number) {
+            int mb = static_cast<int>(cfg["upload_inflight_mb"].integer());
+            if (mb >= 24 && mb <= 64)
+                g_uploadInFlightCapBytes.store((uint64_t)mb << 20,
+                    std::memory_order_relaxed);
+        }
+
+        // Lua sync requires SteamTools.
         if (MetadataSync::steamToolsPresent.load(std::memory_order_relaxed)) {
-            if (cfg["sync_achievements"].type == Json::Type::Bool)
-                MetadataSync::syncAchievements = cfg["sync_achievements"].boolean();
-            if (cfg["sync_playtime"].type == Json::Type::Bool)
-                MetadataSync::syncPlaytime = cfg["sync_playtime"].boolean();
             if (cfg["sync_luas"].type == Json::Type::Bool)
                 MetadataSync::syncLuas = cfg["sync_luas"].boolean();
         }
-        if (!cloudSaveOnly) {
-            if (cfg["parental_bypass_playtime"].type == Json::Type::Bool)
-                g_parentalBypassPlaytime = cfg["parental_bypass_playtime"].boolean();
-            if (cfg["parental_ignore_playtime"].type == Json::Type::Bool)
-                g_parentalIgnorePlaytime = cfg["parental_ignore_playtime"].boolean();
-            LOG("[NS] Parental: bypass=%d, ignore_playtime=%d",
-                g_parentalBypassPlaytime.load(), g_parentalIgnorePlaytime.load());
+        // Native stats/playtime sync gates. Absent -> keep default (OFF, WIP).
+        // When off, the matching native path does not interfere with Steam at all.
+        if (cfg["sync_achievements"].type == Json::Type::Bool)
+            MetadataSync::syncAchievements = cfg["sync_achievements"].boolean();
+        if (cfg["sync_playtime"].type == Json::Type::Bool)
+            MetadataSync::syncPlaytime = cfg["sync_playtime"].boolean();
+        // schema_fetch is retired and no longer honored; it stays off regardless of config.
+        LOG("[Stats] Sync gates: achievements=%d, playtime=%d, steamTools=%d, stGateOpen=%d",
+            MetadataSync::syncAchievements.load() ? 1 : 0,
+            MetadataSync::syncPlaytime.load() ? 1 : 0,
+            MetadataSync::steamToolsPresent.load() ? 1 : 0,
+            MetadataSync::StGateOpen() ? 1 : 0);
+        // Defaults to true when absent.
+        if (cfg["show_non_steam_game"].type == Json::Type::Bool)
+            g_showNonSteamGame = cfg["show_non_steam_game"].boolean();
+        if (cfg["parental_bypass_playtime"].type == Json::Type::Bool)
+            g_parentalBypassPlaytime = cfg["parental_bypass_playtime"].boolean();
+        if (cfg["parental_ignore_playtime"].type == Json::Type::Bool)
+            g_parentalIgnorePlaytime = cfg["parental_ignore_playtime"].boolean();
+        LOG("[NS] Parental: bypass=%d, ignore_playtime=%d",
+            g_parentalBypassPlaytime.load(), g_parentalIgnorePlaytime.load());
 
-            if (g_parentalBypassPlaytime.load() || g_parentalIgnorePlaytime.load()) {
-                ParentalBypass::PatchParentalSignatureCheck();
-                ParentalBypass::InstallParentalSettingsHook(g_parentalBypassPlaytime.load());
-            }
-            if (g_parentalIgnorePlaytime.load()) {
-                ParentalBypass::PatchPlaytimeEnforcement();
-            }
-
-        } // !cloudSaveOnly (parental)
+        if (g_parentalBypassPlaytime.load() || g_parentalIgnorePlaytime.load()) {
+            ParentalBypass::PatchParentalSignatureCheck();
+            ParentalBypass::InstallParentalSettingsHook(g_parentalBypassPlaytime.load());
+        }
+        if (g_parentalIgnorePlaytime.load()) {
+            ParentalBypass::PatchPlaytimeEnforcement();
+        }
 
         bool autoUpdate = cfg["auto_update_dll"].type == Json::Type::Bool
             ? cfg["auto_update_dll"].boolean()
@@ -4167,6 +4713,172 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
 
     CloudStorage::Init(cloudRoot, std::move(provider));
     g_startupMetadataScheduled.store(false);
+
+    // Native stats / playtime store (cloud-backed). Must come after CloudStorage.
+    // Stats sync as one account-wide blob at <accountId>/0/stats.json (appId ->
+    // stats JSON), not one blob per app (a Drive round-trip per app at startup).
+    StatsStore::SetCloudProvider(
+        // pullAll: one download of the account blob, split into per-app entries.
+        [](std::unordered_map<uint32_t, std::string>& out) -> bool {
+            uint32_t accountId = GetAccountId();
+            if (accountId == 0) return false;
+            std::vector<uint8_t> data;
+            auto fetch = CloudStorage::FetchCloudMetadataStatus(
+                accountId, CloudIntercept::kAccountScopeAppId, "stats.json", data);
+            if (fetch == CloudStorage::MetadataFetch::Error)
+                return false; // transient failure -> keep the existing cloud cache
+            if (fetch == CloudStorage::MetadataFetch::Missing || data.empty())
+                return true;  // no account blob yet -> empty (not a failure)
+            Json::Value root = Json::Parse(
+                std::string(reinterpret_cast<const char*>(data.data()), data.size()));
+            if (root.type != Json::Type::Object) return true;
+            for (const auto& [appIdStr, appVal] : root.objVal) {
+                uint32_t appId = (uint32_t)strtoul(appIdStr.c_str(), nullptr, 10);
+                if (appId == 0) continue;
+                out[appId] = Json::Stringify(appVal);
+            }
+            return true;
+        },
+        // pushAll: RMW-merge our snapshot onto the live blob (don't clobber
+        // another device) and upload once; skip if nothing changed.
+        [](const std::unordered_map<uint32_t, std::string>& all) {
+            // This runs on a detached worker (off Steam's net thread). Register
+            // with the in-flight drain so CloudStorage::Shutdown waits for the
+            // provider read below before tearing g_provider down (UAF guard).
+            CloudStorage::InflightSyncScope guard;
+            if (!guard.entered) return;
+
+            uint32_t accountId = GetAccountId();
+            if (accountId == 0) return;
+
+            // Read the current account blob as the merge base.
+            Json::Value root = Json::Object();
+            std::vector<uint8_t> cur;
+            if (CloudStorage::DownloadCloudMetadataWithLegacyFallback(
+                    accountId, CloudIntercept::kAccountScopeAppId, "stats.json",
+                    nullptr, cur) && !cur.empty()) {
+                Json::Value parsed = Json::Parse(
+                    std::string(reinterpret_cast<const char*>(cur.data()), cur.size()));
+                if (parsed.type == Json::Type::Object) root = std::move(parsed);
+            }
+
+            // Consume apps that were intentionally reset -- these must replace
+            // (not merge) the cloud entry so old achievements can't resurrect.
+            auto resetApps = StatsStore::ConsumeResetApps();
+
+            // Fold each app onto the live cloud entry (monotonic merge, not replace).
+            bool changed = false;
+            for (const auto& [appId, json] : all) {
+                if (appId == 0) continue;
+                std::string key = std::to_string(appId);
+                std::string mergedEntry;
+                if (resetApps.count(appId)) {
+                    mergedEntry = json;
+                } else {
+                    std::string baseEntry = root.has(key)
+                        ? Json::Stringify(root.objVal[key]) : std::string();
+                    mergedEntry = StatsStore::MergeAppStatsJson(baseEntry, json);
+                }
+                Json::Value appVal = Json::Parse(mergedEntry);
+                if (!root.has(key) || !Json::DeepEqual(root.objVal[key], appVal)) {
+                    root.objVal[key] = std::move(appVal);
+                    changed = true;
+                }
+            }
+            if (!changed) return;  // nothing to write
+
+            std::string merged = Json::Stringify(root);
+            CloudStorage::UploadCloudMetadataTextAsync(
+                accountId, CloudIntercept::kAccountScopeAppId, "stats.json", merged);
+        },
+        // pullLegacy: read one app's old per-app blob for migration into the account blob.
+        [](uint32_t appId) -> std::string {
+            CloudStorage::InflightSyncScope guard;
+            if (!guard.entered) return std::string();
+            uint32_t accountId = GetAccountId();
+            if (accountId == 0) return std::string();
+            std::vector<uint8_t> data;
+            if (CloudStorage::DownloadCloudMetadataWithLegacyFallback(
+                    accountId, appId, "stats.json", nullptr, data) && !data.empty())
+                return std::string(reinterpret_cast<const char*>(data.data()), data.size());
+            return std::string();
+        },
+        // pullLegacyPlaytime: read one app's first-format Playtime/<appId>.bin from cloud.
+        [](uint32_t appId) -> std::string {
+            CloudStorage::InflightSyncScope guard;
+            if (!guard.entered) return std::string();
+            uint32_t accountId = GetAccountId();
+            if (accountId == 0) return std::string();
+            std::vector<uint8_t> data;
+            if (CloudStorage::DownloadLegacyPlaytimeBlob(accountId, appId, data))
+                return std::string(reinterpret_cast<const char*>(data.data()), data.size());
+            return std::string();
+        });
+    // Restrict all playtime/stats tracking to namespace/lua apps only -- real
+    // owned games must never have their playtime recorded or synced.
+    StatsHandlers::SetNamespacePredicate([](uint32_t appId) { return IsNamespaceApp(appId); });
+    // Resolve current accountId lazily so the store can import Steam's native
+    // UserGameStats blobs (appcache\stats\UserGameStats_<accountId>_<appId>.bin).
+    StatsStore::SetAccountIdProvider([]() -> uint32_t { return GetAccountId(); });
+    StatsStore::SetNamespacePredicate([](uint32_t appId) { return IsNamespaceApp(appId); });
+    // On import, refresh schema from Steam (forceRefresh detects new achievements;
+    // deduped per app per session by g_schemaFetchAttempted).
+    StatsStore::SetSchemaMissingCallback([](uint32_t appId) {
+        std::thread([appId] { RequestSchemaForApp(appId, true); }).detach();
+    });
+    StatsStore::Init(cloudRoot, g_steamPath);
+    StatsHandlers::Init();
+    // Seed on bg thread only if a stats feature is enabled (blocks on cloud reads).
+    // Third-party: check raw config flags since StGateOpen() is false.
+    bool shouldSeed = cloudSaveOnly
+        ? (MetadataSync::syncAchievements.load(std::memory_order_relaxed) ||
+           MetadataSync::syncPlaytime.load(std::memory_order_relaxed))
+        : (MetadataSync::AchievementsEnabled() || MetadataSync::PlaytimeEnabled());
+    if (shouldSeed) {
+        if (cloudSaveOnly) {
+            // Third-party: apps aren't registered yet (CR_SetApps comes after Init).
+            // Defer seeding — CR_SetApps calls TriggerDeferredSeed once apps arrive.
+            CloudIntercept::SetNeedsSeed(true);
+        } else {
+            std::thread seed([] {
+                if (g_shuttingDown.load(std::memory_order_acquire)) return;
+                StatsStore::SeedApps(GetNamespaceApps());
+            });
+            std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+            if (g_shuttingDown.load(std::memory_order_acquire))
+                seed.detach();
+            else
+                g_bgThreads.push_back(std::move(seed));
+        }
+    }
+
+    // Poll cloud for remote playtime advances; enqueue for net-thread to apply.
+    {
+        std::thread poller([] {
+            for (;;) {
+                for (int i = 0; i < 60 && !g_shuttingDown.load(); ++i)
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (g_shuttingDown.load()) return;
+                // Pure playtime feature: skip the cloud pull + live push when off.
+                // Third-party (cloudSaveOnly): StGateOpen is false (no SteamTools DLL),
+                // so PlaytimeEnabled() is always false -- check raw config instead.
+                bool canPoll = g_cloudSaveOnly.load(std::memory_order_relaxed)
+                    ? MetadataSync::syncPlaytime.load(std::memory_order_relaxed)
+                    : MetadataSync::PlaytimeEnabled();
+                if (!canPoll) continue;
+                auto changed = StatsStore::RefreshFromCloud(GetNamespaceApps());
+                if (changed.empty()) continue;
+                PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(changed);
+                if (body.Size() > 0)
+                    QueueLastPlayedUpdate(body.Data());
+            }
+        });
+        std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+        if (g_shuttingDown.load(std::memory_order_acquire))
+            poller.detach();
+        else
+            g_bgThreads.push_back(std::move(poller));
+    }
 
     SteamKvInjector::Init();
 
@@ -4189,29 +4901,96 @@ void Init(const std::string& steamPath, bool cloudSaveOnly, CR_NotifyFn notifyCa
     InstallExitProcessHook();
 }
 
-// InstallRecvPktMonitor / SetSendPktAddr
-void InstallRecvPktMonitor(void* savedOrigPtrAddr) {
-    if (!savedOrigPtrAddr) {
-        LOG("InstallRecvPktMonitor: saved original ptr addr is null");
-        return;
-    }
-    auto* slot = reinterpret_cast<RecvPktFn*>(savedOrigPtrAddr);
-    g_originalRecvPkt = *slot;
-    LOG("InstallRecvPktMonitor: original RecvPkt at slot %p = %p", savedOrigPtrAddr, g_originalRecvPkt);
+// InstallRecvPktDetour: inline-hook CCMConnection::RecvPkt via sig-scan.
+// Finds the function by scanning for the VProf string reference.
+static constexpr size_t DETOUR_PATCH_SIZE = 14;   // FF 25 00 00 00 00 <8-byte addr>
+static constexpr size_t TRAMPOLINE_COPY  = 15;    // first 3 instructions of RecvPkt prologue
 
+void InstallRecvPktDetour() {
+    HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+    if (!hSC) { LOG("[RecvPkt] steamclient64.dll not loaded"); return; }
+    uintptr_t scBase = (uintptr_t)hSC;
+
+    MODULEINFO mi = {};
+    if (!GetModuleInformation(GetCurrentProcess(), hSC, &mi, sizeof(mi))) {
+        LOG("[RecvPkt] GetModuleInformation failed"); return;
+    }
+
+    // Scan for "CCMConnection::RecvPkt() multi" in .rdata
+    const char* needle = "CCMConnection::RecvPkt() multi";
+    size_t needleLen = strlen(needle);
+    const uint8_t* base = (const uint8_t*)scBase;
+    const uint8_t* end = base + mi.SizeOfImage - needleLen;
+    const uint8_t* strAddr = nullptr;
+    for (const uint8_t* p = base; p < end; ++p) {
+        if (memcmp(p, needle, needleLen) == 0) { strAddr = p; break; }
+    }
+    if (!strAddr) { LOG("[RecvPkt] VProf string not found"); return; }
+    LOG("[RecvPkt] VProf string at %p (RVA 0x%llX)", strAddr, (uint64_t)(strAddr - base));
+
+    // Find LEA rcx, [rip+disp] (48 8D 0D xx xx xx xx) targeting this string.
+    // Search .text only (first ~80% of image is typically .text).
+    const uint8_t* textEnd = base + mi.SizeOfImage;
+    const uint8_t* leaRef = nullptr;
+    for (const uint8_t* p = base + 0x1000; p < textEnd - 7; ++p) {
+        if (p[0] == 0x48 && p[1] == 0x8D && p[2] == 0x0D) {
+            int32_t disp;
+            memcpy(&disp, p + 3, 4);
+            if ((p + 7 + disp) == strAddr) { leaRef = p; break; }
+        }
+    }
+    if (!leaRef) { LOG("[RecvPkt] LEA reference to VProf string not found"); return; }
+    LOG("[RecvPkt] LEA ref at %p (RVA 0x%llX)", leaRef, (uint64_t)(leaRef - base));
+
+    // Walk backward to find the function prologue (48 89 5C 24 08).
+    uint8_t* funcStart = nullptr;
+    for (const uint8_t* p = leaRef; p > leaRef - 0x200 && p > base + 0x1000; --p) {
+        if (p[0] == 0x48 && p[1] == 0x89 && p[2] == 0x5C && p[3] == 0x24 && p[4] == 0x08) {
+            funcStart = (uint8_t*)p;
+            break;
+        }
+    }
+    if (!funcStart) { LOG("[RecvPkt] could not locate function prologue"); return; }
+    LOG("[RecvPkt] CCMConnection::RecvPkt at %p (RVA 0x%llX)", funcStart, (uint64_t)(funcStart - base));
+
+    // Allocate executable trampoline.
+    g_recvPktTrampoline = (uint8_t*)VirtualAlloc(nullptr, 64,
+        MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!g_recvPktTrampoline) { LOG("[RecvPkt] VirtualAlloc trampoline failed"); return; }
+
+    // Copy original prologue bytes (15 bytes = 3 full instructions).
+    memcpy(g_recvPktOrigBytes, funcStart, TRAMPOLINE_COPY);
+    memcpy(g_recvPktTrampoline, funcStart, TRAMPOLINE_COPY);
+
+    // Append JMP [rip+0] <original+15> to trampoline.
+    g_recvPktTrampoline[TRAMPOLINE_COPY + 0] = 0xFF;
+    g_recvPktTrampoline[TRAMPOLINE_COPY + 1] = 0x25;
+    memset(g_recvPktTrampoline + TRAMPOLINE_COPY + 2, 0, 4);  // disp = 0
+    uintptr_t resumeAddr = (uintptr_t)funcStart + TRAMPOLINE_COPY;
+    memcpy(g_recvPktTrampoline + TRAMPOLINE_COPY + 6, &resumeAddr, 8);
+    g_originalRecvPkt = (RecvPktFn)g_recvPktTrampoline;
+
+    // Patch original with JMP [rip+0] <hook>.
     DWORD oldProt;
-    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &oldProt)) {
-        LOG("InstallRecvPktMonitor: VirtualProtect failed (%u)", GetLastError());
+    if (!VirtualProtect(funcStart, TRAMPOLINE_COPY, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[RecvPkt] VirtualProtect failed (%u)", GetLastError());
+        VirtualFree(g_recvPktTrampoline, 0, MEM_RELEASE);
+        g_recvPktTrampoline = nullptr;
+        g_originalRecvPkt = nullptr;
         return;
     }
-    *slot = RecvPktMonitorHook;
-    VirtualProtect(slot, sizeof(void*), oldProt, &oldProt);
-    // Remember the slot only on success so shutdown never restores an
-    // unpatched slot.
-    g_recvPktSlot = reinterpret_cast<void**>(slot);
-    RecvPktFn readback = *slot;
-    LOG("InstallRecvPktMonitor: hooked -> %p (readback=%p, match=%d)",
-        RecvPktMonitorHook, readback, readback == RecvPktMonitorHook);
+    funcStart[0] = 0xFF;
+    funcStart[1] = 0x25;
+    memset(funcStart + 2, 0, 4);   // disp = 0
+    uintptr_t hookAddr = (uintptr_t)RecvPktMonitorHook;
+    memcpy(funcStart + 6, &hookAddr, 8);
+    funcStart[14] = 0x90;          // NOP the 15th byte
+    FlushInstructionCache(GetCurrentProcess(), funcStart, TRAMPOLINE_COPY);
+    VirtualProtect(funcStart, TRAMPOLINE_COPY, oldProt, &oldProt);
+    g_recvPktDetourSite = funcStart;
+
+    LOG("[RecvPkt] Detour installed: hook=%p trampoline=%p original=%p",
+        RecvPktMonitorHook, g_recvPktTrampoline, funcStart);
 }
 
 void InstallManifestPinHook() {
@@ -4226,10 +5005,13 @@ void InstallManifestPinHook() {
         return;
     }
 
-    uintptr_t scBase = reinterpret_cast<uintptr_t>(hSteamClient);
-    g_bddOrigAddr = reinterpret_cast<uint8_t*>(scBase + SC_RVA_BUILD_DEPOT_DEPENDENCY);
-    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p (base %p + 0x%X)",
-        g_bddOrigAddr, hSteamClient, SC_RVA_BUILD_DEPOT_DEPENDENCY);
+    uintptr_t bddAddr = SC_RESOLVE(buildDepotDependency);
+    if (!bddAddr) {
+        LOG("[ManifestPin] BuildDepotDependency not resolved -- skipping hook");
+        return;
+    }
+    g_bddOrigAddr = reinterpret_cast<uint8_t*>(bddAddr);
+    LOG("[ManifestPin] Target: steamclient64!BuildDepotDependency at %p", g_bddOrigAddr);
 
     // Verify the prologue bytes match what we expect from IDA:
     // 48 8B C4             mov rax, rsp
@@ -4314,11 +5096,1248 @@ void InstallManifestPinHook() {
         g_bddOrigAddr, (void*)hookAddr);
 }
 
+// Release-state patch state
+static uint8_t* g_releaseStateAddr = nullptr;
+static uint8_t  g_releaseStateOrig[6] = {};
+static std::atomic<bool> g_releaseStatePatched{false};
+
 void InstallReleaseStateNop() {
-    // Stub -- release-state patching removed from public builds.
+    // Patch GetEffectiveReleaseState to always return 4 (RELEASED).
+    HMODULE hSC = GetModuleHandleA("steamclient64.dll");
+    if (!hSC) return;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(hSC);
+
+    // Find "ReleaseStateOverride\0" in .rdata to locate the function.
+    static const uint8_t needle[] = "ReleaseStateOverride";
+    char mask[21]; memset(mask, 'x', 20); mask[20] = '\0';
+
+    uintptr_t strAddr = 0;
+    {
+        uintptr_t searchFrom = SigScanner::GetRdataBase();
+        size_t remaining = SigScanner::GetRdataSize();
+        while (remaining > 20) {
+            uintptr_t hit = SigScanner::FindPatternInRange(searchFrom, remaining, needle, mask, 20);
+            if (!hit) break;
+            // Must be exactly "ReleaseStateOverride\0" (not "...Countries")
+            if (*(uint8_t*)(hit + 20) == '\0') {
+                strAddr = hit;
+                break;
+            }
+            size_t advance = (hit - searchFrom) + 1;
+            searchFrom = hit + 1;
+            remaining -= advance;
+        }
+    }
+    if (!strAddr) {
+        LOG("[RelState] 'ReleaseStateOverride' string not found in .rdata");
+        return;
+    }
+
+    uintptr_t textBase = SigScanner::GetTextBase();
+    size_t textSize = SigScanner::GetTextSize();
+
+    // Find LEA xref to the string to get the thunk that populates the global.
+    uintptr_t thunkLeaAddr = 0;
+    __try {
+        const auto* p = reinterpret_cast<const uint8_t*>(textBase);
+        for (size_t i = 0; i + 7 <= textSize; ++i) {
+            if ((p[i] == 0x48 || p[i] == 0x4C) && p[i+1] == 0x8D) {
+                int32_t disp = *reinterpret_cast<const int32_t*>(p + i + 3);
+                uintptr_t target = textBase + i + 7 + disp;
+                if (target == strAddr) {
+                    thunkLeaAddr = textBase + i;
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (!thunkLeaAddr) {
+        LOG("[RelState] LEA xref to 'ReleaseStateOverride' not found");
+        return;
+    }
+
+    // The LEA after the string ref loads the override global's address.
+    uintptr_t globalAddr = 0;
+    __try {
+        const auto* q = reinterpret_cast<const uint8_t*>(thunkLeaAddr + 7);
+        if ((q[0] == 0x48 || q[0] == 0x4C) && q[1] == 0x8D) {
+            int32_t disp = *reinterpret_cast<const int32_t*>(q + 3);
+            globalAddr = (thunkLeaAddr + 7) + 7 + disp;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (!globalAddr) {
+        LOG("[RelState] Could not extract override global address");
+        return;
+    }
+
+    // Find the MOV that reads this global -- that's inside GetEffectiveReleaseState.
+    uintptr_t funcAddr = 0;
+    __try {
+        const auto* p = reinterpret_cast<const uint8_t*>(textBase);
+        for (size_t i = 0; i + 6 <= textSize; ++i) {
+            // 8B 15 xx xx xx xx  = mov edx, [rip+disp32]
+            if (p[i] == 0x8B && p[i+1] == 0x15) {
+                int32_t disp = *reinterpret_cast<const int32_t*>(p + i + 2);
+                uintptr_t target = textBase + i + 6 + disp;
+                if (target == globalAddr) {
+                    // Walk backward to function prologue
+                    uintptr_t ea = textBase + i;
+                    for (int j = 0; j < 128; ++j) {
+                        if (SigScanner::LooksLikeFunctionStart(ea - j)) {
+                            funcAddr = ea - j;
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (!funcAddr) {
+        LOG("[RelState] GetEffectiveReleaseState not found");
+        return;
+    }
+
+    g_releaseStateAddr = reinterpret_cast<uint8_t*>(funcAddr);
+    memcpy(g_releaseStateOrig, g_releaseStateAddr, 6);
+    LOG("[RelState] GetEffectiveReleaseState at sc+0x%llX, prologue: %02X %02X %02X %02X %02X %02X",
+        (unsigned long long)(funcAddr - base),
+        g_releaseStateOrig[0], g_releaseStateOrig[1], g_releaseStateOrig[2],
+        g_releaseStateOrig[3], g_releaseStateOrig[4], g_releaseStateOrig[5]);
+
+    DWORD oldProt;
+    if (!VirtualProtect(g_releaseStateAddr, 6, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[RelState] VirtualProtect failed (%u)", GetLastError());
+        g_releaseStateAddr = nullptr;
+        return;
+    }
+
+    // mov eax, 4; ret
+    g_releaseStateAddr[0] = 0xB8;
+    g_releaseStateAddr[1] = 0x04;
+    g_releaseStateAddr[2] = 0x00;
+    g_releaseStateAddr[3] = 0x00;
+    g_releaseStateAddr[4] = 0x00;
+    g_releaseStateAddr[5] = 0xC3;
+
+    VirtualProtect(g_releaseStateAddr, 6, oldProt, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_releaseStateAddr, 6);
+
+    g_releaseStatePatched.store(true, std::memory_order_release);
+    LOG("[RelState] Patched to return ERELEASESTATE_RELEASED (4)");
+}
+
+// ── Manifest endpoint override (runtime code patch) ────────────────────
+
+static void* g_manifestStringsPage = nullptr;
+static uint8_t* g_manifestUrlLeaAddr = nullptr;
+static uint8_t  g_manifestUrlLeaOrig[4] = {};
+static uint8_t* g_manifestP8bAddr = nullptr;
+static uint8_t  g_manifestP8bOrig[51] = {};
+static std::atomic<bool> g_manifestEndpointPatched{false};
+
+static const uint8_t kP8bSig[] = {
+    0x48, 0x8D, 0x15, 0x00, 0x00, 0x00, 0x00,
+    0x33, 0xC9,
+    0xE8, 0x00, 0x00, 0x00, 0x00,
+    0x48, 0x8B, 0xD8,
+    0x4C, 0x8B, 0xC0,
+    0xBA, 0x27, 0x27, 0x00, 0x00,
+};
+static const uint8_t kP8bMask[] = {
+    0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF,
+    0xFF, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+
+void InstallManifestEndpointOverride() {
+    if (g_manifestEndpoint.empty()) {
+        LOG("[ManifestEP] No endpoint configured, skipping");
+        return;
+    }
+    if (!g_payloadBase) {
+        LOG("[ManifestEP] Payload base unknown, skipping");
+        return;
+    }
+
+    // Hardcoded section layout (page 0 not mapped, no PE header access).
+    static constexpr uintptr_t kTextRva   = 0x1000;
+    static constexpr size_t    kTextSize  = 0x178000;
+    static constexpr uintptr_t kRdataRva  = 0x179000;
+    static constexpr size_t    kRdataSize = 0x54000;
+
+    uintptr_t textBase = g_payloadBase + kTextRva;
+    size_t textSize = kTextSize;
+    uintptr_t rdataBase = g_payloadBase + kRdataRva;
+    size_t rdataSize = kRdataSize;
+
+    __try {
+        volatile uint8_t probe = *reinterpret_cast<uint8_t*>(textBase);
+        (void)probe;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestEP] .text base not readable at %p", (void*)textBase);
+        return;
+    }
+
+    uintptr_t p8bAddr = 0;
+    __try {
+        const auto* p = reinterpret_cast<const uint8_t*>(textBase);
+        for (size_t i = 0; i + sizeof(kP8bSig) <= textSize; ++i) {
+            bool match = true;
+            for (size_t j = 0; j < sizeof(kP8bSig); ++j) {
+                if ((p[i + j] & kP8bMask[j]) != (kP8bSig[j] & kP8bMask[j])) {
+                    match = false; break;
+                }
+            }
+            if (match) { p8bAddr = textBase + i; break; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    if (!p8bAddr) {
+        LOG("[ManifestEP] P8b signature not found in payload .text"); return;
+    }
+    LOG("[ManifestEP] P8b at %p (payload+0x%llX)",
+        (void*)p8bAddr, (unsigned long long)(p8bAddr - g_payloadBase));
+
+    // URL lea rdx,[rip+xx] is 355 bytes before P8b (function+108 vs +463).
+    uintptr_t urlLeaAddr = p8bAddr - 355;
+    __try {
+        if (*(uint8_t*)urlLeaAddr != 0x48 || *(uint8_t*)(urlLeaAddr + 1) != 0x8D ||
+            *(uint8_t*)(urlLeaAddr + 2) != 0x15) {
+            LOG("[ManifestEP] URL lea not found at expected offset (got %02X %02X %02X)",
+                *(uint8_t*)urlLeaAddr, *(uint8_t*)(urlLeaAddr + 1), *(uint8_t*)(urlLeaAddr + 2));
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestEP] Access violation reading URL lea at %p", (void*)urlLeaAddr);
+        return;
+    }
+
+    int32_t origUrlDisp = *(int32_t*)(urlLeaAddr + 3);
+    uintptr_t origUrlTarget = urlLeaAddr + 7 + origUrlDisp;
+    if (origUrlTarget < rdataBase || origUrlTarget >= rdataBase + rdataSize) {
+        LOG("[ManifestEP] URL lea target %p outside expected .rdata range, proceeding anyway",
+            (void*)origUrlTarget);
+    }
+    const char* origUrl = nullptr;
+    __try {
+        origUrl = reinterpret_cast<const char*>(origUrlTarget);
+        if (strncmp(origUrl, "http", 4) != 0) {
+            LOG("[ManifestEP] URL lea target doesn't start with 'http': %.32s", origUrl);
+            return;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        LOG("[ManifestEP] Access violation reading URL target at %p", (void*)origUrlTarget);
+        return;
+    }
+    LOG("[ManifestEP] Original URL: %.64s", origUrl);
+
+    // Allocate a page within ±2GB for RIP-relative addressing.
+    uintptr_t allocHint = g_payloadBase;
+    g_manifestStringsPage = nullptr;
+    for (int attempt = 0; attempt < 256 && !g_manifestStringsPage; ++attempt) {
+        uintptr_t tryAddr = allocHint + (uintptr_t)attempt * 0x10000;
+        g_manifestStringsPage = VirtualAlloc((void*)tryAddr, 4096,
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    }
+    if (!g_manifestStringsPage) {
+        for (int attempt = 1; attempt < 256 && !g_manifestStringsPage; ++attempt) {
+            uintptr_t tryAddr = allocHint - (uintptr_t)attempt * 0x10000;
+            if (tryAddr < 0x10000) break;
+            g_manifestStringsPage = VirtualAlloc((void*)tryAddr, 4096,
+                MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        }
+    }
+    if (!g_manifestStringsPage) {
+        LOG("[ManifestEP] VirtualAlloc failed for string page"); return;
+    }
+
+    char* urlSlot = (char*)g_manifestStringsPage;
+    char* uaSlot = (char*)g_manifestStringsPage + 512;
+    strncpy(urlSlot, g_manifestEndpoint.c_str(), 255);
+    urlSlot[255] = '\0';
+    strncpy(uaSlot, "OpenSteamTool/1.0", 63);
+    uaSlot[63] = '\0';
+
+    int64_t urlDispCheck = (int64_t)(uintptr_t)urlSlot - (int64_t)(urlLeaAddr + 7);
+    if (urlDispCheck < INT32_MIN || urlDispCheck > INT32_MAX) {
+        LOG("[ManifestEP] URL displacement out of range (%lld)", urlDispCheck);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t urlDisp = (int32_t)urlDispCheck;
+
+    // Resolve setopt target from unpatched P8b+25: mov rcx,rdi; call setopt
+    uint8_t* afterSig = (uint8_t*)(p8bAddr + 25);
+    if (afterSig[0] != 0x48 || afterSig[1] != 0x8B || afterSig[2] != 0xCF) {
+        LOG("[ManifestEP] Expected 'mov rcx,rdi' at P8b+25, got %02X %02X %02X",
+            afterSig[0], afterSig[1], afterSig[2]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    if (afterSig[3] != 0xE8) {
+        LOG("[ManifestEP] Expected 'call' at P8b+28, got %02X", afterSig[3]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t origSetoptRel = *(int32_t*)(afterSig + 4);
+    uintptr_t setoptTarget = (uintptr_t)(afterSig + 8) + origSetoptRel;
+
+    int64_t uaDispCheck = (int64_t)(uintptr_t)uaSlot - (int64_t)(p8bAddr + 7);
+    if (uaDispCheck < INT32_MIN || uaDispCheck > INT32_MAX) {
+        LOG("[ManifestEP] UA displacement out of range (%lld)", uaDispCheck);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t uaDisp = (int32_t)uaDispCheck;
+
+    int64_t setoptNewRel = (int64_t)setoptTarget - (int64_t)(p8bAddr + 20);
+    if (setoptNewRel < INT32_MIN || setoptNewRel > INT32_MAX) {
+        LOG("[ManifestEP] setopt call displacement out of range (%lld)", setoptNewRel);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+
+    // Resolve perform target from P8b+33: mov rcx,rdi; call perform
+    uint8_t* performSite = (uint8_t*)(p8bAddr + 33);
+    if (performSite[0] != 0x48 || performSite[1] != 0x8B || performSite[2] != 0xCF) {
+        LOG("[ManifestEP] Expected 'mov rcx,rdi' at P8b+33, got %02X %02X %02X",
+            performSite[0], performSite[1], performSite[2]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    if (performSite[3] != 0xE8) {
+        LOG("[ManifestEP] Expected 'call' at P8b+36, got %02X", performSite[3]);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    int32_t origPerformRel = *(int32_t*)(performSite + 4);
+    uintptr_t performTarget = (uintptr_t)(p8bAddr + 41) + origPerformRel;
+
+    int64_t performNewRel = (int64_t)performTarget - (int64_t)(p8bAddr + 28);
+    if (performNewRel < INT32_MIN || performNewRel > INT32_MAX) {
+        LOG("[ManifestEP] perform call displacement out of range (%lld)", performNewRel);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+
+    // 51-byte replacement: lea r8→UA, setopt(USERAGENT), perform, mov esi eax, NOPs
+    uint8_t p8bRepl[51];
+    p8bRepl[0] = 0x4C; p8bRepl[1] = 0x8D; p8bRepl[2] = 0x05;
+    memcpy(p8bRepl + 3, &uaDisp, 4);
+    p8bRepl[7] = 0xBA; p8bRepl[8] = 0x22; p8bRepl[9] = 0x27;
+    p8bRepl[10] = 0x00; p8bRepl[11] = 0x00;
+    p8bRepl[12] = 0x48; p8bRepl[13] = 0x8B; p8bRepl[14] = 0xCF;
+    p8bRepl[15] = 0xE8;
+    int32_t setoptRel32 = (int32_t)setoptNewRel;
+    memcpy(p8bRepl + 16, &setoptRel32, 4);
+    p8bRepl[20] = 0x48; p8bRepl[21] = 0x8B; p8bRepl[22] = 0xCF;
+    p8bRepl[23] = 0xE8;
+    int32_t performRel32 = (int32_t)performNewRel;
+    memcpy(p8bRepl + 24, &performRel32, 4);
+    p8bRepl[28] = 0x8B; p8bRepl[29] = 0xF0;
+    memset(p8bRepl + 30, 0x90, 21);
+
+    g_manifestUrlLeaAddr = (uint8_t*)(urlLeaAddr + 3);
+    memcpy(g_manifestUrlLeaOrig, g_manifestUrlLeaAddr, 4);
+    DWORD oldProt;
+    if (!VirtualProtect(g_manifestUrlLeaAddr, 4, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[ManifestEP] VirtualProtect failed for URL lea (%u)", GetLastError());
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    memcpy(g_manifestUrlLeaAddr, &urlDisp, 4);
+    VirtualProtect(g_manifestUrlLeaAddr, 4, oldProt, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_manifestUrlLeaAddr, 4);
+
+    g_manifestP8bAddr = (uint8_t*)p8bAddr;
+    memcpy(g_manifestP8bOrig, g_manifestP8bAddr, 51);
+    if (!VirtualProtect(g_manifestP8bAddr, 51, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[ManifestEP] VirtualProtect failed for P8b rewrite (%u)", GetLastError());
+        DWORD tmp;
+        VirtualProtect(g_manifestUrlLeaAddr, 4, PAGE_EXECUTE_READWRITE, &tmp);
+        memcpy(g_manifestUrlLeaAddr, g_manifestUrlLeaOrig, 4);
+        VirtualProtect(g_manifestUrlLeaAddr, 4, tmp, &tmp);
+        FlushInstructionCache(GetCurrentProcess(), g_manifestUrlLeaAddr, 4);
+        VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+        g_manifestStringsPage = nullptr;
+        return;
+    }
+    memcpy(g_manifestP8bAddr, p8bRepl, 51);
+    VirtualProtect(g_manifestP8bAddr, 51, oldProt, &oldProt);
+    FlushInstructionCache(GetCurrentProcess(), g_manifestP8bAddr, 51);
+
+    g_manifestEndpointPatched.store(true, std::memory_order_release);
+    LOG("[ManifestEP] Redirected to %s (UA: OpenSteamTool/1.0)", g_manifestEndpoint.c_str());
+}
+
+// ── BAsyncSend inline detour (GamesPlayed rewriting) ───────────────────
+// Intercept BAsyncSend to inject game_extra_info into CMsgClientGamesPlayed.
+
+using BAsyncSendFn = uint8_t(__fastcall*)(void* pMsg, uint32_t connHandle);
+
+static uint8_t* g_basOrigAddr = nullptr;         // original BAsyncSend address
+static uint8_t  g_basTrampoline[64] = {};         // trampoline: stolen prologue + jmp back
+static BAsyncSendFn g_basOriginal = nullptr;      // trampoline as callable
+
+// Forward declaration - defined later in file
+static std::vector<uint8_t> RewriteGamesPlayed(const uint8_t* body, uint32_t bodyLen);
+
+// Rewrite the GamesPlayed body in-place on the live protobuf object.
+static void RewriteGamesPlayedBody(void* bodyObj) {
+    auto bodyBytes = SerializeBodyToBytes(bodyObj);
+    if (bodyBytes.empty()) return;
+
+    auto newBody = RewriteGamesPlayed(bodyBytes.data(), (uint32_t)bodyBytes.size());
+    if (newBody.empty()) return;
+
+    ParseBytesToBody(bodyObj, newBody.data(), newBody.size());
+}
+
+static void SweepNamespaceSchemas();  // fwd decl
+
+// Schedule schema sweep once after startup settles (injecting during startup hangs client).
+static std::atomic<bool> g_schemaSweepScheduled{false};
+static void MaybeScheduleSchemaSweep() {
+    // Experimental opt-in: only fetch schemas when the user enabled it.
+    if (!MetadataSync::SchemaFetchEnabled()) return;
+    if (g_schemaSweepScheduled.exchange(true)) return;   // once per session
+    std::thread t([] {
+        constexpr int kStartupSettleMs = 15000;          // wait for startup to settle
+        for (int waited = 0; waited < kStartupSettleMs; waited += 500) {
+            if (g_shuttingDown.load(std::memory_order_acquire)) return;
+            Sleep(500);
+        }
+        if (g_shuttingDown.load(std::memory_order_acquire)) return;
+        SweepNamespaceSchemas();
+    });
+    std::lock_guard<std::mutex> lock(g_bgThreadsMutex);
+    if (g_shuttingDown.load(std::memory_order_acquire))
+        t.detach();
+    else
+        g_bgThreads.push_back(std::move(t));
+}
+
+static uint8_t __fastcall BAsyncSendHook(void* pMsg, uint32_t connHandle) {
+    // Capture CM connection handle for schema-fetch injection.
+    if (connHandle && pMsg) {
+        // Prefer the conn from Steam's own GetUserStats (818 -> 819 reply path).
+        uint32_t hookEmsg = *(uint32_t*)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_EMSG) & EMSG_MASK;
+        if (hookEmsg == EMSG_CLIENT_GET_USER_STATS) {
+            if (g_statsConnHandle.exchange(connHandle, std::memory_order_relaxed) != connHandle)
+                LOG("[Schema] captured CM conn=%u from Steam's own GetUserStats", connHandle);
+        }
+        // Capture session fields from any outgoing message for injected 818s.
+        if (!g_hdrCaptured.load(std::memory_order_relaxed)) {
+            void* ownHdr = *(void**)((uintptr_t)pMsg + 0x28);
+            if (ownHdr) {
+                uint8_t* hb = (uint8_t*)ownHdr;
+                uint64_t sid = *(uint64_t*)(hb + 104);
+                uint32_t ses = *(uint32_t*)(hb + 112);
+                uint32_t rlm = *(uint32_t*)(hb + 156);
+                if (sid != 0 && ses != 0) {
+                    g_hdrSteamId.store(sid, std::memory_order_relaxed);
+                    g_hdrSessionId.store(ses, std::memory_order_relaxed);
+                    g_hdrRealm.store(rlm, std::memory_order_relaxed);
+                    g_hdrCaptured.store(true, std::memory_order_relaxed);
+                    LOG("[Schema] captured header session: steamid=0x%llX sessionid=%u realm=%u (from emsg=%u)",
+                        (unsigned long long)sid, ses, rlm, hookEmsg);
+                }
+            }
+        }
+        // Still keep a generic fallback handle if we never see an 818.
+        g_liveConnHandle.store(connHandle, std::memory_order_relaxed);
+        MaybeScheduleSchemaSweep();
+    }
+    if (HasNamespaceApps() && pMsg && g_serializeToArray && g_parseFromArray) {
+        uint32_t emsgRaw = *(uint32_t*)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_EMSG);
+        uint32_t emsg = emsgRaw & EMSG_MASK;
+
+        if (emsg == EMSG_CLIENT_GAMES_PLAYED ||
+            emsg == EMSG_CLIENT_GAMES_PLAYED_NO_DATABLOB ||
+            emsg == EMSG_CLIENT_GAMES_PLAYED_WITH_DATABLOB) {
+
+            void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
+            if (bodyObj) {
+                // Observe games-played for playtime session tracking (gated by sync_playtime).
+                if (MetadataSync::PlaytimeEnabled()) {
+                    auto observeBytes = SerializeBodyToBytes(bodyObj);
+                    if (!observeBytes.empty()) {
+                        LOG("[Stats] GamesPlayed observed (emsg=%u, %zu bytes) -> session tracking",
+                            emsg, observeBytes.size());
+                        auto ended = StatsHandlers::ObserveGamesPlayed(
+                            observeBytes.data(), observeBytes.size());
+                        QueueLocalPlaytimePush(ended);
+                    }
+                }
+                // Non-Steam-game spoof (hard-gated to ST clients).
+                if (g_showNonSteamGame.load(std::memory_order_relaxed) &&
+                    MetadataSync::StGateOpen())
+                    RewriteGamesPlayedBody(bodyObj);
+            }
+        }
+        else if (emsg == EMSG_CLIENT_STORE_USER_STATS2 &&
+                 MetadataSync::AchievementsEnabled()) {
+            // Client sends on achievement/stat unlock. Re-read native blob to sync new unlocks.
+            void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
+            if (bodyObj) {
+                auto observeBytes = SerializeBodyToBytes(bodyObj);
+                if (!observeBytes.empty()) {
+                    LOG("[Stats] StoreUserStats2 observed (emsg=%u, %zu bytes) -> capturing unlocks",
+                        emsg, observeBytes.size());
+                    StatsHandlers::ObserveStoreUserStats(observeBytes.data(), observeBytes.size());
+                }
+            }
+        }
+        else if (emsg == EMSG_CLIENT_GET_USER_STATS &&
+                 MetadataSync::AchievementsEnabled()) {
+            // Namespace apps: inject our 819 and suppress 818 to prevent CM clobbering.
+            void* bodyObj = *(void**)((uintptr_t)pMsg + CPROTOBUFMSG_OFF_BODY);
+            if (bodyObj) {
+                auto reqBytes = SerializeBodyToBytes(bodyObj);
+                if (!reqBytes.empty()) {
+                    auto fields = PB::Parse(reqBytes.data(), reqBytes.size());
+                    auto* f1 = PB::FindField(fields, 1);   // game_id (fixed64)
+                    uint32_t appId = f1 ? (uint32_t)(f1->varintVal & 0xFFFFFF) : 0;
+                    if (appId != 0 && IsNamespaceApp(appId)) {
+                        uint64_t jobId = ReadCurrentJobId();
+                        auto built = StatsHandlers::HandleLegacyGetUserStats(
+                            reqBytes.data(), reqBytes.size(), g_steamId.load());
+                        if (built.has_value() && !built->empty()) {
+                            LOG("[Stats] GetUserStats(818) app=%u jobid=%llu -> serving 819 (blocking send)",
+                                appId, (unsigned long long)jobId);
+                            InjectLegacyUserStatsResponse(jobId, appId, *built);
+                            // Don't forward to Valve -- we are the sole server.
+                            return 1;
+                        } else {
+                            LOG("[Stats] GetUserStats(818) app=%u: store had nothing to serve, passing through", appId);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return g_basOriginal(pMsg, connHandle);
+}
+
+// ── Achievement-schema auto-fetch ──────────────────────────────────────
+// Send 818 (schema_local_version=-1) on behalf of game owners (CM requires ownership).
+// Discovery: category 22 check -> recent reviewers -> fallback accounts.
+
+// Fallback SteamID64s, used only if review-owner discovery yields no candidates.
+static const uint64_t kFallbackOwnerIds[] = {
+    76561197978902089ull, 76561198028121353ull, 76561198017975643ull,
+    76561198001678750ull, 76561198355953202ull, 76561197993544755ull,
+};
+
+// Per-app schema fetch state. Tracks which owners we've tried and manages the
+// review-owner discovery + retry pipeline.
+struct SchemaFetchState {
+    std::vector<uint64_t> owners;       // owners queued to try (review + fallback)
+    size_t nextOwnerIdx = 0;            // next owner in `owners` to enqueue
+    uint32_t responsesReceived = 0;     // 819 responses received (with or without schema)
+    uint32_t requestsSent = 0;          // requests dispatched so far
+    bool reviewFetched = false;         // true once we've tried the review API
+    bool resolved = false;              // true once schema written to disk
+};
+
+static std::mutex g_schemaFetchMutex;
+static std::unordered_set<uint32_t> g_schemaFetchAttempted;
+static std::unordered_map<uint32_t, SchemaFetchState> g_schemaFetchStates;
+
+// Cache of apps checked for achievement support. true = supports, false = does not.
+static std::unordered_map<uint32_t, bool> g_achievementSupportCache;
+
+// Persistent skip-list (cr_schema_skip.txt). Re-probed after kSchemaSkipRetrySecs.
+static std::mutex g_schemaSkipMutex;
+static std::unordered_map<uint32_t, uint64_t> g_schemaSkip;   // appId -> unix epoch when skip-listed
+static std::atomic<bool> g_schemaSkipLoaded{false};
+
+// Re-probe after 14 days (games may add achievements later).
+static constexpr uint64_t kSchemaSkipRetrySecs = 14ull * 24 * 60 * 60;
+
+static uint64_t NowEpochSecs() {
+    using namespace std::chrono;
+    return (uint64_t)duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
+}
+
+static std::string SchemaSkipPath() {
+    return g_steamPath + "cloud_redirect\\cr_schema_skip.txt";
+}
+
+// Rewrite skip file from in-memory map. Caller must hold g_schemaSkipMutex.
+static void RewriteSchemaSkipFileLocked() {
+    std::string out;
+    out.reserve(g_schemaSkip.size() * 20);
+    for (const auto& kv : g_schemaSkip)
+        out += std::to_string(kv.first) + "," + std::to_string(kv.second) + "\r\n";
+    HANDLE h = CreateFileA(SchemaSkipPath().c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    WriteFile(h, out.data(), (DWORD)out.size(), &w, nullptr);
+    CloseHandle(h);
+}
+
+static void LoadSchemaSkipList() {
+    if (g_schemaSkipLoaded.exchange(true)) return;
+    HANDLE h = CreateFileA(SchemaSkipPath().c_str(), GENERIC_READ, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    std::string buf;
+    char chunk[4096];
+    DWORD got = 0;
+    // Cap read at 4MB to prevent corruption from ballooning RAM.
+    constexpr size_t kMaxSkipFileBytes = 4 * 1024 * 1024;
+    while (ReadFile(h, chunk, sizeof(chunk), &got, nullptr) && got > 0) {
+        buf.append(chunk, got);
+        if (buf.size() >= kMaxSkipFileBytes) break;
+    }
+    CloseHandle(h);
+    std::lock_guard<std::mutex> lock(g_schemaSkipMutex);
+    size_t pos = 0;
+    bool sawDuplicate = false;
+    while (pos < buf.size()) {
+        size_t nl = buf.find('\n', pos);
+        std::string line = buf.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        // Lines are "appId,epoch"; tolerate a bare "appId" (epoch=0 -> retry soon).
+        size_t comma = line.find(',');
+        try {
+            uint32_t id = (uint32_t)std::stoul(line.substr(0, comma));
+            uint64_t ts = (comma == std::string::npos) ? 0 : std::stoull(line.substr(comma + 1));
+            if (id) {
+                if (!g_schemaSkip.emplace(id, ts).second) { g_schemaSkip[id] = ts; sawDuplicate = true; }
+            }
+        } catch (...) {}
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    // Compact away accumulated append-duplicates so the file can't grow forever.
+    if (sawDuplicate) RewriteSchemaSkipFileLocked();
+}
+
+static bool IsSchemaSkipped(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_schemaSkipMutex);
+    return g_schemaSkip.count(appId) != 0;
+}
+
+// True if a skip-listed app is due for a re-probe (skip-listed long enough ago).
+static bool SchemaSkipDueForRetry(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_schemaSkipMutex);
+    auto it = g_schemaSkip.find(appId);
+    if (it == g_schemaSkip.end()) return true;
+    return NowEpochSecs() >= it->second + kSchemaSkipRetrySecs;
+}
+
+// Skip-list an app. Compacted on next load (last line wins).
+static void AddSchemaSkip(uint32_t appId) {
+    uint64_t now = NowEpochSecs();
+    {
+        std::lock_guard<std::mutex> lock(g_schemaSkipMutex);
+        g_schemaSkip[appId] = now;
+    }
+    HANDLE h = CreateFileA(SchemaSkipPath().c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    SetFilePointer(h, 0, nullptr, FILE_END);
+    std::string line = std::to_string(appId) + "," + std::to_string(now) + "\r\n";
+    DWORD w = 0;
+    WriteFile(h, line.data(), (DWORD)line.size(), &w, nullptr);
+    CloseHandle(h);
+}
+
+// True if Store API confirms achievements (category 22). Fail-open on HTTP errors.
+static bool AppSupportsAchievements(uint32_t appId) {
+    {
+        std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+        auto it = g_achievementSupportCache.find(appId);
+        if (it != g_achievementSupportCache.end()) return it->second;
+    }
+
+    wchar_t path[256];
+    swprintf_s(path, L"/api/appdetails?appids=%u&filters=categories", appId);
+
+    HINTERNET hSession = WinHttpOpen(L"CloudRedirect/2.2",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return true;  // fail-open
+    WinHttpSetTimeouts(hSession, 2000, 2000, 3000, 3000);
+
+    HINTERNET hConn = WinHttpConnect(hSession, L"store.steampowered.com",
+        INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConn) { WinHttpCloseHandle(hSession); return true; }
+
+    HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", path,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!hReq) { WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession); return true; }
+
+    BOOL ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0);
+    if (ok) ok = WinHttpReceiveResponse(hReq, nullptr);
+    if (!ok) {
+        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+        return true;  // fail-open
+    }
+
+    DWORD statusCode = 0, codeLen = sizeof(statusCode);
+    WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &codeLen, WINHTTP_NO_HEADER_INDEX);
+    if (statusCode != 200) {
+        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+        return true;  // fail-open
+    }
+
+    std::string body;
+    DWORD avail, got;
+    while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+        if (body.size() + avail > 64 * 1024) break;
+        size_t off = body.size();
+        body.resize(off + avail);
+        got = 0;
+        WinHttpReadData(hReq, &body[off], avail, &got);
+        body.resize(off + got);
+    }
+    WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+
+    // Look for "success":false (unlisted/removed apps)
+    if (body.find("\"success\":false") != std::string::npos) {
+        // Can't determine -- fail-open (might be region-locked but still have achievements)
+        return true;
+    }
+
+    // Category 22 = "Steam Achievements". Search for "id":22 in the categories array.
+    bool supports = (body.find("\"id\":22") != std::string::npos);
+    {
+        std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+        g_achievementSupportCache[appId] = supports;
+    }
+    if (!supports) {
+        LOG("[Schema] app %u: no achievement support (category 22 absent), skipping", appId);
+    }
+    return supports;
+}
+
+// Fetch review-owner SteamIDs from appreviews API. Must NOT run on the network thread.
+static std::vector<uint64_t> FetchReviewOwnerIds(uint32_t appId) {
+    std::vector<uint64_t> ids;
+    wchar_t path[256];
+    swprintf_s(path, L"/appreviews/%u?json=1&filter=recent&language=all"
+               L"&purchase_type=all&num_per_page=20", appId);
+
+    HINTERNET hSession = WinHttpOpen(L"CloudRedirect/2.2",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return ids;
+    WinHttpSetTimeouts(hSession, 3000, 3000, 5000, 5000);
+
+    HINTERNET hConn = WinHttpConnect(hSession, L"store.steampowered.com",
+        INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConn) { WinHttpCloseHandle(hSession); return ids; }
+
+    HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", path,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!hReq) { WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession); return ids; }
+
+    BOOL ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0);
+    if (ok) ok = WinHttpReceiveResponse(hReq, nullptr);
+    if (!ok) {
+        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+        return ids;
+    }
+
+    DWORD statusCode = 0, codeLen = sizeof(statusCode);
+    WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+        WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &codeLen, WINHTTP_NO_HEADER_INDEX);
+    if (statusCode != 200) {
+        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+        return ids;
+    }
+
+    std::string body;
+    DWORD avail, got;
+    while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+        if (body.size() + avail > 256 * 1024) break;
+        size_t off = body.size();
+        body.resize(off + avail);
+        got = 0;
+        WinHttpReadData(hReq, &body[off], avail, &got);
+        body.resize(off + got);
+    }
+    WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+
+    // Parse "steamid":"<digits>" from the JSON response
+    constexpr uint64_t kSteamId64Base = 76561197960265728ull;
+    size_t pos = 0;
+    while ((pos = body.find("\"steamid\"", pos)) != std::string::npos) {
+        pos = body.find(':', pos);
+        if (pos == std::string::npos) break;
+        ++pos;
+        while (pos < body.size() && (body[pos] == ' ' || body[pos] == '"')) ++pos;
+        size_t start = pos;
+        while (pos < body.size() && body[pos] >= '0' && body[pos] <= '9') ++pos;
+        if (start == pos) continue;
+        uint64_t sid = strtoull(body.c_str() + start, nullptr, 10);
+        if (sid >= kSteamId64Base) {
+            bool dup = false;
+            for (uint64_t existing : ids) if (existing == sid) { dup = true; break; }
+            if (!dup) ids.push_back(sid);
+        }
+    }
+    return ids;
+}
+
+// Check if a SteamID has public stats for an app (community XML endpoint).
+static bool HasPublicStats(uint32_t appId, uint64_t steamId) {
+    wchar_t path[256];
+    swprintf_s(path, L"/profiles/%llu/stats/%u/?xml=1",
+               (unsigned long long)steamId, appId);
+
+    HINTERNET hSession = WinHttpOpen(L"CloudRedirect/2.2",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+    WinHttpSetTimeouts(hSession, 2000, 2000, 3000, 3000);
+
+    HINTERNET hConn = WinHttpConnect(hSession, L"steamcommunity.com",
+        INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConn) { WinHttpCloseHandle(hSession); return false; }
+
+    HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", path,
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+        WINHTTP_FLAG_SECURE);
+    if (!hReq) { WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession); return false; }
+
+    BOOL ok = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0);
+    if (ok) ok = WinHttpReceiveResponse(hReq, nullptr);
+    if (!ok) {
+        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    // Read just enough to check for public stats markers
+    std::string body;
+    DWORD avail, got;
+    while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+        if (body.size() + avail > 32 * 1024) break;
+        size_t off = body.size();
+        body.resize(off + avail);
+        got = 0;
+        WinHttpReadData(hReq, &body[off], avail, &got);
+        body.resize(off + got);
+    }
+    WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSession);
+
+    return body.find("<playerstats>") != std::string::npos &&
+           body.find("<privacyState>public</privacyState>") != std::string::npos;
 }
 
 
+
+// Build and send one CMsgClientGetUserStats for (appId, ownerId). Returns false
+// if injection primitives aren't ready or send failed to dispatch.
+static bool SendSchemaRequest(uint32_t appId, uint64_t ownerId, uint32_t connHandle) {
+    if (!g_pbMsgCtor || !g_pbMsgFinalize || !g_pbMsgCleanup ||
+        !g_getUserStatsDesc || !g_getUserStatsVtbl || !g_parseFromArray)
+        return false;
+
+    // Replicate CProtoBufMsg<CMsgClientGetUserStats> construction (sub_138A44F70).
+    // Typed vftable mandatory: base vftable -> malformed wire -> crash.
+    alignas(16) uint8_t msg[128] = {0};
+    g_pbMsgCtor(msg, (int)EMSG_CLIENT_GET_USER_STATS, 0);     // base ctor: emsg=818
+    *(void**)(msg + 0) = g_getUserStatsVtbl;                  // install typed vftable
+    *(void**)(msg + CPROTOBUFMSG_OFF_DESC) = g_getUserStatsDesc; // typed-body descriptor
+    g_pbMsgFinalize(msg);                                      // allocate body at +0x30
+
+    void* body = *(void**)(msg + CPROTOBUFMSG_OFF_BODY);
+    if (!body) { g_pbMsgCleanup(msg); return false; }
+
+    // Header requirements:
+    //  1. +192 = -1 (expiry sentinel): 0 asserts at msgprotobuf.cpp:980 -> crash.
+    //  2. Session fields (steamid, sessionid, realm, jobid_source): CM drops without.
+    // Offsets: +104 steamid, +112 sessionid, +156 realm, +208 jobid_source
+    static std::atomic<uint64_t> s_jobIdCounter{0x5C00000000000001ull};
+    if (void* hdr = *(void**)(msg + 0x28)) {
+        uint8_t* h = (uint8_t*)hdr;
+        *(int32_t*)(h + 192) = -1;                         // expiry = -1 (no deadline)
+        *(uint32_t*)(h + 16) &= ~0x4000000u;               // clear "no reply expected"
+        if (g_hdrCaptured.load(std::memory_order_relaxed)) {
+            uint64_t jobId = s_jobIdCounter.fetch_add(1, std::memory_order_relaxed);
+            *(uint64_t*)(h + 104) = g_hdrSteamId.load(std::memory_order_relaxed);  // steamid
+            *(uint32_t*)(h + 112) = g_hdrSessionId.load(std::memory_order_relaxed);// client_sessionid
+            *(uint32_t*)(h + 156) = g_hdrRealm.load(std::memory_order_relaxed);    // realm
+            *(uint64_t*)(h + 208) = jobId;                 // jobid_source (unique)
+            *(uint32_t*)(h + 16) |= (0x40u | 0x80u | 0x8000000u | 0x80000000u);    // presence bits
+        }
+    }
+
+    // Build CMsgClientGetUserStats body:
+    //   game_id#1 fixed64, crc_stats#2 varint, schema_local_version#3 int32(-1), steam_id_for_user#4 fixed64
+    PB::Writer w;
+    w.WriteFixed64(1, (uint64_t)appId);          // game_id (low 24 bits = appid)
+    w.WriteVarint(2, 0);                          // crc_stats = 0
+    // schema_local_version = -1: must be sign-extended 64-bit varint (not 0xFFFFFFFF).
+    w.WriteVarint(3, (uint64_t)(int64_t)(-1));    // schema_local_version = -1 (send latest)
+    w.WriteFixed64(4, ownerId);                   // steam_id_for_user = owner
+
+    bool ok = ParseBytesToBody(body, w.Data().data(), w.Size());
+    if (!ok) { g_pbMsgCleanup(msg); return false; }
+
+    *(uint32_t*)(msg + CPROTOBUFMSG_OFF_CONN) = connHandle;
+
+    // The 819 response is correlated by game_id (appid); see TryHandleSchemaResponse.
+    auto basend = reinterpret_cast<BAsyncSendFn>(g_basOriginal);
+    uint8_t sent = basend ? basend(msg, connHandle) : 0;
+
+    g_pbMsgCleanup(msg);
+    return sent != 0;
+}
+
+// Handle incoming 819 for our schema requests. Correlated by game_id (appid).
+// Writes UserGameStatsSchema_<appId>.bin + per-user stats template if schema present.
+static bool TryHandleSchemaResponse(const uint8_t* data, uint32_t size) {
+    PacketView p;
+    if (!ParsePacket(data, size, p)) return false;
+
+    // Match the response to an app we asked about via game_id (field 1, fixed64).
+    auto bodyFields = PB::Parse(p.bodyData, p.bodyLen);
+    const PB::Field* gameIdF = PB::FindField(bodyFields, 1);
+    if (!gameIdF) return false;
+    uint32_t appId = (uint32_t)(gameIdF->varintVal & 0xFFFFFF);
+    if (appId == 0) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+        if (g_schemaFetchAttempted.find(appId) == g_schemaFetchAttempted.end())
+            return false;   // not an app we asked about
+    }
+
+    // Body = CMsgClientGetUserStatsResponse: eresult#2 int32, schema#4 bytes.
+    int32_t eresult = 2;
+    if (auto* er = PB::FindField(bodyFields, 2)) eresult = (int32_t)er->varintVal;
+    const PB::Field* schemaF = PB::FindField(bodyFields, 4);
+
+    bool hasSchema = (eresult == 1 && schemaF &&
+                      schemaF->wireType == PB::LengthDelimited && schemaF->dataLen > 0);
+    if (!hasSchema) {
+        // All queued owners exhausted without schema -> skip-list the app.
+        bool exhausted = false;
+        {
+            std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+            auto it = g_schemaFetchStates.find(appId);
+            if (it != g_schemaFetchStates.end() && !it->second.resolved) {
+                if (it->second.responsesReceived < it->second.requestsSent)
+                    it->second.responsesReceived++;
+                // Mark resolved to prevent late-duplicate 819 re-skip-listing.
+                exhausted = it->second.requestsSent > 0 &&
+                            it->second.responsesReceived >= it->second.requestsSent;
+                if (exhausted) it->second.resolved = true;
+            }
+        }
+        if (exhausted) AddSchemaSkip(appId);
+        return true;
+    }
+
+    std::string schemaPath = g_steamPath + "appcache\\stats\\UserGameStatsSchema_"
+        + std::to_string(appId) + ".bin";
+    // Skip if same size on disk; overwrite if size changed.
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExA(schemaPath.c_str(), GetFileExInfoStandard, &fad)) {
+        if (fad.nFileSizeLow == schemaF->dataLen && fad.nFileSizeHigh == 0) return true;
+        LOG("[Schema] app %u: schema changed (%u -> %u bytes), updating",
+            appId, fad.nFileSizeLow, schemaF->dataLen);
+    }
+
+    HANDLE h = CreateFileA(schemaPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(h, schemaF->data, schemaF->dataLen, &written, nullptr);
+        CloseHandle(h);
+        LOG("[Schema] app %u: wrote schema (%u bytes) from server response",
+            appId, schemaF->dataLen);
+        // Mark resolved so the exhaustion path can't skip-list this app.
+        {
+            std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+            auto it = g_schemaFetchStates.find(appId);
+            if (it != g_schemaFetchStates.end()) it->second.resolved = true;
+        }
+        // Evict stale skip entry now that schema is present.
+        {
+            std::lock_guard<std::mutex> lock(g_schemaSkipMutex);
+            if (g_schemaSkip.erase(appId)) RewriteSchemaSkipFileLocked();
+        }
+
+
+        // Per-user stats file needed for Steam to load stats (create if absent).
+        uint32_t acctId = GetAccountId();
+        if (acctId != 0) {
+            static const uint8_t kUserStatsTemplate[38] = {
+                0x00,0x63,0x61,0x63,0x68,0x65,0x00,0x02,0x63,0x72,0x63,0x00,0x00,0x00,
+                0x00,0x00,0x02,0x50,0x65,0x6e,0x64,0x69,0x6e,0x67,0x43,0x68,0x61,0x6e,
+                0x67,0x65,0x73,0x00,0x00,0x00,0x00,0x00,0x08,0x08
+            };
+            std::string statsPath = g_steamPath + "appcache\\stats\\UserGameStats_"
+                + std::to_string(acctId) + "_" + std::to_string(appId) + ".bin";
+            if (GetFileAttributesA(statsPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                HANDLE hs = CreateFileA(statsPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hs != INVALID_HANDLE_VALUE) {
+                    DWORD w2 = 0;
+                    WriteFile(hs, kUserStatsTemplate, sizeof(kUserStatsTemplate), &w2, nullptr);
+                    CloseHandle(hs);
+                    LOG("[Schema] app %u: wrote per-user stats template (acct %u)", appId, acctId);
+                }
+            }
+        }
+    } else {
+        LOG("[Schema] app %u: failed to open %s for write (err=%u)",
+            appId, schemaPath.c_str(), GetLastError());
+    }
+    return true;
+}
+
+// Fetch one app's schema. Background thread only (HTTP). Sends queued for net thread.
+void RequestSchemaForApp(uint32_t appId, bool forceRefresh) {
+#if !SCHEMA_FETCH_ENABLED
+    (void)appId; (void)forceRefresh; return;
+#endif
+    if (!MetadataSync::SchemaFetchEnabled()) return;
+    if (appId == 0) return;
+    if (g_shuttingDown.load(std::memory_order_acquire)) return;
+    if (g_liveConnHandle.load(std::memory_order_relaxed) == 0) return;
+
+    {
+        std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+        if (!g_schemaFetchAttempted.insert(appId).second) return;  // once per session per app
+    }
+
+    std::string schemaPath = g_steamPath + "appcache\\stats\\UserGameStatsSchema_"
+        + std::to_string(appId) + ".bin";
+    if (!forceRefresh) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        bool gotAttr = GetFileAttributesExA(schemaPath.c_str(), GetFileExInfoStandard, &fad);
+        uint64_t fsize = gotAttr ? ((uint64_t)fad.nFileSizeHigh << 32 | fad.nFileSizeLow) : 0;
+        if (gotAttr && fsize > 0) {
+            LOG("[Schema] RequestSchemaForApp %u: already on disk (%llu bytes), skipping",
+                appId, (unsigned long long)fsize);
+            return;
+        }
+        LOG("[Schema] RequestSchemaForApp %u: needs fetch (exists=%d size=%llu)",
+            appId, (int)gotAttr, (unsigned long long)fsize);
+    }
+
+    // NOTE: the Store API category-22 check was removed because newly released
+    // games can have achievements before Steam updates the store metadata.
+
+    // Phase 1: discover owners from recent reviews + verify public stats
+    std::vector<uint64_t> owners = FetchReviewOwnerIds(appId);
+    std::vector<uint64_t> verified;
+    for (uint64_t sid : owners) {
+        if (g_shuttingDown.load(std::memory_order_acquire)) return;
+        if (HasPublicStats(appId, sid)) {
+            verified.push_back(sid);
+            if (verified.size() >= 3) break;  // 3 verified owners is plenty
+        }
+    }
+
+    // Phase 2: if review discovery found nothing, append fallback owners
+    bool usingFallback = verified.empty();
+    if (usingFallback) {
+        for (uint64_t id : kFallbackOwnerIds)
+            verified.push_back(id);
+    }
+
+    if (verified.empty()) return;
+
+    // Store fetch state for response tracking
+    {
+        std::lock_guard<std::mutex> lock(g_schemaFetchMutex);
+        auto& state = g_schemaFetchStates[appId];
+        state.owners = verified;
+        state.nextOwnerIdx = 0;
+        state.requestsSent = (uint32_t)verified.size();
+        state.responsesReceived = 0;
+    }
+
+    // Cap queue at 256 to avoid saturating the shared CM conn.
+    constexpr size_t kSchemaSendQueueMax = 256;
+    {
+        std::lock_guard<std::mutex> lock(g_schemaSendMutex);
+        for (uint64_t owner : verified) {
+            if (g_schemaSendQueue.size() >= kSchemaSendQueueMax) break;
+            g_schemaSendQueue.push({appId, owner});
+        }
+    }
+    LOG("[Schema] app %u: queued %zu request(s) via %s",
+        appId, verified.size(), usingFallback ? "fallback" : "review-owner discovery");
+}
+
+// One-time proactive sweep: request schemas for namespace apps missing on disk.
+// Fired once a live CM connection handle is captured.
+static std::atomic<bool> g_schemaSweepDone{false};
+static void SweepNamespaceSchemas() {
+#if !SCHEMA_FETCH_ENABLED
+    return;                                             // kill-switch: see SCHEMA_FETCH_ENABLED
+#endif
+    if (g_schemaSweepDone.exchange(true)) return;       // once per session
+    if (g_liveConnHandle.load(std::memory_order_relaxed) == 0) {
+        g_schemaSweepDone.store(false);                 // retry on a later call
+        return;
+    }
+
+    std::vector<uint32_t> apps;
+    {
+        std::lock_guard<std::mutex> lock(g_namespaceAppsMutex);
+        apps.assign(g_namespaceApps.begin(), g_namespaceApps.end());
+    }
+    if (apps.empty()) return;
+
+    LOG("[Schema] Proactive sweep: checking %zu namespace app(s) for missing schemas", apps.size());
+
+    // Runs on caller's thread so shutdown can join.
+    LoadSchemaSkipList();
+    std::vector<uint32_t> needed;
+    for (uint32_t appId : apps) {
+        std::string schemaPath = g_steamPath + "appcache\\stats\\UserGameStatsSchema_"
+            + std::to_string(appId) + ".bin";
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        bool gotAttr = GetFileAttributesExA(schemaPath.c_str(), GetFileExInfoStandard, &fad);
+        uint64_t fsize = gotAttr ? ((uint64_t)fad.nFileSizeHigh << 32 | fad.nFileSizeLow) : 0;
+        if (gotAttr && fsize > 0) {
+            LOG("[Schema] Sweep: app %u schema present (%llu bytes), skipping",
+                appId, (unsigned long long)fsize);
+            continue;
+        }
+        // Skip known schema-less apps; re-probe on cooldown expiry.
+        if (IsSchemaSkipped(appId) && !SchemaSkipDueForRetry(appId)) continue;
+        LOG("[Schema] Sweep: app %u schema missing/empty (exists=%d size=%llu)",
+            appId, (int)gotAttr, (unsigned long long)fsize);
+        needed.push_back(appId);
+    }
+    if (needed.empty()) {
+        LOG("[Schema] Proactive sweep: all schemas present on disk");
+        return;
+    }
+    LOG("[Schema] Proactive sweep: %zu app(s) need schemas, fetching with %d workers",
+        needed.size(), 4);
+
+    // Fan out across worker threads (I/O-bound HTTP per app).
+    constexpr int kWorkers = 4;
+    std::atomic<size_t> idx{0};
+    std::atomic<int> totalRequested{0};
+    std::vector<std::thread> workers;
+    for (int w = 0; w < kWorkers; ++w) {
+        workers.emplace_back([&needed, &idx, &totalRequested] {
+            while (true) {
+                if (g_shuttingDown.load(std::memory_order_acquire)) break;
+                size_t i = idx.fetch_add(1, std::memory_order_relaxed);
+                if (i >= needed.size()) break;
+                RequestSchemaForApp(needed[i]);
+                totalRequested.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& t : workers) t.join();
+    LOG("[Schema] Proactive sweep complete: enqueued schemas for %d app(s)",
+        totalRequested.load(std::memory_order_relaxed));
+}
+
+void InstallGamesPlayedHook() {
+    if (!HasNamespaceApps()) return;
+    // Always install: playtime tracking + non-Steam-game spoof (gated per-call).
+
+    HMODULE hSteamClient = GetModuleHandleA("steamclient64.dll");
+    if (!hSteamClient) {
+        LOG("[GamesPlayed] steamclient64.dll not loaded");
+        return;
+    }
+
+    uintptr_t basAddr = SC_RESOLVE(bAsyncSend);
+    if (!basAddr) {
+        LOG("[GamesPlayed] BAsyncSend not resolved -- skipping hook");
+        return;
+    }
+    g_basOrigAddr = reinterpret_cast<uint8_t*>(basAddr);
+
+    LOG("[GamesPlayed] BAsyncSend at %p", g_basOrigAddr);
+
+    // Verify prologue matches expected bytes
+    static const uint8_t expectedPrologue[SC_BAS_STOLEN_BYTES] = {
+        0x48, 0x89, 0x5C, 0x24, 0x10,   // mov [rsp+10h], rbx
+        0x48, 0x89, 0x74, 0x24, 0x18,   // mov [rsp+18h], rsi
+        0x57,                             // push rdi
+        0x48, 0x83, 0xEC, 0x50           // sub rsp, 50h
+    };
+
+    if (memcmp(g_basOrigAddr, expectedPrologue, SC_BAS_STOLEN_BYTES) != 0) {
+        LOG("[GamesPlayed] Prologue mismatch at BAsyncSend -- skipping hook");
+        g_basOrigAddr = nullptr;
+        return;
+    }
+
+    // Build trampoline: stolen bytes + jmp back to original+15
+    DWORD oldTrampolineProt;
+    VirtualProtect(g_basTrampoline, sizeof(g_basTrampoline), PAGE_EXECUTE_READWRITE, &oldTrampolineProt);
+
+    memcpy(g_basTrampoline, g_basOrigAddr, SC_BAS_STOLEN_BYTES);
+    uint8_t* jumpBack = g_basTrampoline + SC_BAS_STOLEN_BYTES;
+    // jmp [rip+0]; <8-byte addr>
+    jumpBack[0] = 0xFF;
+    jumpBack[1] = 0x25;
+    jumpBack[2] = 0x00;
+    jumpBack[3] = 0x00;
+    jumpBack[4] = 0x00;
+    jumpBack[5] = 0x00;
+    uintptr_t returnAddr = reinterpret_cast<uintptr_t>(g_basOrigAddr) + SC_BAS_STOLEN_BYTES;
+    memcpy(jumpBack + 6, &returnAddr, 8);
+
+    g_basOriginal = reinterpret_cast<BAsyncSendFn>(reinterpret_cast<uintptr_t>(g_basTrampoline));
+
+    // Patch original function with jmp to our hook
+    DWORD oldProt;
+    if (!VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+        LOG("[GamesPlayed] VirtualProtect failed (%u)", GetLastError());
+        g_basOrigAddr = nullptr;
+        return;
+    }
+
+    // Build detour: jmp [rip+0]; <8-byte hookAddr>; nop (15 bytes = 14+1)
+    uint8_t detour[SC_BAS_STOLEN_BYTES];
+    detour[0] = 0xFF;
+    detour[1] = 0x25;
+    detour[2] = 0x00;
+    detour[3] = 0x00;
+    detour[4] = 0x00;
+    detour[5] = 0x00;
+    uintptr_t hookAddr = reinterpret_cast<uintptr_t>(&BAsyncSendHook);
+    memcpy(detour + 6, &hookAddr, 8);
+    detour[14] = 0x90; // nop for the 15th byte
+    memcpy(g_basOrigAddr, detour, SC_BAS_STOLEN_BYTES);
+
+    FlushInstructionCache(GetCurrentProcess(), g_basOrigAddr, SC_BAS_STOLEN_BYTES);
+    VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, oldProt, &oldProt);
+
+    LOG("[GamesPlayed] Inline detour installed at %p -> BAsyncSendHook %p",
+        g_basOrigAddr, (void*)hookAddr);
+}
 
 void SetSendPktAddr(void* recvPktGlobalAddr) {
     if (!recvPktGlobalAddr) {
@@ -4330,23 +6349,125 @@ void SetSendPktAddr(void* recvPktGlobalAddr) {
     LOG("[NS] payload_base=%p", (void*)g_payloadBase);
 }
 
+// ── GamesPlayed rewriting ──────────────────────────────────────────────
+// Inject game_extra_info so friends see namespace app titles.
+
+static std::mutex g_gameNameCacheMtx;
+static std::unordered_map<uint32_t, std::string> g_gameNameCache;
+
+static const std::string& LookupGameName(uint32_t appId) {
+    std::lock_guard<std::mutex> lock(g_gameNameCacheMtx);
+    auto it = g_gameNameCache.find(appId);
+    if (it != g_gameNameCache.end()) return it->second;
+
+    std::string name = AutoCloudScan::GetAppName(g_steamPath, appId);
+    if (name.empty())
+        name = "App " + std::to_string(appId);
+    auto [ins, _] = g_gameNameCache.emplace(appId, std::move(name));
+    return ins->second;
+}
+
+// Inject game_extra_info for namespace apps. Returns empty if no changes needed.
+static std::vector<uint8_t> RewriteGamesPlayed(const uint8_t* body, uint32_t bodyLen) {
+    auto outerFields = PB::Parse(body, bodyLen);
+    bool needsRewrite = false;
+
+    // First pass: check if any entry needs rewriting
+    for (const auto& f : outerFields) {
+        if (f.fieldNum != GP_FIELD_GAMES_PLAYED || f.wireType != PB::LengthDelimited)
+            continue;
+        auto inner = PB::Parse(f.data, f.dataLen);
+        // Extract game_id (fixed64, field 2)
+        const auto* gameIdField = PB::FindField(inner, GP_FIELD_GAME_ID);
+        if (!gameIdField) continue;
+        uint32_t appId = (uint32_t)(gameIdField->varintVal & 0x00FFFFFF); // low 24 bits = appId in CGameID
+        if (appId == 0) continue;
+        if (!IsNamespaceApp(appId)) continue;
+        if (IsPrivateApp(appId)) continue;  // respect "mark as private"
+        auto existing = PB::GetString(inner, GP_FIELD_GAME_EXTRA_INFO);
+        if (!existing.empty()) continue;
+        needsRewrite = true;
+        break;
+    }
+
+    if (!needsRewrite) return {};
+
+    // Second pass: rebuild body with game_extra_info injected
+    PB::Writer newBody;
+    for (const auto& f : outerFields) {
+        if (f.fieldNum != GP_FIELD_GAMES_PLAYED || f.wireType != PB::LengthDelimited) {
+            if (f.wireType == PB::Varint)
+                newBody.WriteVarint(f.fieldNum, f.varintVal);
+            else if (f.wireType == PB::Fixed64)
+                newBody.WriteFixed64(f.fieldNum, f.varintVal);
+            else if (f.wireType == PB::LengthDelimited)
+                newBody.WriteBytes(f.fieldNum, f.data, f.dataLen);
+            else if (f.wireType == PB::Fixed32)
+                newBody.WriteFixed32(f.fieldNum, (uint32_t)f.varintVal);
+            continue;
+        }
+
+        auto inner = PB::Parse(f.data, f.dataLen);
+        const auto* gameIdField = PB::FindField(inner, GP_FIELD_GAME_ID);
+        uint32_t appId = gameIdField ? (uint32_t)(gameIdField->varintVal & 0x00FFFFFF) : 0;
+        bool isNs = appId > 0 && IsNamespaceApp(appId);
+        auto existingInfo = PB::GetString(inner, GP_FIELD_GAME_EXTRA_INFO);
+
+        if (isNs && existingInfo.empty() && !IsPrivateApp(appId)) {
+            // Rebuild as non-Steam shortcut (CGameID type=2). Privacy enforced by
+            // IsPrivateApp() since friends server has no per-shortcut privacy.
+            const std::string& name = LookupGameName(appId);
+
+            // Build a shortcut-style CGameID: type=2, appId=0, modId=hash
+            // CGameID layout: bits 0-23 = appId, bits 24-31 = type, bits 32-63 = modId
+            // Hash the game name to produce a stable modId (like Steam does for shortcuts)
+            uint32_t modId = 0;
+            for (char c : name) modId = modId * 31 + (uint8_t)c;
+            modId |= 0x80000000; // set high bit like Steam shortcut hashes
+            uint64_t shortcutGameId = ((uint64_t)modId << 32) | (2ULL << 24); // type=2, appId=0
+
+            PB::Writer sub;
+            for (const auto& sf : inner) {
+                if (sf.fieldNum == GP_FIELD_GAME_ID) continue;         // replace with shortcut
+                if (sf.fieldNum == GP_FIELD_GAME_EXTRA_INFO) continue; // replace with title
+                if (sf.fieldNum == GP_FIELD_OWNER_ID) continue;        // clear
+                if (sf.wireType == PB::Varint)
+                    sub.WriteVarint(sf.fieldNum, sf.varintVal);
+                else if (sf.wireType == PB::Fixed64)
+                    sub.WriteFixed64(sf.fieldNum, sf.varintVal);
+                else if (sf.wireType == PB::LengthDelimited)
+                    sub.WriteBytes(sf.fieldNum, sf.data, sf.dataLen);
+                else if (sf.wireType == PB::Fixed32)
+                    sub.WriteFixed32(sf.fieldNum, (uint32_t)sf.varintVal);
+            }
+            sub.WriteFixed64(GP_FIELD_GAME_ID, shortcutGameId);
+            sub.WriteString(GP_FIELD_GAME_EXTRA_INFO, name);
+            sub.WriteVarint(GP_FIELD_OWNER_ID, 0);
+            newBody.WriteSubmessage(GP_FIELD_GAMES_PLAYED, sub);
+            LOG("[GamesPlayed] Injected game_extra_info for app %u: \"%s\"", appId, name.c_str());
+        } else {
+            if (isNs && existingInfo.empty() && IsPrivateApp(appId))
+                LOG("[GamesPlayed] App %u is marked private -- not injecting (respecting privacy)", appId);
+            newBody.WriteBytes(f.fieldNum, f.data, f.dataLen);
+        }
+    }
+
+    return {newBody.Data().begin(), newBody.Data().end()};
+}
+
 // OnSendPkt — vtable hook handles namespace Cloud RPCs; this is the fallback path.
 bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 
     if (!g_cloudRedirectEnabled.load(std::memory_order_relaxed)) return false;
     if (g_proxySending) return false;
-    // After Shutdown() the receive thread is gone; refuse new pushes so
-    // queued buffers don't leak.
     if (g_shuttingDown.load(std::memory_order_acquire)) return false;
 
-    // Drain inject queue here too: RecvPktMonitorHook only fires on inbound packets,
-    // and an idle steamclient (e.g. game stalled at launcher waiting for save downloads)
-    // can leave responses queued long enough for Steam to time the jobs out. Outbound
-    // packets are far more frequent during the cloud-RPC bursts that fill the queue.
+    // Drain queues on outbound too: inbound alone can't keep up during idle stalls.
     DrainInjectQueueOnNetThread();
+    DrainSchemaQueueOnNetThread();   // schema sends must run on the net thread
+    DrainPlaytimeUpdateQueueOnNetThread(); // live playtime push (touches CUser map)
 
-    // Try to discover the real CCMInterface via CSteamEngine global.
-    // This also installs the vtable hook once CCMInterface is found.
+    // Discover CCMInterface + install vtable hook if not yet found.
     TryFindCCMInterface();
 
     PacketView pkt;
@@ -4362,18 +6483,26 @@ bool OnSendPkt(void* thisptr, const uint8_t* data, uint32_t size) {
 
     uint64_t jobSrc = GetJobIdSource(pkt.header);
 
-    // capture SteamID and SessionID from first packet
-    if (g_steamId.load() == 0) {
+    // Capture SteamID + session from packet header. Detects account switches.
+    {
         auto* sidField = PB::FindField(pkt.header, HDR_STEAMID);
         if (sidField) {
-            g_steamId.store(sidField->varintVal);
-            LOG("[NS] Captured SteamID: %llu (accountId=%u)", g_steamId.load(), GetAccountId());
-            HttpServer::SetAccountId(GetAccountId());
-            ScheduleStartupMetadataSync();
+            uint64_t newSid = sidField->varintVal;
+            uint64_t prevSid = g_steamId.exchange(newSid);
+            bool firstCapture = !g_steamIdFromHeader.exchange(true);
+            bool switched = !firstCapture && prevSid != 0 && prevSid != newSid;
+            if (firstCapture || switched) {
+                LOG("[NS] Captured SteamID: %llu (accountId=%u)%s", newSid, GetAccountId(),
+                    switched ? " [ACCOUNT SWITCH]" : "");
+                HttpServer::SetAccountId(GetAccountId());
+                ScheduleStartupMetadataSync();
+            }
         }
-        auto* sessField = PB::FindField(pkt.header, HDR_SESSIONID);
-        if (sessField) {
-            g_sessionId.store((int32_t)sessField->varintVal);
+        if (g_sessionId.load() == 0) {
+            auto* sessField = PB::FindField(pkt.header, HDR_SESSIONID);
+            if (sessField) {
+                g_sessionId.store((int32_t)sessField->varintVal);
+            }
         }
     }
 
@@ -4621,6 +6750,18 @@ static void InstallExitProcessHook() {
         patchedModules, origAddr, hookAddr);
 }
 
+void DrainPlaytimeUpdates() {
+    DrainPlaytimeUpdateQueueOnNetThread();
+}
+
+void QueueLocalPlaytimePush(const std::vector<uint32_t>& endedApps) {
+    if (endedApps.empty()) return;
+    PB::Writer body = StatsHandlers::BuildLastPlayedNotificationBody(endedApps);
+    if (body.Size() == 0) return;
+    QueueLastPlayedUpdate(body.Data());
+    LOG("[Stats] Queued live playtime update for %zu local app(s)", endedApps.size());
+}
+
 // Shutdown entry points: ExitProcess IAT hook (production) and DllMain
 // DLL_PROCESS_DETACH with reserved==NULL. once_flag makes it idempotent.
 void Shutdown() {
@@ -4652,11 +6793,14 @@ static void ShutdownImpl() {
         }
     }
 
-    // Restore vtable pointers before DLL unload, but skip if steamclient64
-    // is gone (Steam's clean exit FreeLibrarys it before ExitProcess; the
-    // cached base then points at unmapped memory and VirtualProtect 487s).
-    // Also skip if hook drain timed out -- restoring slots with hooks in-flight
-    // risks control-flow corruption.
+    // Flush stats/playtime to cloud (hooks drained, store is safe).
+    StatsHandlers::Shutdown();
+
+    // Flush pending pushes before teardown, else a session ending right before close
+    // never persists. Safe here: steamclient64 is still mapped, vtable not yet restored.
+    DrainPlaytimeUpdateQueueOnNetThread();
+
+    // Restore vtable pointers; skip if steamclient64 unloaded or hook drain timed out.
     if (!hookDrainTimedOut && g_vtableHookInstalled.load(std::memory_order_acquire) && g_steamClientBase) {
         HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
         if (!currentSC) {
@@ -4686,12 +6830,14 @@ static void ShutdownImpl() {
             g_serializeToArray = nullptr;
             g_steamClientBase = (uintptr_t)currentSC;
         } else {
-            // Restore against the same vtable EA the install patched. If RTTI never resolved
-            // (shouldn't be possible while g_vtableHookInstalled is true), fall back to
-            // the hardcoded RVA to still attempt restore.
+            // Restore against installed vtable EA; fall back to resolved RVA.
             const uintptr_t vtableEa = g_serviceTransportVtableEa
                                        ? g_serviceTransportVtableEa
-                                       : (g_steamClientBase + SC_RVA_SERVICE_TRANSPORT_VT);
+                                       : (SC_RESOLVE(serviceTransportVtable));
+            if (!vtableEa) {
+                LOG("Shutdown: vtable EA not available, cannot restore slots");
+                g_vtableHookInstalled.store(false, std::memory_order_release);
+            } else {
             const uintptr_t vtableSlot4Addr = vtableEa + kSlot4Off;
             const uintptr_t vtableSlot5Addr = vtableEa + kSlot5Off;
             const uintptr_t vtableSlot7Addr = vtableEa + kSlot7Off;
@@ -4711,26 +6857,24 @@ static void ShutdownImpl() {
             } else {
                 LOG("Shutdown: VirtualProtect failed restoring vtable (%u)", GetLastError());
             }
+            }  // else (vtableEa valid)
         }
     }
 
-    // Restore the RecvPkt vtable slot in clientservice.dll. InstallRecvPktMonitor
-    // saved the slot address into g_recvPktSlot only on its success path, so a
-    // failed install leaves g_recvPktSlot null and we skip cleanly.
-    if (g_recvPktSlot && g_originalRecvPkt) {
+    // Restore RecvPkt inline detour (write back original prologue bytes).
+    if (g_recvPktDetourSite) {
         DWORD oldProt;
-        if (VirtualProtect(g_recvPktSlot, sizeof(void*), PAGE_READWRITE, &oldProt)) {
-            *g_recvPktSlot = reinterpret_cast<void*>(g_originalRecvPkt);
-            VirtualProtect(g_recvPktSlot, sizeof(void*), oldProt, &oldProt);
-            LOG("Shutdown: restored RecvPkt slot (%p -> %p)", g_recvPktSlot, g_originalRecvPkt);
-        } else {
-            LOG("Shutdown: VirtualProtect failed restoring RecvPkt slot (%u)", GetLastError());
+        if (VirtualProtect(g_recvPktDetourSite, TRAMPOLINE_COPY, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            memcpy(g_recvPktDetourSite, g_recvPktOrigBytes, TRAMPOLINE_COPY);
+            FlushInstructionCache(GetCurrentProcess(), g_recvPktDetourSite, TRAMPOLINE_COPY);
+            VirtualProtect(g_recvPktDetourSite, TRAMPOLINE_COPY, oldProt, &oldProt);
+            LOG("Shutdown: restored RecvPkt detour at %p", g_recvPktDetourSite);
         }
-        g_recvPktSlot = nullptr;
+        g_recvPktDetourSite = nullptr;
+        // Trampoline page deliberately leaked (another thread may be mid-trampoline).
     }
 
-    // No new InjectResponse pushes can land after vtable restore + ref spin;
-    // drop any pre-shutdown enqueues since RecvPktMonitorHook now bails.
+    // Drop pre-shutdown inject queue entries (RecvPktMonitorHook bails now).
     DrainInjectQueueOnShutdown();
 
     // Restore BuildDepotDependency detour; trampoline page is leaked deliberately (mid-trampoline thread would AV); ExitProcess reclaims it.
@@ -4753,6 +6897,58 @@ static void ShutdownImpl() {
         g_bddTrampoline = nullptr;
         g_origBuildDepotDependency = nullptr;
         g_bddOrigAddr = nullptr;
+    }
+
+    // Restore BAsyncSend detour
+    if (g_basOrigAddr) {
+        HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
+        if (currentSC) {
+            DWORD oldProt;
+            if (VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                memcpy(g_basOrigAddr, g_basTrampoline, SC_BAS_STOLEN_BYTES);
+                FlushInstructionCache(GetCurrentProcess(), g_basOrigAddr, SC_BAS_STOLEN_BYTES);
+                VirtualProtect(g_basOrigAddr, SC_BAS_STOLEN_BYTES, oldProt, &oldProt);
+            }
+        }
+        g_basOriginal = nullptr;
+        g_basOrigAddr = nullptr;
+    }
+
+    if (g_manifestEndpointPatched.load(std::memory_order_acquire)) {
+        DWORD oldProt;
+        if (g_manifestP8bAddr &&
+            VirtualProtect(g_manifestP8bAddr, 51, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            memcpy(g_manifestP8bAddr, g_manifestP8bOrig, 51);
+            VirtualProtect(g_manifestP8bAddr, 51, oldProt, &oldProt);
+            FlushInstructionCache(GetCurrentProcess(), g_manifestP8bAddr, 51);
+        }
+        if (g_manifestUrlLeaAddr &&
+            VirtualProtect(g_manifestUrlLeaAddr, 4, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            memcpy(g_manifestUrlLeaAddr, g_manifestUrlLeaOrig, 4);
+            VirtualProtect(g_manifestUrlLeaAddr, 4, oldProt, &oldProt);
+            FlushInstructionCache(GetCurrentProcess(), g_manifestUrlLeaAddr, 4);
+        }
+        if (g_manifestStringsPage) {
+            VirtualFree(g_manifestStringsPage, 0, MEM_RELEASE);
+            g_manifestStringsPage = nullptr;
+        }
+        g_manifestEndpointPatched.store(false, std::memory_order_release);
+    }
+
+    // Restore GetEffectiveReleaseState prologue
+    if (g_releaseStateAddr && g_releaseStatePatched.load(std::memory_order_acquire)) {
+        HMODULE currentSC = GetModuleHandleA("steamclient64.dll");
+        if (currentSC) {
+            DWORD oldProt;
+            if (VirtualProtect(g_releaseStateAddr, 6, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                memcpy(g_releaseStateAddr, g_releaseStateOrig, 6);
+                FlushInstructionCache(GetCurrentProcess(), g_releaseStateAddr, 6);
+                VirtualProtect(g_releaseStateAddr, 6, oldProt, &oldProt);
+                LOG("Shutdown: restored GetEffectiveReleaseState prologue");
+            }
+        }
+        g_releaseStatePatched.store(false, std::memory_order_release);
+        g_releaseStateAddr = nullptr;
     }
 
     // Both threads poll g_shuttingDown; 5s is generous. Stuck network I/O

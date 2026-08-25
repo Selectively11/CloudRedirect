@@ -1,6 +1,7 @@
 #pragma once
 #include "cloud_rpc_utils.h"
 #include "protobuf.h"
+#include "batch_merge.h"
 #include <vector>
 
 namespace CloudIntercept {
@@ -53,7 +54,6 @@ RpcResult HandleCompleteBatch(uint32_t appId, const std::vector<PB::Field>& reqB
 RpcResult HandleFileDownload(uint32_t appId, const std::vector<PB::Field>& reqBody);
 RpcResult HandleDeleteFile(uint32_t appId, const std::vector<PB::Field>& reqBody);
 
-void RestoreAppMetadata(uint32_t accountId, uint32_t appId);
 void ShutdownRpcHandlers();
 
 void RecordConflictResolution(uint32_t appId, bool choseLocal);
@@ -61,9 +61,5 @@ bool ConsumeConflictLocalChoice(uint32_t appId);
 
 // Flush pending sync icon states to registry.vdf (Linux, called from OnUnload).
 void FlushPendingSyncStates();
-
-// True if the UserGameStats blob has any non-zero stat/achievement data.
-// Empty stubs and unparseable input return false.
-bool StatsBlobHasUnlocks(const uint8_t* data, size_t len);
 
 } // namespace CloudIntercept

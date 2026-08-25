@@ -23,6 +23,8 @@ public:
     std::vector<std::string> ListSubfolders(const std::string& prefix) override;
     bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
                      bool* outComplete = nullptr) override;
+    std::vector<SearchHit> SearchByName(const std::string& filename,
+                                        bool* outSupported = nullptr) override;
 
 protected:
     // CloudProviderBase hooks
@@ -106,6 +108,15 @@ private:
     UploadStatus UploadOrUpdate(const std::string& name, const std::string& folderId,
                                 const uint8_t* data, size_t len, int64_t timestamp,
                                 const std::string& existingId = {});
+    UploadStatus ResumableUpload(const std::string& name, const std::string& folderId,
+                                 const uint8_t* data, size_t len,
+                                 const std::string& metaJson,
+                                 const std::string& existingId);
+    bool MoveFileToFolder(const std::string& fileId, const std::string& oldParentId,
+                          const std::string& newParentId);
+    bool RenameDriveItem(const std::string& itemId, const std::string& newName);
+    void MergeDuplicateFolder(const std::string& keepId, const std::string& dupId,
+                              const std::string& folderName, const std::string& parentId);
     bool DeleteById(const std::string& fileId);
     LookupStatus ResolvePath(uint32_t accountId, uint32_t appId, const std::string& filename,
                              std::string& outParentId, std::string& outLeafName,

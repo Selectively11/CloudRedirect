@@ -8,15 +8,23 @@
 #include "local_storage.h"
 #include "pending_ops_journal.h"
 #include "cloud_provider.h"
+#include "file_util.h"
 #include "json.h"
 #include "log.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <sstream>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <algorithm>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -24,11 +32,10 @@
 #else
 #include <unistd.h>
 #include <pwd.h>
+#include "xdg.h"
 #endif
 
 namespace CloudRedirectCli {
-
-// ── Platform-specific paths ─────────────────────────────────────────────
 
 static std::string GetConfigDir() {
 #ifdef _WIN32
@@ -42,13 +49,7 @@ static std::string GetConfigDir() {
     }
     return "";
 #else
-    const char* home = getenv("HOME");
-    if (!home) {
-        struct passwd* pw = getpwuid(getuid());
-        if (pw) home = pw->pw_dir;
-    }
-    if (!home) return "";
-    return std::string(home) + "/.config/CloudRedirect/";
+    return XdgConfigHome() + "/CloudRedirect/";
 #endif
 }
 
@@ -56,32 +57,22 @@ static std::string GetTokenPath(const std::string& provider) {
     std::string configDir = GetConfigDir();
     if (configDir.empty()) return "";
 
-    std::string configPath = configDir;
-    configPath += "config.json";
-
+    std::string configJson;
+    std::string configPath = configDir + "config.json";
     FILE* f = fopen(configPath.c_str(), "rb");
     if (f) {
         fseek(f, 0, SEEK_END);
         long len = ftell(f);
         if (len >= 0) {
             rewind(f);
-            std::string json((size_t)len, '\0');
-            size_t read = fread(json.data(), 1, (size_t)len, f);
-            fclose(f);
-            json.resize(read);
-
-            Json::Value root = Json::Parse(json);
-            if (root.type == Json::Type::Object && root.has("provider") && root["provider"].str() == provider &&
-                root.has("token_path") && root["token_path"].type == Json::Type::String &&
-                !root["token_path"].str().empty()) {
-                return root["token_path"].str();
-            }
-        } else {
-            fclose(f);
+            configJson.resize((size_t)len);
+            size_t read = fread(configJson.data(), 1, (size_t)len, f);
+            configJson.resize(read);
         }
+        fclose(f);
     }
 
-    return configDir + "tokens_" + provider + ".json";
+    return ResolveProviderTokenPath(configDir, configJson, provider);
 }
 
 static std::string NormalizeCloudRoot(std::string cloudRoot) {
@@ -93,8 +84,6 @@ static std::string NormalizeCloudRoot(std::string cloudRoot) {
 #endif
     return cloudRoot;
 }
-
-// ── JSON helpers ────────────────────────────────────────────────────────
 
 static std::string JsonEscape(const std::string& s) {
     std::ostringstream out;
@@ -111,7 +100,7 @@ static std::string JsonEscape(const std::string& s) {
     return out.str();
 }
 
-static std::string JsonObject(std::initializer_list<std::pair<std::string, std::string>> fields) {
+static std::string JsonObject(const std::vector<std::pair<std::string, std::string>>& fields) {
     std::ostringstream out;
     out << "{";
     bool first = true;
@@ -122,6 +111,12 @@ static std::string JsonObject(std::initializer_list<std::pair<std::string, std::
     }
     out << "}";
     return out.str();
+}
+
+// initializer_list overload so existing call sites using brace lists keep
+// working; forwards to the vector implementation.
+static std::string JsonObject(std::initializer_list<std::pair<std::string, std::string>> fields) {
+    return JsonObject(std::vector<std::pair<std::string, std::string>>(fields));
 }
 
 static std::string JsonString(const std::string& s) {
@@ -143,8 +138,6 @@ static std::string JsonError(const std::string& message) {
 static std::string JsonSuccess() {
     return JsonObject({{"success", JsonBool(true)}});
 }
-
-// ── Command implementations ─────────────────────────────────────────────
 
 std::string CmdAuthStatus(const std::string& provider) {
     std::string tokenPath = GetTokenPath(provider);
@@ -394,8 +387,6 @@ std::string CmdListBlobs(const std::string& provider, const std::string& account
         return JsonError("Not authenticated");
     }
     
-    // List files under accountId/appId/blobs/ while preserving the provider's
-    // verified-complete flag. Orphan pruning must refuse partial listings.
     std::string prefix = accountId + "/" + appId + "/blobs/";
     std::vector<ICloudProvider::FileInfo> files;
     bool complete = false;
@@ -435,6 +426,138 @@ std::string CmdListBlobs(const std::string& provider, const std::string& account
         {"success", JsonBool(true)},
         {"complete", JsonBool(complete)},
         {"blobs", blobs.str()}
+    });
+}
+
+// Search cloud for all stats.json files; returns JSON array of {account_id, app_id, content}.
+std::string CmdListAllStats(const std::string& provider) {
+    std::string tokenPath = GetTokenPath(provider);
+    if (tokenPath.empty()) {
+        return JsonError("Cannot determine config directory");
+    }
+
+    auto prov = CreateCloudProvider(provider);
+    if (!prov) {
+        return JsonError("Unknown provider: " + provider);
+    }
+    if (!prov->Init(tokenPath)) {
+        return JsonError("Failed to initialize provider");
+    }
+    if (!prov->IsAuthenticated()) {
+        prov->Shutdown();
+        return JsonError("Not authenticated");
+    }
+
+    bool supported = false;
+    auto hits = prov->SearchByName("stats.json", &supported);
+
+    if (!supported) {
+        // Providers without server-side search (S3/R2/local): enumerate the
+        // bucket and fetch every stats.json ourselves.
+        const std::string suffix = "/stats.json";
+        for (const auto& f : prov->List("")) {
+            if (f.path.size() < suffix.size() ||
+                f.path.compare(f.path.size() - suffix.size(), suffix.size(), suffix) != 0)
+                continue;
+            ICloudProvider::SearchHit hit;
+            hit.path = f.path;
+            if (prov->Download(f.path, hit.content))
+                hits.push_back(std::move(hit));
+        }
+    }
+
+    prov->Shutdown();
+
+    const std::string accountScope = "0";
+    std::unordered_set<std::string> seen;  // "<account>/<app>"
+    std::ostringstream apps;
+    apps << "[";
+    bool first = true;
+
+    auto emit = [&](const std::string& accountId, const std::string& appId,
+                    const std::string& content) {
+        if (!seen.insert(accountId + "/" + appId).second) return;
+        if (!first) apps << ",";
+        apps << JsonObject({
+            {"account_id", JsonString(accountId)},
+            {"app_id", JsonString(appId)},
+            {"content", JsonString(content)}
+        });
+        first = false;
+    };
+
+    // Pass 1: account-scope blobs first so they win de-dup over legacy files.
+    // Pass 2: legacy per-app blobs for un-migrated apps.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& h : hits) {
+            // h.path is "<accountId>/<appId>/stats.json".
+            size_t s1 = h.path.find('/');
+            if (s1 == std::string::npos) continue;
+            size_t s2 = h.path.find('/', s1 + 1);
+            if (s2 == std::string::npos) continue;
+            std::string accountId = h.path.substr(0, s1);
+            std::string appId = h.path.substr(s1 + 1, s2 - s1 - 1);
+            bool isAccountBlob = (appId == accountScope);
+            if (isAccountBlob != (pass == 0)) continue;
+            std::string content(
+                reinterpret_cast<const char*>(h.content.data()), h.content.size());
+
+            if (isAccountBlob) {
+                // {"<appId>": {stats...}} -> one entry per app.
+                Json::Value root = Json::Parse(content);
+                if (root.type != Json::Type::Object) continue;
+                for (const auto& [appIdStr, appVal] : root.objVal) {
+                    if (appIdStr == accountScope) continue;
+                    emit(accountId, appIdStr, Json::Stringify(appVal));
+                }
+            } else {
+                emit(accountId, appId, content);
+            }
+        }
+    }
+    apps << "]";
+    return std::string("{\"success\":true,\"apps\":") + apps.str() + "}";
+}
+
+std::string CmdDownloadBlob(const std::string& provider, const std::string& accountId,
+                            const std::string& appId, const std::string& blobName) {
+    std::string tokenPath = GetTokenPath(provider);
+    if (tokenPath.empty()) {
+        return JsonError("Cannot determine config directory");
+    }
+
+    auto prov = CreateCloudProvider(provider);
+    if (!prov) {
+        return JsonError("Unknown provider: " + provider);
+    }
+
+    if (!prov->Init(tokenPath)) {
+        return JsonError("Failed to initialize provider");
+    }
+
+    if (!prov->IsAuthenticated()) {
+        prov->Shutdown();
+        return JsonError("Not authenticated");
+    }
+
+    std::string path = accountId + "/" + appId + "/" + blobName;
+    std::vector<uint8_t> data;
+    bool ok = prov->Download(path, data);
+    prov->Shutdown();
+
+    if (!ok) {
+        return JsonObject({
+            {"success", JsonBool(false)},
+            {"found", JsonBool(false)},
+            {"error", JsonString("Blob not found")}
+        });
+    }
+
+    std::string content(reinterpret_cast<const char*>(data.data()), data.size());
+    return JsonObject({
+        {"success", JsonBool(true)},
+        {"found", JsonBool(true)},
+        {"content", JsonString(content)}
     });
 }
 
@@ -705,6 +828,395 @@ std::string CmdPublishFullManifest(const std::string& provider, const std::strin
     });
 }
 
+static std::string ReadSyncPath() {
+    std::string configDir = GetConfigDir();
+    if (configDir.empty()) return "";
+
+    FILE* f = fopen((configDir + "config.json").c_str(), "rb");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    if (len <= 0) { fclose(f); return ""; }
+    rewind(f);
+    std::string json((size_t)len, '\0');
+    json.resize(fread(json.data(), 1, (size_t)len, f));
+    fclose(f);
+
+    Json::Value root = Json::Parse(json);
+    if (root.type == Json::Type::Object && root.has("sync_path") &&
+        root["sync_path"].type == Json::Type::String)
+        return root["sync_path"].str();
+    return "";
+}
+
+static std::string FindInterceptStorageRoot() {
+    std::string configDir = GetConfigDir();
+    if (!configDir.empty()) {
+        std::string configStorage = configDir + "storage";
+        std::error_code ec;
+        if (std::filesystem::is_directory(FileUtil::Utf8ToPath(configStorage), ec))
+            return configStorage;
+    }
+
+#ifdef _WIN32
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\Valve\\Steam", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        char buf[512] = {};
+        DWORD bufSize = sizeof(buf) - 1;
+        DWORD type = 0;
+        if (RegQueryValueExA(hKey, "SteamPath", nullptr, &type, (LPBYTE)buf, &bufSize) == ERROR_SUCCESS &&
+            (type == REG_SZ || type == REG_EXPAND_SZ)) {
+            RegCloseKey(hKey);
+            std::string steamPath(buf);
+            for (char& c : steamPath) { if (c == '/') c = '\\'; }
+            if (!steamPath.empty() && steamPath.back() != '\\') steamPath += '\\';
+            return steamPath + "cloud_redirect\\storage";
+        }
+        RegCloseKey(hKey);
+    }
+#else
+    const char* home = getenv("HOME");
+    if (home) {
+        std::string paths[] = {
+            std::string(home) + "/.steam/steam/cloud_redirect/storage",
+            std::string(home) + "/.local/share/Steam/cloud_redirect/storage",
+        };
+        namespace fs = std::filesystem;
+        for (auto& p : paths) {
+            std::error_code ec;
+            if (fs::is_directory(FileUtil::Utf8ToPath(p), ec)) return p;
+        }
+    }
+#endif
+    return "";
+}
+
+static std::string FindStorageRoot(const std::string& provider) {
+    if (provider == "folder" || provider == "local") {
+        std::string sp = ReadSyncPath();
+        if (!sp.empty()) return sp;
+    }
+    return FindInterceptStorageRoot();
+}
+
+static std::vector<std::string> DiscoverAccountIds(const std::string& provider) {
+    std::string storageRoot = FindStorageRoot(provider);
+    fprintf(stderr, "[scan] provider=%s storage root=%s\n",
+            provider.c_str(), storageRoot.empty() ? "(none)" : storageRoot.c_str());
+    if (storageRoot.empty()) return {};
+
+    std::vector<std::string> accounts;
+    try {
+        namespace fs = std::filesystem;
+        for (auto& entry : fs::directory_iterator(FileUtil::Utf8ToPath(storageRoot))) {
+            if (!entry.is_directory()) continue;
+            std::string name = FileUtil::PathToUtf8(entry.path().filename());
+            if (name.empty() || name == "0" || name == "stats") continue;
+            // Verify it looks like a numeric account ID.
+            bool numeric = true;
+            for (char c : name) { if (c < '0' || c > '9') { numeric = false; break; } }
+            if (numeric) accounts.push_back(name);
+        }
+    } catch (...) {}
+
+    std::sort(accounts.begin(), accounts.end());
+    fprintf(stderr, "[scan] discovered %zu account(s)\n", accounts.size());
+    return accounts;
+}
+
+static bool ListAllFiles(ICloudProvider* prov,
+                         const std::string& provider,
+                         std::vector<ICloudProvider::FileInfo>& outFiles,
+                         bool& outComplete,
+                         const std::function<void(const std::string& phase,
+                                                  const std::string& message,
+                                                  int64_t done, int64_t total,
+                                                  int64_t found)>& onStatus) {
+    outFiles.clear();
+    outComplete = false;
+
+    // Try flat listing first (works for R2).
+    if (onStatus) onStatus("scanning", "Scanning cloud storage...", -1, -1, -1);
+    if (prov->ListChecked("", outFiles, &outComplete)) {
+        if (onStatus)
+            onStatus("scanning", "Found " + std::to_string(outFiles.size()) + " item(s)",
+                     -1, -1, static_cast<int64_t>(outFiles.size()));
+        return true;
+    }
+
+    // Flat listing failed — fall back to per-account enumeration.
+    if (onStatus) onStatus("discovering", "Discovering accounts...", -1, -1, -1);
+    auto accountIds = DiscoverAccountIds(provider);
+    if (accountIds.empty()) return false;
+
+    int64_t acctTotal = static_cast<int64_t>(accountIds.size());
+    if (onStatus)
+        onStatus("discovering", "Found " + std::to_string(acctTotal) + " account(s)",
+                 0, acctTotal, 0);
+
+    outComplete = true;
+    int64_t acctDone = 0;
+    for (const auto& acct : accountIds) {
+        acctDone++;
+        if (onStatus)
+            onStatus("scanning",
+                     "Scanning account " + std::to_string(acctDone) + " of " +
+                         std::to_string(acctTotal) + "...",
+                     acctDone, acctTotal, static_cast<int64_t>(outFiles.size()));
+
+        std::vector<ICloudProvider::FileInfo> acctFiles;
+        bool acctComplete = false;
+        if (!prov->ListChecked(acct + "/", acctFiles, &acctComplete)) {
+            return false;
+        }
+        if (!acctComplete) outComplete = false;
+        for (auto& fi : acctFiles) {
+            outFiles.push_back(std::move(fi));
+        }
+
+        if (onStatus)
+            onStatus("scanning",
+                     "Found " + std::to_string(outFiles.size()) + " file(s) so far",
+                     acctDone, acctTotal, static_cast<int64_t>(outFiles.size()));
+    }
+    return true;
+}
+
+std::string CmdScanAll(const std::string& provider) {
+    std::string tokenPath = GetTokenPath(provider);
+    if (tokenPath.empty()) {
+        return JsonError("Cannot determine config directory");
+    }
+
+    auto prov = CreateCloudProvider(provider);
+    if (!prov) {
+        return JsonError("Unknown provider: " + provider);
+    }
+    if (!prov->Init(tokenPath)) {
+        return JsonError("Failed to initialize provider");
+    }
+    if (!prov->IsAuthenticated()) {
+        prov->Shutdown();
+        return JsonError("Not authenticated");
+    }
+
+    // Discover accounts from local storage.
+    auto accountIds = DiscoverAccountIds(provider);
+    if (accountIds.empty()) {
+        prov->Shutdown();
+        return JsonError("No accounts found in local storage");
+    }
+
+    // For each account, list app folder names (shallow — no file enumeration).
+    std::ostringstream out;
+    out << "[";
+    bool firstApp = true;
+    for (const auto& acct : accountIds) {
+        auto appIds = prov->ListSubfolders(acct + "/");
+        for (const auto& appId : appIds) {
+            if (appId.empty() || appId == "0") continue;
+            if (!firstApp) out << ",";
+            out << JsonObject({
+                {"account_id", JsonString(acct)},
+                {"app_id", JsonString(appId)}
+            });
+            firstApp = false;
+        }
+    }
+    out << "]";
+
+    prov->Shutdown();
+
+    return JsonObject({
+        {"success", JsonBool(true)},
+        {"apps", out.str()}
+    });
+}
+
+int CmdMigrate(const std::string& srcProvider, const std::string& dstProvider) {
+    // Flush each progress line immediately so the UI can parse in real-time.
+    auto emitLine = [](const std::string& json) {
+        printf("%s\n", json.c_str());
+        fflush(stdout);
+    };
+
+    // Resolve token paths for both providers.
+    std::string srcTokenPath = GetTokenPath(srcProvider);
+    if (srcTokenPath.empty()) {
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Cannot determine config directory for source provider")}}));
+        return 1;
+    }
+    std::string dstTokenPath = GetTokenPath(dstProvider);
+    if (dstTokenPath.empty()) {
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Cannot determine config directory for dest provider")}}));
+        return 1;
+    }
+
+    auto emitStatus = [&emitLine](const std::string& phase, const std::string& message,
+                                  int64_t done, int64_t total, int64_t found) {
+        std::vector<std::pair<std::string, std::string>> obj = {
+            {"type", JsonString("status")},
+            {"phase", JsonString(phase)},
+            {"message", JsonString(message)},
+        };
+        if (done >= 0) obj.push_back({"done", JsonInt(done)});
+        if (total >= 0) obj.push_back({"total", JsonInt(total)});
+        if (found >= 0) obj.push_back({"found", JsonInt(found)});
+        emitLine(JsonObject(obj));
+    };
+
+    emitStatus("authenticating", "Connecting to " + srcProvider + "...", -1, -1, -1);
+
+    // Create and init source provider.
+    auto src = CreateCloudProvider(srcProvider);
+    if (!src) {
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Unknown source provider: " + srcProvider)}}));
+        return 1;
+    }
+    if (!src->Init(srcTokenPath)) {
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Failed to initialize source provider")}}));
+        return 1;
+    }
+    if (!src->IsAuthenticated()) {
+        src->Shutdown();
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Source provider not authenticated")}}));
+        return 1;
+    }
+
+    emitStatus("authenticating", "Connecting to " + dstProvider + "...", -1, -1, -1);
+
+    // Create and init dest provider.
+    auto dst = CreateCloudProvider(dstProvider);
+    if (!dst) {
+        src->Shutdown();
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Unknown dest provider: " + dstProvider)}}));
+        return 1;
+    }
+    if (!dst->Init(dstTokenPath)) {
+        src->Shutdown();
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Failed to initialize dest provider")}}));
+        return 1;
+    }
+    if (!dst->IsAuthenticated()) {
+        src->Shutdown();
+        dst->Shutdown();
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Dest provider not authenticated")}}));
+        return 1;
+    }
+
+    std::vector<ICloudProvider::FileInfo> files;
+    bool complete = false;
+    if (!ListAllFiles(src.get(), srcProvider, files, complete, emitStatus)) {
+        src->Shutdown();
+        dst->Shutdown();
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Failed to list source files")}}));
+        return 1;
+    }
+    if (!complete) {
+        src->Shutdown();
+        dst->Shutdown();
+        emitLine(JsonObject({{"type", JsonString("error")},
+                             {"message", JsonString("Source listing incomplete — aborting to avoid partial migration")}}));
+        return 1;
+    }
+
+    // Filter out directory markers (trailing slash) — only real files.
+    std::vector<ICloudProvider::FileInfo> realFiles;
+    realFiles.reserve(files.size());
+    for (auto& f : files) {
+        if (!f.path.empty() && f.path.back() != '/') {
+            realFiles.push_back(std::move(f));
+        }
+    }
+
+    int64_t total = static_cast<int64_t>(realFiles.size());
+    emitLine(JsonObject({{"type", JsonString("start")}, {"total", JsonInt(total)}}));
+
+    int64_t done = 0;
+    int64_t migrated = 0;
+    int64_t skipped = 0;
+    int64_t failed = 0;
+    uint64_t totalBytes = 0;
+
+    for (const auto& f : realFiles) {
+        done++;
+
+        auto exists = dst->CheckExists(f.path);
+        for (int retry = 0; exists == ICloudProvider::ExistsStatus::Error && retry < 3; retry++) {
+            exists = dst->CheckExists(f.path);
+        }
+        if (exists == ICloudProvider::ExistsStatus::Exists) {
+            skipped++;
+            emitLine(JsonObject({{"type", JsonString("skip")},
+                                 {"file", JsonString(f.path)},
+                                 {"done", JsonInt(done)},
+                                 {"total", JsonInt(total)},
+                                 {"reason", JsonString("exists")}}));
+            continue;
+        }
+        if (exists == ICloudProvider::ExistsStatus::Error) {
+            failed++;
+            emitLine(JsonObject({{"type", JsonString("error")},
+                                 {"file", JsonString(f.path)},
+                                 {"done", JsonInt(done)},
+                                 {"total", JsonInt(total)},
+                                 {"message", JsonString("Existence check failed")}}));
+            continue;
+        }
+
+        // Download from source.
+        std::vector<uint8_t> data;
+        if (!src->Download(f.path, data)) {
+            failed++;
+            emitLine(JsonObject({{"type", JsonString("error")},
+                                 {"file", JsonString(f.path)},
+                                 {"done", JsonInt(done)},
+                                 {"total", JsonInt(total)},
+                                 {"message", JsonString("Download failed")}}));
+            continue;
+        }
+
+        // Upload to dest.
+        if (!dst->Upload(f.path, data.data(), data.size())) {
+            failed++;
+            emitLine(JsonObject({{"type", JsonString("error")},
+                                 {"file", JsonString(f.path)},
+                                 {"done", JsonInt(done)},
+                                 {"total", JsonInt(total)},
+                                 {"message", JsonString("Upload failed")}}));
+            continue;
+        }
+
+        migrated++;
+        totalBytes += data.size();
+        emitLine(JsonObject({{"type", JsonString("progress")},
+                             {"file", JsonString(f.path)},
+                             {"done", JsonInt(done)},
+                             {"total", JsonInt(total)},
+                             {"bytes", JsonInt(static_cast<int64_t>(data.size()))}}));
+    }
+
+    src->Shutdown();
+    dst->Shutdown();
+
+    emitLine(JsonObject({{"type", JsonString("complete")},
+                         {"migrated", JsonInt(migrated)},
+                         {"skipped", JsonInt(skipped)},
+                         {"failed", JsonInt(failed)},
+                         {"total_bytes", JsonInt(static_cast<int64_t>(totalBytes))}}));
+
+    return (failed == 0) ? 0 : 1;
+}
+
 std::string CmdGcBlobs(const std::string& provider, const std::string& accountId, const std::string& appId,
                        const std::string& cloudRootArg) {
     std::string tokenPath = GetTokenPath(provider);
@@ -760,8 +1272,6 @@ std::string CmdGcBlobs(const std::string& provider, const std::string& accountId
     });
 }
 
-// ── CLI entry point ─────────────────────────────────────────────────────
-
 bool IsCliMode(int argc, char** argv) {
     return argc >= 2 && strcmp(argv[1], "--cli") == 0;
 }
@@ -775,13 +1285,17 @@ static void PrintUsage() {
     fprintf(stderr, "  list-remote-app-files <provider> <account_id> <app_id>  List every file path in one remote app\n");
     fprintf(stderr, "  delete-remote-app <provider> <account_id> <app_id>  Delete app from cloud\n");
     fprintf(stderr, "  list-blobs <provider> <account_id> <app_id>  List blob files in app\n");
+    fprintf(stderr, "  download-blob <provider> <account_id> <app_id> <blob>  Download a single blob's content\n");
+    fprintf(stderr, "  list-all-stats <provider>  Search the cloud for every app's stats.json\n");
     fprintf(stderr, "  delete-blobs <provider> <account_id> <app_id> <blob>...  Delete specific blobs\n");
     fprintf(stderr, "  sync-remote-app <provider> <account_id> <app_id> <cloud_root>  Run SyncFromCloud for one app\n");
     fprintf(stderr, "  sync-all-remote-apps <provider> <account_id> <cloud_root>  Run SyncAllFromCloud for one account\n");
     fprintf(stderr, "  prune-local-legacy-metadata <cloud_root>  Remove local legacy metadata siblings where safe\n");
     fprintf(stderr, "  publish-full-manifest <provider> <account_id> <app_id> <cloud_root>  Publish local inventory manifest and CN\n");
     fprintf(stderr, "  gc-blobs <provider> <account_id> <app_id> <cloud_root>  Delete unreferenced SHA blobs from cloud\n");
-    fprintf(stderr, "\nProviders: gdrive, onedrive\n");
+    fprintf(stderr, "  scan-all <provider>                                       List all apps across all accounts (single-pass)\n");
+    fprintf(stderr, "  migrate <src_provider> <dst_provider>                     Copy all cloud data from one provider to another\n");
+    fprintf(stderr, "\nProviders: gdrive, onedrive, r2, s3\n");
 }
 
 int RunCli(int argc, char** argv) {
@@ -836,6 +1350,20 @@ int RunCli(int argc, char** argv) {
         }
         result = CmdListBlobs(argv[3], argv[4], argv[5]);
     }
+    else if (strcmp(command, "download-blob") == 0) {
+        if (argc < 7) {
+            fprintf(stderr, "Error: download-blob requires <provider> <account_id> <app_id> <blob>\n");
+            return 1;
+        }
+        result = CmdDownloadBlob(argv[3], argv[4], argv[5], argv[6]);
+    }
+    else if (strcmp(command, "list-all-stats") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Error: list-all-stats requires <provider>\n");
+            return 1;
+        }
+        result = CmdListAllStats(argv[3]);
+    }
     else if (strcmp(command, "delete-blobs") == 0) {
         if (argc < 7) {
             fprintf(stderr, "Error: delete-blobs requires <provider> <account_id> <app_id> <blob>...\n");
@@ -881,6 +1409,21 @@ int RunCli(int argc, char** argv) {
             return 1;
         }
         result = CmdGcBlobs(argv[3], argv[4], argv[5], argv[6]);
+    }
+    else if (strcmp(command, "scan-all") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "Error: scan-all requires <provider>\n");
+            return 1;
+        }
+        result = CmdScanAll(argv[3]);
+    }
+    else if (strcmp(command, "migrate") == 0) {
+        if (argc < 5) {
+            fprintf(stderr, "Error: migrate requires <src_provider> <dst_provider>\n");
+            return 1;
+        }
+        // migrate streams its own output and returns an exit code directly.
+        return CmdMigrate(argv[3], argv[4]);
     }
     else {
         fprintf(stderr, "Unknown command: %s\n", command);

@@ -10,79 +10,81 @@
         <conv:UrlToImageSourceConverter x:Key="UrlToImageSource" />
     </Page.Resources>
 
+    <!-- One natural page scrollbar (window edge). The whole page scrolls as a
+         single region; the per-app list is a plain ItemsControl that grows with
+         content rather than owning its own scrollbar. -->
     <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="24">
         <StackPanel MaxWidth="800">
-            <TextBlock Text="{res:Loc Settings_ManifestPinning}"
-                       FontSize="28" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,4" />
+                <TextBlock Text="{res:Loc Settings_ManifestPinning}"
+                           FontSize="28" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,4" />
 
-            <TextBlock Text="{res:Loc Settings_ManifestPinningHint}"
-                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,24" />
+                <TextBlock Text="{res:Loc Settings_ManifestPinningHint}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,24" />
 
-            <ui:CardControl Margin="0,0,0,8">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Settings_ManifestPinningEnabled}"
-                                   FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{res:Loc Settings_ManifestPinningEnabledHint}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:ToggleSwitch x:Name="ManifestPinningToggle"
-                                 Checked="PinToggle_Changed"
-                                 Unchecked="PinToggle_Changed" />
-            </ui:CardControl>
+                <ui:CardControl Margin="0,0,0,8">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_ManifestPinningEnabled}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_ManifestPinningEnabledHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="ManifestPinningToggle"
+                                     Checked="PinToggle_Changed"
+                                     Unchecked="PinToggle_Changed" />
+                </ui:CardControl>
 
-            <ui:CardControl Margin="0,0,0,32">
-                <ui:CardControl.Header>
-                    <StackPanel>
-                        <TextBlock Text="{res:Loc Settings_AutoComment}"
-                                   FontWeight="SemiBold"
-                                   Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
-                        <TextBlock Text="{res:Loc Settings_AutoCommentHint}"
-                                   Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </ui:CardControl.Header>
-                <ui:ToggleSwitch x:Name="AutoCommentToggle"
-                                 Checked="PinToggle_Changed"
-                                 Unchecked="PinToggle_Changed" />
-            </ui:CardControl>
+                <ui:CardControl Margin="0,0,0,32">
+                    <ui:CardControl.Header>
+                        <StackPanel>
+                            <TextBlock Text="{res:Loc Settings_AutoComment}"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="{res:Loc Settings_AutoCommentHint}"
+                                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </ui:CardControl.Header>
+                    <ui:ToggleSwitch x:Name="AutoCommentToggle"
+                                     Checked="PinToggle_Changed"
+                                     Unchecked="PinToggle_Changed" />
+                </ui:CardControl>
 
-            <!-- Per-app lua pins -->
-            <TextBlock Text="{res:Loc Pin_PerAppTitle}"
-                       FontSize="20" FontWeight="SemiBold"
-                       Foreground="{DynamicResource TextFillColorPrimaryBrush}"
-                       Margin="0,0,0,4" />
+                <!-- Per-app lua pins -->
+                <TextBlock Text="{res:Loc Pin_PerAppTitle}"
+                           FontSize="20" FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                           Margin="0,0,0,4" />
 
-            <TextBlock Text="{res:Loc Pin_PerAppHint}"
-                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,16" />
+                <TextBlock Text="{res:Loc Pin_PerAppHint}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,16" />
 
-            <!-- Search -->
-            <ui:TextBox x:Name="SearchBox"
-                        PlaceholderText="{res:Loc Search_Placeholder}"
-                        Width="250"
-                        HorizontalAlignment="Left"
-                        TextChanged="SearchBox_TextChanged"
-                        Margin="0,0,0,16" />
+                <!-- Search -->
+                <ui:TextBox x:Name="SearchBox"
+                            PlaceholderText="{res:Loc Search_Placeholder}"
+                            Width="250"
+                            HorizontalAlignment="Left"
+                            TextChanged="SearchBox_TextChanged"
+                            Margin="0,0,0,16" />
 
-            <!-- Empty state -->
-            <TextBlock x:Name="NoPinsText"
-                       Text="{res:Loc Pin_NoEntries}"
-                       Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                       Margin="0,0,0,8"
-                       Visibility="Collapsed" />
+                <!-- Empty state -->
+                <TextBlock x:Name="NoPinsText"
+                           Text="{res:Loc Pin_NoEntries}"
+                           Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                           Margin="0,0,0,8"
+                           Visibility="Collapsed" />
 
-            <!-- App list -->
-            <ItemsControl x:Name="AppList">
-                <ItemsControl.ItemTemplate>
+                <ItemsControl x:Name="AppList">
+                    <ItemsControl.ItemTemplate>
                     <DataTemplate>
                         <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
                                 BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}"
@@ -173,9 +175,8 @@
                             </StackPanel>
                         </Border>
                     </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
         </StackPanel>
     </ScrollViewer>
 </Page>

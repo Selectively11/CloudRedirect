@@ -4,8 +4,9 @@
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
         xmlns:res="clr-namespace:CloudRedirect.Resources"
         Title="{res:Loc Disclaimer_WindowTitle}"
-        Height="720" Width="580"
-        MinHeight="720" MinWidth="520"
+        Width="600"
+        MinWidth="520"
+        SizeToContent="Height"
         ResizeMode="NoResize"
         WindowStartupLocation="CenterOwner"
         ExtendsContentIntoTitleBar="True">
@@ -18,127 +19,100 @@
 
         <ui:TitleBar Grid.Row="0" Title="{res:Loc Disclaimer_WindowTitle}" ShowMinimize="False" ShowMaximize="False" />
 
-        <Border Grid.Row="1"
-                BorderBrush="#CC2222"
-                BorderThickness="2"
-                Margin="16,0,16,16"
-                CornerRadius="8"
-                Padding="0">
+        <Grid Grid.Row="1" Margin="16,0,16,16">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
+            <ScrollViewer Grid.Row="0"
+                          VerticalScrollBarVisibility="Auto"
+                          Padding="8,8,22,8">
+                <StackPanel>
 
-                <Border Grid.Row="0"
-                        Background="#CC2222"
-                        CornerRadius="6,6,0,0"
-                        Padding="16,12">
-                    <StackPanel HorizontalAlignment="Center">
-                        <TextBlock Text="{res:Loc Disclaimer_BuildBanner}"
-                                   FontFamily="Cascadia Code,Consolas,Courier New"
-                                   FontSize="16"
-                                   FontWeight="Bold"
-                                   Foreground="White"
-                                   HorizontalAlignment="Center"
-                                   Margin="0,0,0,4" />
-                        <TextBlock Text="{res:Loc Disclaimer_ExperimentalBanner}"
-                                   FontFamily="Cascadia Code,Consolas,Courier New"
-                                   FontSize="14"
-                                   FontWeight="Bold"
-                                   Foreground="#FFCCCC"
-                                   HorizontalAlignment="Center" />
-                    </StackPanel>
-                </Border>
+                    <TextBlock Text="{res:Loc Disclaimer_Heading}"
+                               FontSize="17"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                               Margin="0,0,0,14" />
 
-                <ScrollViewer Grid.Row="1"
-                              VerticalScrollBarVisibility="Auto"
-                              Padding="24,16,24,8">
-                    <StackPanel>
+                    <TextBlock Text="{res:Loc Disclaimer_Intro}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               LineHeight="23"
+                               Margin="0,0,0,14" />
 
-                        <TextBlock x:Name="AsciiArt"
-                                   FontFamily="Cascadia Code,Consolas,Courier New"
-                                   FontSize="13"
-                                   Foreground="#CC2222"
-                                   HorizontalAlignment="Center"
-                                   Margin="0,0,0,16"
-                                   Opacity="0"
-                                   Text="  XX      XX     XX      XX     XX      XX&#xA;   XX    XX       XX    XX       XX    XX&#xA;    XX  XX         XX  XX         XX  XX&#xA;     XXXX           XXXX           XXXX&#xA;    XX  XX         XX  XX         XX  XX&#xA;   XX    XX       XX    XX       XX    XX&#xA;  XX      XX     XX      XX     XX      XX" />
+                    <TextBlock Text="{res:Loc Disclaimer_HowItWorks}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               LineHeight="23"
+                               Margin="0,0,0,14" />
 
-                        <Border Background="#1A0000"
-                                BorderBrush="#CC2222"
-                                BorderThickness="1"
-                                CornerRadius="4"
-                                Padding="20,16"
-                                Margin="0,0,0,16">
-                            <StackPanel>
-                                <TextBlock FontSize="13"
-                                           Foreground="#FF4444"
-                                           TextWrapping="Wrap"
-                                           LineHeight="22">
-                                    <Run FontWeight="Bold" Text="{res:Loc Disclaimer_WarningBold}" />
-                                    <LineBreak /><LineBreak />
-                                    <Run Text="{res:Loc Disclaimer_ItMay}" />
-                                    <LineBreak /><LineBreak />
-                                    <Run Text="    " /><Run FontWeight="Bold" Text="{res:Loc Disclaimer_Corrupt}" /><Run Text="{res:Loc Disclaimer_CorruptSuffix}" />
-                                    <LineBreak />
-                                    <Run Text="    " /><Run FontWeight="Bold" Text="{res:Loc Disclaimer_Lose}" /><Run Text="{res:Loc Disclaimer_LoseSuffix}" />
-                                    <LineBreak />
-                                    <Run Text="    " /><Run FontWeight="Bold" Text="{res:Loc Disclaimer_Overwrite}" /><Run Text="{res:Loc Disclaimer_OverwriteSuffix}" />
-                                    <LineBreak /><LineBreak />
-                                    <Run FontWeight="Bold" FontSize="13" Text="{res:Loc Disclaimer_BackUpBold}" />
-                                </TextBlock>
-                            </StackPanel>
-                        </Border>
+                    <TextBlock Text="{res:Loc Disclaimer_TrackRecord}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               LineHeight="23"
+                               Margin="0,0,0,18" />
 
-                        <TextBlock Foreground="{DynamicResource TextFillColorSecondaryBrush}"
-                                   FontSize="12.5"
-                                   TextWrapping="Wrap"
-                                   LineHeight="20"
-                                   Margin="0,0,0,8">
-                            <Run Text="{res:Loc Disclaimer_ExplanationText}" />
-                        </TextBlock>
+                    <TextBlock Text="{res:Loc Disclaimer_ChoiceHeading}"
+                               FontSize="15"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                               Margin="0,0,0,12" />
 
-                    </StackPanel>
-                </ScrollViewer>
+                    <TextBlock Text="{res:Loc Disclaimer_ChoiceIntegrity}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               LineHeight="23"
+                               Margin="0,0,0,12" />
 
-                <Border Grid.Row="2"
-                        Background="{DynamicResource ControlFillColorDefaultBrush}"
-                        CornerRadius="0,0,6,6"
-                        Padding="24,16">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
+                    <TextBlock Text="{res:Loc Disclaimer_ChoiceBackup}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               LineHeight="23"
+                               Margin="0,0,0,12" />
 
-                        <TextBlock x:Name="CountdownText"
-                                   Grid.Column="0"
-                                   Text="{res:Loc Disclaimer_PleaseReadCarefully}"
-                                   Foreground="#FF4444"
-                                   FontSize="12"
-                                   FontWeight="SemiBold"
-                                   VerticalAlignment="Center" />
+                    <TextBlock Text="{res:Loc Disclaimer_ChoiceMultiPC}"
+                               Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               LineHeight="23"
+                               Margin="0,0,0,18" />
 
-                        <ui:Button x:Name="CancelButton"
-                                   Grid.Column="1"
-                                   Content="{res:Loc Disclaimer_Cancel}"
-                                   Margin="0,0,8,0"
-                                   Click="Cancel_Click" />
+                    <TextBlock Text="{res:Loc Disclaimer_Closing}"
+                               FontSize="14"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource TextFillColorPrimaryBrush}"
+                               Margin="0,0,0,4" />
 
-                        <ui:Button x:Name="AcceptButton"
-                                   Grid.Column="2"
-                                   Content="{res:Loc Disclaimer_AcceptButton}"
-                                   Appearance="Danger"
-                                   IsEnabled="False"
-                                   Click="Accept_Click" />
-                    </Grid>
-                </Border>
+                </StackPanel>
+            </ScrollViewer>
 
-            </Grid>
-        </Border>
+            <Border Grid.Row="1"
+                    Height="1"
+                    Background="{DynamicResource ControlStrokeColorDefaultBrush}"
+                    Margin="0,12,0,0" />
+
+            <StackPanel Grid.Row="2"
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Right"
+                        Margin="0,16,8,0">
+                <ui:Button x:Name="CancelButton"
+                           Content="{res:Loc Disclaimer_Cancel}"
+                           Margin="0,0,8,0"
+                           Click="Cancel_Click" />
+
+                <ui:Button x:Name="AcceptButton"
+                           Content="{res:Loc Disclaimer_AcceptButton}"
+                           Click="Accept_Click" />
+            </StackPanel>
+
+        </Grid>
     </Grid>
 </ui:FluentWindow>

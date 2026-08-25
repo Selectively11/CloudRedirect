@@ -60,8 +60,9 @@ public partial class DashboardPage : Page
                         appCount += Directory.GetDirectories(accountDir).Length;
                 }
 
-                // M9: Check OAuth token status off the UI thread (DPAPI + file I/O)
-                if (config?.TokenPath != null)
+                // M9: Check OAuth token status off the UI thread (DPAPI + file I/O).
+                // R2/S3 use static credentials, not OAuth tokens.
+                if (config?.TokenPath != null && config.Provider is not "r2" and not "s3")
                     tokenStatus = Services.OAuthService.CheckTokenStatus(config.TokenPath);
             }
 
@@ -131,6 +132,20 @@ public partial class DashboardPage : Page
             return;
         }
 
+        // R2/S3: static credentials (no OAuth)
+        if (config.Provider is "r2" or "s3")
+        {
+            bool hasCreds = config.TokenPath != null && File.Exists(config.TokenPath);
+            ProviderStatus.Text = hasCreds
+                ? S.Format("Dashboard_Authenticated", config.DisplayName)
+                : S.Format("Dashboard_AuthStatus", config.DisplayName,
+                    S.Get(config.Provider == "s3" ? "CloudProvider_S3CredMissing" : "CloudProvider_R2CredMissing"));
+            ProviderIcon.Symbol = hasCreds
+                ? Wpf.Ui.Controls.SymbolRegular.CloudCheckmark24
+                : Wpf.Ui.Controls.SymbolRegular.CloudOff24;
+            return;
+        }
+
         // OAuth providers (gdrive, onedrive)
         if (config.TokenPath != null && preCheckedStatus != null)
         {
@@ -153,9 +168,12 @@ public partial class DashboardPage : Page
         var logPath = Services.SteamDetector.GetLogPath();
         if (logPath != null && File.Exists(logPath))
         {
+            // Open the containing folder with the log file highlighted, rather than
+            // opening the (large) log in a text editor. /select takes the file path.
             Process.Start(new ProcessStartInfo
             {
-                FileName = logPath,
+                FileName = "explorer.exe",
+                Arguments = $"/select,\"{logPath}\"",
                 UseShellExecute = true
             })?.Dispose();
         }

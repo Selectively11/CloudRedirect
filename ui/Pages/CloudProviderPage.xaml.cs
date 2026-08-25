@@ -16,6 +16,13 @@ public partial class CloudProviderPage : Page
     private bool _loading;
     private readonly StringBuilder _logBuffer = new();
 
+    // Upload in-flight cap (MB). Only shown/saved for Google Drive.
+    private const int InFlightDefaultMb = 24;
+    private const int InFlightMinMb = 24;
+    private const int InFlightMaxMb = 64;
+    // Suppresses the slider ValueChanged handler during programmatic load.
+    private bool _inFlightLoading;
+
     public CloudProviderPage()
     {
         InitializeComponent();
@@ -24,15 +31,7 @@ public partial class CloudProviderPage : Page
             try { await LoadCurrentConfigAsync(); }
             catch { }
         };
-        // Cancel in-flight OAuth when the user navigates away mid-auth.
-        // Without this, the loopback HTTP listener in OAuthService keeps
-        // running until the user closes their browser tab (or forever if
-        // they don't), the auth state machine continuation keeps `this`
-        // alive via the closure, and the per-message log callback
-        // (msg => Dispatcher.BeginInvoke(...)) keeps marshaling work onto
-        // a detached LogOutput. Cancelling _authCts triggers the existing
-        // finally block in SignIn_Click which disposes _oauth + _authCts
-        // and resets the UI state.
+        // Cancel in-flight OAuth on Unloaded to stop the loopback listener and prevent leaked references.
         Unloaded += (_, _) =>
         {
             if (_isAuthenticating)
@@ -40,31 +39,18 @@ public partial class CloudProviderPage : Page
         };
     }
 
-    /// <summary>
-    /// Snapshot of everything LoadCurrentConfigAsync gathers off the UI
-    /// thread. Pre-resolving the default local path here means the
-    /// dispatcher continuation never has to fall back to a synchronous
-    /// FindSteamPath() (registry + file probes) on Loaded.
-    /// </summary>
+    /// <summary>Off-thread config snapshot for LoadCurrentConfigAsync.</summary>
     private sealed record LoadedConfigSnapshot(
         Services.CloudConfig? Config,
         string DefaultLocalPath,
         string PathTextOverride,
-        Services.TokenStatus? TokenStatus);
+        Services.TokenStatus? TokenStatus,
+        int UploadInFlightMb);
 
-    // M14: Move SteamDetector.ReadConfig + FindSteamPath + OAuth token
-    // status check off the UI thread. Loaded used to call them
-    // synchronously; on a slow disk or stalled DPAPI prompt that froze
-    // the dispatcher long enough for the page to render with a blank
-    // status line. We now resolve the snapshot in Task.Run and apply it
-    // to controls in the dispatcher continuation, mirroring
-    // DashboardPage.LoadStatusAsync.
+    // M14: Read config + token status off UI thread to avoid disk/DPAPI stall.
     private async Task LoadCurrentConfigAsync()
     {
-        // _loading must be true the entire time we touch ProviderCombo /
-        // TokenPathBox so the SelectionChanged handler doesn't fire
-        // user-gesture branches against a partially-initialized UI. Set
-        // it on the UI thread before launching the I/O.
+        // Set _loading before I/O to suppress SelectionChanged during init.
         _loading = true;
         try
         {
@@ -86,10 +72,10 @@ public partial class CloudProviderPage : Page
                 }
 
                 Services.TokenStatus? tokenStatus = null;
-                if (config?.TokenPath != null)
+                if (config?.TokenPath != null && config.Provider is not "r2" and not "s3")
                     tokenStatus = Services.OAuthService.CheckTokenStatus(config.TokenPath);
 
-                return new LoadedConfigSnapshot(config, defaultLocal, pathOverride, tokenStatus);
+                return new LoadedConfigSnapshot(config, defaultLocal, pathOverride, tokenStatus, ReadUploadInFlightMb());
             });
 
             ApplyLoadedSnapshot(snapshot);
@@ -106,12 +92,15 @@ public partial class CloudProviderPage : Page
 
     private void ApplyLoadedSnapshot(LoadedConfigSnapshot snap)
     {
+        ApplyUploadInFlight(snap.UploadInFlightMb);
+
         if (snap.Config == null)
         {
             AuthStatus.Text = S.Get("CloudProvider_NoConfigFound");
-            ProviderCombo.SelectedIndex = 3; // Local only
+            ProviderCombo.SelectedIndex = 2; // Folder / Mapped Drive (default local path)
             if (!string.IsNullOrEmpty(snap.DefaultLocalPath))
                 TokenPathBox.Text = snap.DefaultLocalPath;
+            UpdateProviderUI();
             return;
         }
 
@@ -178,13 +167,35 @@ public partial class CloudProviderPage : Page
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "CloudRedirect", "proton_tokens.json");
             }
-            else if (tag is "local" or "folder")
+            else if (tag == "r2")
+            {
+                TokenPathBox.Text = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "CloudRedirect", "r2_credentials.json");
+            }
+            else if (tag == "s3")
+            {
+                TokenPathBox.Text = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    "CloudRedirect", "s3_credentials.json");
+            }
+            else if (tag == "folder")
             {
                 SetDefaultLocalPath();
             }
         }
 
         UpdateAuthStatus();
+        // Persist the provider switch (and the path it just set).
+        _ = SaveConfigSilent();
+    }
+
+    // Auto-save manual path edits when the field loses focus, rather than on
+    // every keystroke.
+    private void TokenPathBox_LostFocus(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        _ = SaveConfigSilent();
     }
 
     /// <summary>
@@ -195,14 +206,28 @@ public partial class CloudProviderPage : Page
         if (ProviderCombo.SelectedItem is not ComboBoxItem item) return;
 
         var tag = item.Tag as string;
-        bool needsTokens = tag is "gdrive" or "onedrive" or "protondrive";
+        bool needsOAuth = tag is "gdrive" or "onedrive" or "protondrive";
+        bool isR2 = tag == "r2";
+        bool isS3 = tag == "s3";
         bool isFolder = tag == "folder";
-        bool isLocal = tag == "local";
-        bool needsPath = needsTokens || isFolder;
+        bool needsPathRow = needsOAuth || isFolder; // R2/S3 hide the path row
 
-        TokenPathBox.IsEnabled = needsPath;
-        BrowseButton.IsEnabled = needsPath;
-        SignInButton.Visibility = needsTokens ? Visibility.Visible : Visibility.Collapsed;
+        // Token path row: visible for OAuth/folder, hidden for R2.
+        PathLabel.Visibility = needsPathRow ? Visibility.Visible : Visibility.Collapsed;
+        TokenPathGrid.Visibility = needsPathRow ? Visibility.Visible : Visibility.Collapsed;
+        TokenPathBox.Visibility = needsPathRow ? Visibility.Visible : Visibility.Collapsed;
+        BrowseButton.Visibility = needsPathRow ? Visibility.Visible : Visibility.Collapsed;
+        TokenPathBox.IsEnabled = needsPathRow;
+        BrowseButton.IsEnabled = needsPathRow;
+
+        // R2 uses static credentials (no OAuth sign-in flow).
+        SignInButton.Visibility = needsOAuth ? Visibility.Visible : Visibility.Collapsed;
+        // Upload in-flight cap is a Google Drive-only throttle.
+        UploadInFlightSection.Visibility = tag == "gdrive" ? Visibility.Visible : Visibility.Collapsed;
+        // R2 credential entry panel.
+        R2CredentialsPanel.Visibility = isR2 ? Visibility.Visible : Visibility.Collapsed;
+        // S3-compatible credential entry panel.
+        S3CredentialsPanel.Visibility = isS3 ? Visibility.Visible : Visibility.Collapsed;
 
         // Update labels based on provider type
         if (isFolder)
@@ -211,15 +236,19 @@ public partial class CloudProviderPage : Page
             TokenPathBox.PlaceholderText = S.Get("CloudProvider_SyncFolderPlaceholder");
             PathHint.Text = S.Get("CloudProvider_SyncFolderHint");
         }
-        else if (isLocal)
+        else if (isR2)
         {
-            PathLabel.Text = S.Get("CloudProvider_LocalStoragePath");
-            TokenPathBox.PlaceholderText = "";
-            PathHint.Text = S.Get("CloudProvider_LocalStorageHint");
-            TokenPathBox.IsEnabled = false;
-            BrowseButton.IsEnabled = false;
+            PathHint.Text = "";
+            // Load existing creds into the fields if the file exists.
+            LoadR2CredentialFields();
         }
-        else if (needsTokens)
+        else if (isS3)
+        {
+            PathHint.Text = "";
+            // Load existing creds into the fields if the file exists.
+            LoadS3CredentialFields();
+        }
+        else if (needsOAuth)
         {
             PathLabel.Text = S.Get("CloudProvider_TokenFilePath");
             TokenPathBox.PlaceholderText = S.Get("CloudProvider_TokenPlaceholder");
@@ -231,6 +260,10 @@ public partial class CloudProviderPage : Page
             TokenPathBox.PlaceholderText = "";
             PathHint.Text = "";
         }
+
+        // Only reserve space for the hint when it actually has text.
+        PathHint.Visibility = string.IsNullOrEmpty(PathHint.Text)
+            ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void BrowseToken_Click(object sender, RoutedEventArgs e)
@@ -252,6 +285,7 @@ public partial class CloudProviderPage : Page
             {
                 TokenPathBox.Text = dialog.FolderName;
                 UpdateAuthStatus();
+                _ = SaveConfigSilent();
             }
         }
         else
@@ -267,8 +301,25 @@ public partial class CloudProviderPage : Page
             {
                 TokenPathBox.Text = dialog.FileName;
                 UpdateAuthStatus();
+                _ = SaveConfigSilent();
             }
         }
+    }
+
+    private void S3BrowseCaCert_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Select CA Certificate",
+            Filter = "PEM files (*.pem)|*.pem|Certificate files (*.crt;*.cer)|*.crt;*.cer|All files (*.*)|*.*",
+            CheckFileExists = true
+        };
+
+        if (!string.IsNullOrEmpty(S3CaCertBox.Text) && File.Exists(S3CaCertBox.Text))
+            dialog.InitialDirectory = Path.GetDirectoryName(S3CaCertBox.Text);
+
+        if (dialog.ShowDialog() == true)
+            S3CaCertBox.Text = dialog.FileName;
     }
 
     private async void SignIn_Click(object sender, RoutedEventArgs e)
@@ -276,7 +327,7 @@ public partial class CloudProviderPage : Page
         if (_isAuthenticating) return;
 
         var provider = GetSelectedProvider();
-        if (provider is "local" or "folder") return;
+        if (provider == "folder") return;
 
         var tokenPath = TokenPathBox.Text?.Trim();
         if (string.IsNullOrEmpty(tokenPath))
@@ -290,7 +341,6 @@ public partial class CloudProviderPage : Page
         _authCts = new CancellationTokenSource();
         _oauth = new Services.OAuthService();
 
-        // Update UI state
         SignInButton.IsEnabled = false;
         CancelAuthButton.Visibility = Visibility.Visible;
         ProviderCombo.IsEnabled = false;
@@ -343,17 +393,6 @@ public partial class CloudProviderPage : Page
         // after the async operation observes cancellation.
     }
 
-    private async void SaveConfig_Click(object sender, RoutedEventArgs e)
-    {
-        if (await SaveConfigSilent())
-        {
-            await Services.Dialog.ShowInfoAsync(S.Get("CloudProvider_Saved"), S.Get("CloudProvider_SavedMessage"));
-        }
-    }
-
-    /// <summary>
-    /// Writes config.json without showing a dialog. Returns true on success.
-    /// </summary>
     private async Task<bool> SaveConfigSilent()
     {
         var configDir = Services.SteamDetector.GetConfigDir();
@@ -363,25 +402,51 @@ public partial class CloudProviderPage : Page
         var provider = GetSelectedProvider();
         var tokenPath = TokenPathBox.Text?.Trim() ?? "";
 
-        // "local" in the UI maps to "folder" provider in the DLL with the
-        // default localcloud path, so the DLL has a concrete storage location.
-        var configProvider = provider;
-        if (provider == "local")
-            configProvider = "folder";
-
         var configPath = Path.Combine(configDir, "config.json");
+
+        // Read existing token_paths to merge the new entry.
+        var tokenPaths = new Dictionary<string, string>();
+        if (File.Exists(configPath))
+        {
+            try
+            {
+                var existingJson = File.ReadAllText(configPath);
+                using var existingDoc = System.Text.Json.JsonDocument.Parse(existingJson);
+                if (existingDoc.RootElement.TryGetProperty("token_paths", out var tps) &&
+                    tps.ValueKind == System.Text.Json.JsonValueKind.Object)
+                {
+                    foreach (var prop in tps.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind == System.Text.Json.JsonValueKind.String)
+                            tokenPaths[prop.Name] = prop.Value.GetString() ?? "";
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // Register this provider's path (skip folder/local — they use sync_path).
+        if (provider != "folder" && provider != "local" && !string.IsNullOrEmpty(tokenPath))
+            tokenPaths[provider] = tokenPath;
 
         try
         {
             Services.ConfigHelper.SaveConfig(configPath,
-                new[] { "provider", "sync_path", "token_path" },
+                new[] { "provider", "sync_path", "token_path", "token_paths" },
                 writer =>
                 {
-                    writer.WriteString("provider", configProvider);
-                    if (configProvider == "folder")
+                    writer.WriteString("provider", provider);
+                    if (provider == "folder")
                         writer.WriteString("sync_path", tokenPath);
-                    else if (configProvider is not "local")
+                    else
                         writer.WriteString("token_path", tokenPath);
+
+                    // Persist per-provider token path registry.
+                    writer.WritePropertyName("token_paths");
+                    writer.WriteStartObject();
+                    foreach (var (key, value) in tokenPaths)
+                        writer.WriteString(key, value);
+                    writer.WriteEndObject();
                 });
             return true;
         }
@@ -395,8 +460,8 @@ public partial class CloudProviderPage : Page
     private string GetSelectedProvider()
     {
         if (ProviderCombo.SelectedItem is ComboBoxItem item)
-            return item.Tag as string ?? "local";
-        return "local";
+            return item.Tag as string ?? "folder";
+        return "folder";
     }
 
     private void UpdateAuthStatus(Services.TokenStatus? preCheckedStatus = null)
@@ -404,17 +469,6 @@ public partial class CloudProviderPage : Page
         if (ProviderCombo.SelectedItem is not ComboBoxItem item) return;
 
         var tag = item.Tag as string;
-
-        if (tag == "local")
-        {
-            var localPath = TokenPathBox.Text?.Trim();
-            if (!string.IsNullOrEmpty(localPath))
-                AuthStatus.Text = S.Format("CloudProvider_LocalModeStored", localPath);
-            else
-                AuthStatus.Text = S.Get("CloudProvider_LocalModeNoSync");
-            AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
-            return;
-        }
 
         if (tag == "folder")
         {
@@ -437,6 +491,58 @@ public partial class CloudProviderPage : Page
             return;
         }
 
+        if (tag == "r2")
+        {
+            var credPath = TokenPathBox.Text?.Trim();
+            if (string.IsNullOrEmpty(credPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_NoTokenFilePath");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+            }
+            else if (!File.Exists(credPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_R2CredMissing");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldDismiss24;
+            }
+            else if (!CheckR2CredentialFields(credPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_R2CredInvalid");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldDismiss24;
+            }
+            else
+            {
+                AuthStatus.Text = S.Get("CloudProvider_R2CredFound");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+            }
+            return;
+        }
+
+        if (tag == "s3")
+        {
+            var credPath = TokenPathBox.Text?.Trim();
+            if (string.IsNullOrEmpty(credPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_NoTokenFilePath");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+            }
+            else if (!File.Exists(credPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_S3CredMissing");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldDismiss24;
+            }
+            else if (!CheckS3CredentialFields(credPath))
+            {
+                AuthStatus.Text = S.Get("CloudProvider_S3CredInvalid");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldDismiss24;
+            }
+            else
+            {
+                AuthStatus.Text = S.Get("CloudProvider_S3CredFound");
+                AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+            }
+            return;
+        }
+
         var tokenPath = TokenPathBox.Text?.Trim();
         if (string.IsNullOrEmpty(tokenPath))
         {
@@ -445,17 +551,333 @@ public partial class CloudProviderPage : Page
             return;
         }
 
-        // Caller (the Loaded path) may pass a status that was already
-        // resolved off the UI thread; otherwise we hit DPAPI + file I/O
-        // synchronously. The user-gesture callers (Browse, provider
-        // switch, post-OAuth) accept the synchronous cost in exchange
-        // for keeping their flow simple -- those events are already
-        // tied to a click and the user has paid attention.
+        // preCheckedStatus avoids sync DPAPI/file I/O on Loaded; user-gesture callers accept sync cost.
         var status = preCheckedStatus ?? Services.OAuthService.CheckTokenStatus(tokenPath);
         AuthStatus.Text = status.Message;
         AuthIcon.Symbol = status.IsAuthenticated
             ? Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24
             : Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+    }
+
+    /// <summary>
+    /// Quick check that the R2 credentials file contains the four required fields.
+    /// Does not validate the credential values (that happens at runtime via the DLL).
+    /// </summary>
+    private static bool CheckR2CredentialFields(string path)
+    {
+        try
+        {
+            var json = Services.TokenFile.ReadJson(path);
+            if (string.IsNullOrEmpty(json)) return false;
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            return root.TryGetProperty("account_id", out var a) && a.GetString()?.Length > 0
+                && root.TryGetProperty("access_key_id", out var b) && b.GetString()?.Length > 0
+                && root.TryGetProperty("secret_access_key", out var c) && c.GetString()?.Length > 0
+                && root.TryGetProperty("bucket", out var d) && d.GetString()?.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Returns the default R2 credentials file path.
+    /// </summary>
+    private static string GetR2CredentialPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "CloudRedirect", "r2_credentials.json");
+    }
+
+    /// <summary>
+    /// Populate the R2 credential text fields from the existing file (if any).
+    /// Only fills non-sensitive fields (account_id, access_key_id, bucket);
+    /// the secret key is shown as masked/empty.
+    /// </summary>
+    private void LoadR2CredentialFields()
+    {
+        R2AccountIdBox.Text = "";
+        R2AccessKeyBox.Text = "";
+        R2SecretKeyBox.Password = "";
+        R2BucketBox.Text = "";
+        R2KeyPrefixBox.Text = "";
+        R2EndpointBox.Text = "";
+
+        var path = GetR2CredentialPath();
+        if (!File.Exists(path)) return;
+
+        try
+        {
+            var json = Services.TokenFile.ReadJson(path);
+            if (string.IsNullOrEmpty(json)) return;
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("account_id", out var a))
+                R2AccountIdBox.Text = a.GetString() ?? "";
+            if (root.TryGetProperty("access_key_id", out var b))
+                R2AccessKeyBox.Text = b.GetString() ?? "";
+            if (root.TryGetProperty("bucket", out var d))
+                R2BucketBox.Text = d.GetString() ?? "";
+            if (root.TryGetProperty("key_prefix", out var kp))
+                R2KeyPrefixBox.Text = kp.GetString() ?? "";
+            if (root.TryGetProperty("endpoint", out var ep))
+                R2EndpointBox.Text = ep.GetString() ?? "";
+            if (root.TryGetProperty("secret_access_key", out var c) && (c.GetString()?.Length ?? 0) > 0)
+                R2SecretKeyBox.Password = c.GetString() ?? "";
+        }
+        catch { }
+    }
+
+    private async void R2SaveCreds_Click(object sender, RoutedEventArgs e)
+    {
+        var accountId = R2AccountIdBox.Text?.Trim() ?? "";
+        var accessKey = R2AccessKeyBox.Text?.Trim() ?? "";
+        var secretKey = R2SecretKeyBox.Password?.Trim() ?? "";
+        var bucket = R2BucketBox.Text?.Trim() ?? "";
+        var keyPrefix = R2KeyPrefixBox.Text?.Trim() ?? "";
+        var endpoint = R2EndpointBox.Text?.Trim() ?? "";
+
+        if (string.IsNullOrEmpty(accountId) || string.IsNullOrEmpty(accessKey) ||
+            string.IsNullOrEmpty(secretKey) || string.IsNullOrEmpty(bucket))
+        {
+            await Services.Dialog.ShowWarningAsync(S.Get("CloudProvider_R2CredTitle"),
+                S.Get("CloudProvider_R2FieldsRequired"));
+            return;
+        }
+
+        var credPath = GetR2CredentialPath();
+        var dir = Path.GetDirectoryName(credPath)!;
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+
+        // Write the credentials as a simple JSON file. key_prefix and endpoint
+        // are optional and only written when non-empty (matches the Linux UI).
+        var cred = new Dictionary<string, string>
+        {
+            ["account_id"] = accountId,
+            ["access_key_id"] = accessKey,
+            ["secret_access_key"] = secretKey,
+            ["bucket"] = bucket
+        };
+        if (!string.IsNullOrEmpty(keyPrefix))
+            cred["key_prefix"] = keyPrefix;
+        if (!string.IsNullOrEmpty(endpoint))
+            cred["endpoint"] = endpoint;
+
+        var json = System.Text.Json.JsonSerializer.Serialize(cred,
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+        Services.TokenFile.WriteJson(credPath, json);
+
+        // Point the config at this credentials file.
+        TokenPathBox.Text = credPath;
+        await SaveConfigSilent();
+
+        // Update status to reflect the saved credentials.
+        UpdateAuthStatus();
+        AuthStatus.Text = S.Get("CloudProvider_R2CredSaved");
+        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+    }
+
+    /// <summary>
+    /// Quick check that the S3 credentials file contains the required fields.
+    /// Generic S3 needs an explicit endpoint + region (no account-derived host).
+    /// </summary>
+    private static bool CheckS3CredentialFields(string path)
+    {
+        try
+        {
+            var json = Services.TokenFile.ReadJson(path);
+            if (string.IsNullOrEmpty(json)) return false;
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            return root.TryGetProperty("access_key_id", out var a) && a.GetString()?.Length > 0
+                && root.TryGetProperty("secret_access_key", out var b) && b.GetString()?.Length > 0
+                && root.TryGetProperty("bucket", out var c) && c.GetString()?.Length > 0
+                && root.TryGetProperty("endpoint", out var d) && d.GetString()?.Length > 0
+                && root.TryGetProperty("region", out var e) && e.GetString()?.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Returns the default S3 credentials file path.
+    /// </summary>
+    private static string GetS3CredentialPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "CloudRedirect", "s3_credentials.json");
+    }
+
+    /// <summary>
+    /// Populate the S3 credential fields from the existing file (if any).
+    /// Only fills non-sensitive fields; the secret key is left blank.
+    /// </summary>
+    private void LoadS3CredentialFields()
+    {
+        S3EndpointBox.Text = "";
+        S3AccessKeyBox.Text = "";
+        S3SecretKeyBox.Password = "";
+        S3BucketBox.Text = "";
+        S3RegionBox.Text = "";
+        S3KeyPrefixBox.Text = "";
+        S3CaCertBox.Text = "";
+        S3SignPayloadCheck.IsChecked = false;
+        S3InsecureHttpCheck.IsChecked = false;
+        S3InsecureTlsCheck.IsChecked = false;
+
+        var path = GetS3CredentialPath();
+        if (!File.Exists(path)) return;
+
+        try
+        {
+            var json = Services.TokenFile.ReadJson(path);
+            if (string.IsNullOrEmpty(json)) return;
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("access_key_id", out var a))
+                S3AccessKeyBox.Text = a.GetString() ?? "";
+            if (root.TryGetProperty("bucket", out var b))
+                S3BucketBox.Text = b.GetString() ?? "";
+            if (root.TryGetProperty("endpoint", out var c))
+                S3EndpointBox.Text = c.GetString() ?? "";
+            if (root.TryGetProperty("region", out var d))
+                S3RegionBox.Text = d.GetString() ?? "";
+            if (root.TryGetProperty("key_prefix", out var kp))
+                S3KeyPrefixBox.Text = kp.GetString() ?? "";
+            if (root.TryGetProperty("ca_cert_path", out var ca))
+                S3CaCertBox.Text = ca.GetString() ?? "";
+            S3SignPayloadCheck.IsChecked =
+                root.TryGetProperty("sign_payload", out var sp) && sp.ValueKind == System.Text.Json.JsonValueKind.True;
+            S3InsecureHttpCheck.IsChecked =
+                root.TryGetProperty("allow_insecure_http", out var ih) && ih.ValueKind == System.Text.Json.JsonValueKind.True;
+            S3InsecureTlsCheck.IsChecked =
+                root.TryGetProperty("allow_insecure_tls", out var it) && it.ValueKind == System.Text.Json.JsonValueKind.True;
+            if (root.TryGetProperty("secret_access_key", out var s) && (s.GetString()?.Length ?? 0) > 0)
+                S3SecretKeyBox.Password = s.GetString() ?? "";
+        }
+        catch { }
+    }
+
+    private async void S3SaveCreds_Click(object sender, RoutedEventArgs e)
+    {
+        var accessKey = S3AccessKeyBox.Text?.Trim() ?? "";
+        var secretKey = S3SecretKeyBox.Password?.Trim() ?? "";
+        var bucket = S3BucketBox.Text?.Trim() ?? "";
+        var endpoint = S3EndpointBox.Text?.Trim() ?? "";
+        var region = S3RegionBox.Text?.Trim() ?? "";
+        var keyPrefix = S3KeyPrefixBox.Text?.Trim() ?? "";
+        var caCertPath = S3CaCertBox.Text?.Trim() ?? "";
+
+        if (string.IsNullOrEmpty(accessKey) || string.IsNullOrEmpty(secretKey) ||
+            string.IsNullOrEmpty(bucket) || string.IsNullOrEmpty(endpoint) ||
+            string.IsNullOrEmpty(region))
+        {
+            await Services.Dialog.ShowWarningAsync(S.Get("CloudProvider_S3CredTitle"),
+                S.Get("CloudProvider_S3FieldsRequired"));
+            return;
+        }
+
+        var credPath = GetS3CredentialPath();
+        var dir = Path.GetDirectoryName(credPath)!;
+        if (!Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+
+        // Build the credentials object. String fields go in a dictionary; the
+        // boolean transport/signing flags are added via a JsonObject so their
+        // JSON type is a real bool (matching the native S3Provider parser).
+        var cred = new System.Text.Json.Nodes.JsonObject
+        {
+            ["access_key_id"] = accessKey,
+            ["secret_access_key"] = secretKey,
+            ["bucket"] = bucket,
+            ["endpoint"] = endpoint,
+            ["region"] = region
+        };
+        if (!string.IsNullOrEmpty(keyPrefix))
+            cred["key_prefix"] = keyPrefix;
+        // Only emit the optional flags when set, to keep the file minimal.
+        if (S3SignPayloadCheck.IsChecked == true)
+            cred["sign_payload"] = true;
+        if (S3InsecureHttpCheck.IsChecked == true)
+            cred["allow_insecure_http"] = true;
+        if (S3InsecureTlsCheck.IsChecked == true)
+            cred["allow_insecure_tls"] = true;
+        if (!string.IsNullOrEmpty(caCertPath))
+            cred["ca_cert_path"] = caCertPath;
+
+        var json = cred.ToJsonString(
+            new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+
+        Services.TokenFile.WriteJson(credPath, json);
+
+        // Point the config at this credentials file.
+        TokenPathBox.Text = credPath;
+        await SaveConfigSilent();
+
+        // Update status to reflect the saved credentials.
+        UpdateAuthStatus();
+        AuthStatus.Text = S.Get("CloudProvider_S3CredSaved");
+        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+    }
+
+    /// <summary>Reads upload_inflight_mb from config.json, clamped 24..64.
+    /// Absent/invalid -> the 24 MB default. Off the UI thread.</summary>
+    private static int ReadUploadInFlightMb()
+    {
+        try
+        {
+            var path = Services.SteamDetector.GetConfigFilePath();
+            if (!File.Exists(path)) return InFlightDefaultMb;
+
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.TryGetProperty("upload_inflight_mb", out var inf) && inf.TryGetInt32(out var mb))
+                return Math.Clamp(mb, InFlightMinMb, InFlightMaxMb);
+        }
+        catch { }
+        return InFlightDefaultMb;
+    }
+
+    private void ApplyUploadInFlight(int mb)
+    {
+        _inFlightLoading = true;
+        try
+        {
+            UploadInFlightSlider.Value = Math.Clamp(mb, InFlightMinMb, InFlightMaxMb);
+            UpdateUploadInFlightValueLabel();
+        }
+        finally { _inFlightLoading = false; }
+    }
+
+    private void UploadInFlightSlider_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        UpdateUploadInFlightValueLabel();
+        if (_inFlightLoading) return;
+        SaveUploadInFlight();
+    }
+
+    private void UpdateUploadInFlightValueLabel()
+    {
+        if (UploadInFlightValue != null)
+            UploadInFlightValue.Text = S.Format("CloudProvider_UploadInFlightValue", (int)UploadInFlightSlider.Value);
+    }
+
+    /// <summary>Persists upload_inflight_mb (clamped 24..64) into config.json.</summary>
+    private void SaveUploadInFlight()
+    {
+        int mb = Math.Clamp((int)Math.Round(UploadInFlightSlider.Value), InFlightMinMb, InFlightMaxMb);
+        Services.ConfigHelper.SaveConfig(Services.SteamDetector.GetConfigFilePath(),
+            new[] { "upload_inflight_mb" },
+            writer => writer.WriteNumber("upload_inflight_mb", mb));
     }
 
     private void AppendLog(string message)

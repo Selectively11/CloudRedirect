@@ -23,6 +23,7 @@ signals:
     void authFailed(const QString &provider, const QString &error);
     void statusMessage(const QString &msg);
     void protonNeedsTwoFactor();
+    void browserFailed(const QString &url);
 
 private slots:
     void onNewConnection();

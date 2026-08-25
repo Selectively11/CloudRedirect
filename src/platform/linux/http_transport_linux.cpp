@@ -2,11 +2,13 @@
 #include "cloud_provider_base.h"
 #include "log.h"
 
+#include <cctype>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -25,14 +27,20 @@ typedef int CURLoption;
 #define CURLOPT_POSTFIELDS     10015
 #define CURLOPT_POSTFIELDSIZE  60
 #define CURLOPT_CUSTOMREQUEST  10036
+#define CURLOPT_NOBODY         44
 #define CURLOPT_TIMEOUT        13
 #define CURLOPT_CONNECTTIMEOUT 78
 #define CURLOPT_USERAGENT      10018
 #define CURLOPT_FOLLOWLOCATION 52
+#define CURLOPT_MAXREDIRS      68
 #define CURLOPT_HEADERFUNCTION 20079
 #define CURLOPT_HEADERDATA     10029
+#define CURLOPT_SSL_VERIFYPEER 64
+#define CURLOPT_SSL_VERIFYHOST 81
+#define CURLOPT_CAINFO         10065
 #define CURLINFO_RESPONSE_CODE 0x200002
 
+typedef int  (*curl_global_init_fn)(long);
 typedef CURL* (*curl_easy_init_fn)(void);
 typedef CURLcode (*curl_easy_setopt_fn)(CURL*, CURLoption, ...);
 typedef CURLcode (*curl_easy_perform_fn)(CURL*);
@@ -41,8 +49,11 @@ typedef void (*curl_easy_cleanup_fn)(CURL*);
 typedef struct curl_slist* (*curl_slist_append_fn)(struct curl_slist*, const char*);
 typedef void (*curl_slist_free_all_fn)(struct curl_slist*);
 
+#define CURL_GLOBAL_ALL 3  // CURL_GLOBAL_SSL | CURL_GLOBAL_WIN32
+
 struct CurlAPI {
     void* handle = nullptr;
+    curl_global_init_fn global_init = nullptr;
     curl_easy_init_fn easy_init = nullptr;
     curl_easy_setopt_fn easy_setopt = nullptr;
     curl_easy_perform_fn easy_perform = nullptr;
@@ -54,8 +65,17 @@ struct CurlAPI {
 
 static CurlAPI g_curl{};
 static bool g_curlInitAttempted = false;
+static std::mutex g_curlInitMutex;
+
+// 32-bit libcurl: curl_easy_init/cleanup race shared SSL tables.
+// Guard handle lifecycle (not perform) under mutex.
+static std::mutex g_curlHandleMutex;
 
 static bool InitCurl() {
+    // Serialize init and call curl_global_init() explicitly here -- libcurl's lazy
+    // global init off the first curl_easy_init isn't thread-safe and crashed when
+    // EndSession raced a background worker.
+    std::lock_guard<std::mutex> lock(g_curlInitMutex);
     if (g_curlInitAttempted) return g_curl.handle != nullptr;
     g_curlInitAttempted = true;
 
@@ -87,6 +107,7 @@ static bool InitCurl() {
         return false;
     }
 
+    g_curl.global_init  = (curl_global_init_fn)dlsym(g_curl.handle, "curl_global_init");
     g_curl.easy_init    = (curl_easy_init_fn)dlsym(g_curl.handle, "curl_easy_init");
     g_curl.easy_setopt  = (curl_easy_setopt_fn)dlsym(g_curl.handle, "curl_easy_setopt");
     g_curl.easy_perform = (curl_easy_perform_fn)dlsym(g_curl.handle, "curl_easy_perform");
@@ -101,6 +122,15 @@ static bool InitCurl() {
         dlclose(g_curl.handle);
         g_curl.handle = nullptr;
         return false;
+    }
+
+    // Explicit global init (once, under the mutex) -- required before any
+    // curl_easy_init and must not be left to libcurl's non-thread-safe lazy path.
+    if (g_curl.global_init) {
+        g_curl.global_init(CURL_GLOBAL_ALL);
+        LOG("[HTTP] curl_global_init done");
+    } else {
+        LOG("[HTTP] WARNING: curl_global_init symbol missing; relying on lazy init");
     }
 
     return true;
@@ -132,11 +162,32 @@ static std::string ExtractLocation(const std::string& headers) {
     return {};
 }
 
+// Parse the raw header block into a lower-cased name -> value map.
+// Skips the HTTP status line and folds duplicate names to the last value.
+static void ParseHeaders(const std::string& raw, std::map<std::string, std::string>& out) {
+    size_t pos = 0;
+    while (pos < raw.size()) {
+        size_t eol = raw.find('\n', pos);
+        std::string line = raw.substr(pos, (eol == std::string::npos ? raw.size() : eol) - pos);
+        pos = (eol == std::string::npos) ? raw.size() : eol + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;  // status line or blank
+        std::string name = line.substr(0, colon);
+        for (char& c : name) c = (char)tolower((unsigned char)c);
+        size_t vs = colon + 1;
+        while (vs < line.size() && (line[vs] == ' ' || line[vs] == '\t')) vs++;
+        out[name] = line.substr(vs);
+    }
+}
+
 static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
                                        const std::string& url, const std::string& body,
                                        const std::vector<std::string>& hdrs,
                                        long timeout, bool captureHeaders,
-                                       std::string* outLocation) {
+                                       std::string* outLocation,
+                                       bool followRedirects = false,
+                                       const TransportOptions* opts = nullptr) {
     HttpUtil::HttpResp resp;
 
     if (!InitCurl()) {
@@ -144,7 +195,8 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
         return resp;
     }
 
-    if (url.substr(0, 8) != "https://") {
+    bool allowHttp = opts && opts->allowInsecureHttp;
+    if (url.substr(0, 8) != "https://" && !(allowHttp && url.substr(0, 7) == "http://")) {
         LOG("%s BLOCKED non-HTTPS: %s", logTag, url.c_str());
         return resp;
     }
@@ -157,7 +209,11 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
         else safeUrl += c;
     }
 
-    CURL* curl = g_curl.easy_init();
+    CURL* curl;
+    {
+        std::lock_guard<std::mutex> lock(g_curlHandleMutex);
+        curl = g_curl.easy_init();
+    }
     if (!curl) return resp;
 
     std::string responseBody;
@@ -169,15 +225,32 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
     g_curl.easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
     g_curl.easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
     g_curl.easy_setopt(curl, CURLOPT_USERAGENT, "CloudRedirect/1.0");
-    g_curl.easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    // Follow redirects only on token-stripped requests (mirrors WinHTTP defaults).
+    g_curl.easy_setopt(curl, CURLOPT_FOLLOWLOCATION, followRedirects ? 1L : 0L);
+    if (followRedirects)
+        g_curl.easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
 
     if (captureHeaders) {
         g_curl.easy_setopt(curl, CURLOPT_HEADERFUNCTION, (void*)HeaderCallback);
         g_curl.easy_setopt(curl, CURLOPT_HEADERDATA, &responseHeaders);
     }
 
+    // TLS relaxation for self-hosted endpoints (self-signed / internal CA).
+    if (opts) {
+        if (opts->allowInsecureTls) {
+            g_curl.easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+            g_curl.easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        } else if (!opts->caCertPath.empty()) {
+            g_curl.easy_setopt(curl, CURLOPT_CAINFO, opts->caCertPath.c_str());
+        }
+    }
+
     if (strcmp(method, "GET") != 0)
         g_curl.easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
+
+    // Without NOBODY, HEAD blocks waiting for a body until the timeout fires.
+    if (strcmp(method, "HEAD") == 0)
+        g_curl.easy_setopt(curl, CURLOPT_NOBODY, 1L);
 
     if (!body.empty()) {
         g_curl.easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -198,7 +271,10 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
     g_curl.easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
 
     if (slist && g_curl.slist_free_all) g_curl.slist_free_all(slist);
-    g_curl.easy_cleanup(curl);
+    {
+        std::lock_guard<std::mutex> lock(g_curlHandleMutex);
+        g_curl.easy_cleanup(curl);
+    }
 
     if (res != 0) {
         LOG("%s curl failed: %d (%s %s)", logTag, res, method, url.c_str());
@@ -208,8 +284,12 @@ static HttpUtil::HttpResp CurlRequest(const char* logTag, const char* method,
     resp.status = (int)httpCode;
     resp.body = std::move(responseBody);
 
-    if (outLocation && !responseHeaders.empty())
-        *outLocation = ExtractLocation(responseHeaders);
+    if (!responseHeaders.empty()) {
+        std::string loc = ExtractLocation(responseHeaders);
+        if (outLocation) *outLocation = loc;
+        resp.location = std::move(loc);
+        ParseHeaders(responseHeaders, resp.headers);
+    }
 
     return resp;
 }
@@ -221,33 +301,45 @@ public:
     bool Init() override { return InitCurl(); }
     void Shutdown() override {}
     bool IsReady() const override { return g_curl.handle != nullptr; }
+    void SetOptions(const TransportOptions& opts) override { m_opts = opts; }
 
     HttpUtil::HttpResp Request(const char* method, const char* host,
                                const std::string& path, const std::string& body,
                                const std::vector<std::string>& headers) override {
-        std::string url = std::string("https://") + host + path;
-        return CurlRequest(m_logTag, method, url, body, headers, 30L, false, nullptr);
+        std::string url = Scheme() + host + path;
+        return CurlRequest(m_logTag, method, url, body, headers, 30L, true, nullptr,
+                           false, &m_opts);
     }
 
     HttpUtil::HttpResp RequestUrl(const char* method, const std::string& fullUrl,
                                    const std::string& body,
                                    const std::vector<std::string>& headers) override {
-        return CurlRequest(m_logTag, method, fullUrl, body, headers, 60L, false, nullptr);
+        return CurlRequest(m_logTag, method, fullUrl, body, headers, 60L, true, nullptr,
+                           false, &m_opts);
     }
 
     HttpUtil::HttpResp AuthenticatedGetWithRedirect(const std::string& host,
                                                      const std::string& path,
                                                      const std::string& authHeader) override {
-        std::string url = std::string("https://") + host + path;
+        std::string url = Scheme() + host + path;
         std::vector<std::string> hdrs = {authHeader};
         std::string location;
-        auto resp = CurlRequest(m_logTag, "GET", url, {}, hdrs, 30L, true, &location);
+        auto resp = CurlRequest(m_logTag, "GET", url, {}, hdrs, 30L, true, &location,
+                                false, &m_opts);
         if (resp.status >= 300 && resp.status < 400 && !location.empty())
-            return CurlRequest(m_logTag, "GET", location, {}, {}, 60L, false, nullptr);
+            return CurlRequest(m_logTag, "GET", location, {}, {}, 60L, false, nullptr,
+                               /*followRedirects=*/true, &m_opts);
         return resp;
     }
 
     const char* m_logTag;
+
+private:
+    // host+path helpers use https unless plaintext HTTP was explicitly enabled.
+    std::string Scheme() const {
+        return m_opts.allowInsecureHttp ? "http://" : "https://";
+    }
+    TransportOptions m_opts;
 };
 
 std::unique_ptr<IHttpTransport> CreateHttpTransport(const char* logTag) {

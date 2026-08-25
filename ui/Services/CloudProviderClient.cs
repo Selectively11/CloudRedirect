@@ -14,9 +14,6 @@ internal sealed class CloudProviderClient
         _log = log;
     }
 
-    /// <summary>
-    /// Result of a cloud deletion operation.
-    /// </summary>
     public record DeleteResult(bool Success, int FilesDeleted, string? Error);
 
     /// <summary>Delete all cloud data for one app via the active provider.</summary>
@@ -56,10 +53,68 @@ internal sealed class CloudProviderClient
     /// </summary>
     public record ListBlobsResult(IReadOnlyList<string> BlobFilenames, bool Complete, string? Error);
 
-    /// <summary>
-    /// Result of deleting a specific set of blob filenames.
-    /// </summary>
     public record DeleteBlobsResult(int Deleted, int Failed, IReadOnlyList<string> FailedFilenames, string? Error);
+
+    /// <summary>
+    /// Result of downloading a single blob's content. Found=false when the blob
+    /// does not exist; Content is the raw (decoded) text on success.
+    /// </summary>
+    public record DownloadBlobResult(bool Found, string? Content, string? Error);
+
+    public record CloudStatsEntry(string AccountId, string AppId, string Content);
+
+    public record ListAllStatsResult(IReadOnlyList<CloudStatsEntry> Entries, string? Error);
+
+    /// <summary>Enumerate every app's stats.json in the cloud. Returns empty when no cloud is configured.</summary>
+    public async Task<ListAllStatsResult> ListAllStatsAsync(CancellationToken cancel = default)
+    {
+        var config = SteamDetector.ReadConfig();
+        var provider = UiCloudProviderFactory.TryResolve(config, _log);
+        if (provider == null)
+            return new ListAllStatsResult(Array.Empty<CloudStatsEntry>(), null);
+
+        try
+        {
+            return await provider.ListAllStatsAsync(cancel);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new ListAllStatsResult(Array.Empty<CloudStatsEntry>(), ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Download a single metadata blob (e.g. stats.json) from the cloud provider.
+    /// Returns Found=false when there is no cloud configured or the blob is absent.
+    /// </summary>
+    public async Task<DownloadBlobResult> DownloadAppBlobAsync(
+        string accountId, string appId, string filename, CancellationToken cancel = default)
+    {
+        if (IsUnsafeBlobName(filename))
+            return new DownloadBlobResult(false, null, "Unsafe blob name");
+
+        var config = SteamDetector.ReadConfig();
+        var provider = UiCloudProviderFactory.TryResolve(config, _log);
+        if (provider == null)
+            return new DownloadBlobResult(false, null, null); // local-only / no cloud
+
+        try
+        {
+            return await provider.DownloadAppBlobAsync(accountId, appId, filename, cancel);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new DownloadBlobResult(false, null, ex.Message);
+        }
+    }
 
     /// <summary>List blob filenames under {accountId}/{appId}/blobs/. Local/no-cloud always Complete=true.</summary>
     public async Task<ListBlobsResult> ListAppBlobsAsync(string accountId, string appId, CancellationToken cancel = default)

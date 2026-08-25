@@ -35,3 +35,39 @@ inline QString realHomePath()
     }
     return QDir::homePath();
 }
+
+inline bool inFlatpak()
+{
+    static const bool cached = QFile::exists("/.flatpak-info");
+    return cached;
+}
+
+inline QString xdgConfigHome()
+{
+    if (!inFlatpak()) {
+        const char* xdg = std::getenv("XDG_CONFIG_HOME");
+        if (xdg && xdg[0] == '/')
+            return QString::fromUtf8(xdg);
+    }
+    return realHomePath() + "/.config";
+}
+
+inline QString xdgDataHome()
+{
+    if (!inFlatpak()) {
+        const char* xdg = std::getenv("XDG_DATA_HOME");
+        if (xdg && xdg[0] == '/')
+            return QString::fromUtf8(xdg);
+    }
+    return realHomePath() + "/.local/share";
+}
+
+inline QString crConfigDir()
+{
+    return xdgConfigHome() + "/CloudRedirect";
+}
+
+inline QString crDataDir()
+{
+    return xdgDataHome() + "/CloudRedirect";
+}

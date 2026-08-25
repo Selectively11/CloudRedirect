@@ -22,7 +22,8 @@ uint64_t BatchTracker_ActiveId(uint32_t accountId, uint32_t appId) {
     return it == g_activeUploadBatches.end() ? 0 : it->second.batchId;
 }
 
-void BatchTracker_Begin(uint32_t accountId, uint32_t appId, uint64_t batchId, uint64_t assignedCN, uint64_t appBuildId) {
+void BatchTracker_Begin(uint32_t accountId, uint32_t appId, uint64_t batchId, uint64_t assignedCN, uint64_t appBuildId,
+                        int declaredUploads, int declaredDeletes) {
     uint64_t key = MakeAppAccountKey(accountId, appId);
     std::lock_guard<std::mutex> lock(g_uploadBatchMutex);
     if (g_activeUploadBatches.find(key) != g_activeUploadBatches.end()) {
@@ -35,17 +36,22 @@ void BatchTracker_Begin(uint32_t accountId, uint32_t appId, uint64_t batchId, ui
     state.batchId = batchId;
     state.assignedCN = assignedCN;
     state.appBuildId = appBuildId;
+    state.declaredUploads = declaredUploads;
+    state.declaredDeletes = declaredDeletes;
     g_activeUploadBatches[key] = std::move(state);
 }
 
 void BatchTracker_RecordUpload(uint32_t accountId, uint32_t appId,
-                               const std::string& filename) {
+                               const std::string& filename,
+                               const std::vector<uint8_t>& sha,
+                               uint64_t size, uint64_t timestamp) {
     uint64_t key = MakeAppAccountKey(accountId, appId);
     std::lock_guard<std::mutex> lock(g_uploadBatchMutex);
     auto it = g_activeUploadBatches.find(key);
     if (it == g_activeUploadBatches.end()) return;
     it->second.deletes.erase(filename);
     it->second.uploads.insert(filename);
+    it->second.uploadMeta[filename] = { sha, size, timestamp };
 }
 
 void BatchTracker_RecordDelete(uint32_t accountId, uint32_t appId,

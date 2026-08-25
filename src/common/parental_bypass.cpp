@@ -128,7 +128,7 @@ std::vector<uint8_t> StripPlaytimeRestrictions(const uint8_t* data, size_t len, 
         switch (f.wireType) {
             case PB::Varint:          out.WriteVarint(f.fieldNum, f.varintVal); break;
             case PB::Fixed64:         out.WriteFixed64(f.fieldNum, f.varintVal); break;
-            case PB::Fixed32:         out.WriteVarint(f.fieldNum, f.varintVal); break;
+            case PB::Fixed32:         out.WriteFixed32(f.fieldNum, (uint32_t)f.varintVal); break;
             case PB::LengthDelimited: out.WriteBytes(f.fieldNum, f.data, f.dataLen); break;
         }
     }

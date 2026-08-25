@@ -22,7 +22,14 @@
 #include <QRegularExpression>
 #include <QAtomicInt>
 #include <QThread>
+#include <QVariantMap>
 #include <unistd.h>
+#include <fcntl.h>
+#include <cerrno>
+
+// Defined below; used by loadConfig() before its definition.
+static bool r2CredentialsValid(const QString &path);
+static bool s3CredentialsValid(const QString &path);
 
 static const char* GDRIVE_CLIENT_ID = "1072944905499-vm2v2i5dvn0a0d2o4ca36i1vge8cvbn0.apps.googleusercontent.com";
 static const char* GDRIVE_CLIENT_SECRET = "v6V3fKV_zWU7iw1DrpO1rknX";
@@ -52,7 +59,7 @@ static void copyDir(const QString &src, const QString &dst, QJsonArray &undoOps,
 
 static QString backupRootForAccount(const QString &accountId)
 {
-    return QDir::cleanPath(realHomePath() + "/.config/CloudRedirect/backups/" + accountId);
+    return QDir::cleanPath(crConfigDir() + "/backups/" + accountId);
 }
 
 static bool isPathWithin(const QString &root, const QString &path)
@@ -106,13 +113,13 @@ void Backend::detectSteamPath()
             m_steamPath = home + "/.steam/steam";
     }
 
-    m_storagePath = home + "/.config/CloudRedirect/storage";
+    m_storagePath = crConfigDir() + "/storage";
 
     m_deployed = false;
-    QString crPath = home + "/.local/share/CloudRedirect/cloud_redirect.so";
+    QString crPath = crDataDir() + "/cloud_redirect.so";
     m_deployed = QFile::exists(crPath);
 
-    // Parse account ID from loginusers.vdf
+    // Parse account ID from loginusers.vdf (MostRecent > AutoLogin > Timestamp)
     QString loginUsersPath = m_steamPath + "/config/loginusers.vdf";
     QFile f(loginUsersPath);
     if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -124,6 +131,9 @@ void Backend::detectSteamPath()
         QString currentPersonaName;
         bool inUser = false;
         int depth = 0;
+
+        quint64 bestTsSid = 0, bestTs = 0;
+        QString bestTsPersona;
 
         for (const auto &line : lines) {
             QString trimmed = line.trimmed();
@@ -160,7 +170,33 @@ void Backend::detectSteamPath()
                     m_accountId = QString::number(sid & 0xFFFFFFFF);
                     m_accountName = currentPersonaName;
                 }
+                if (m_accountId.isEmpty() && trimmed.contains("\"AutoLogin\"") && trimmed.contains("\"1\"")) {
+                    quint64 sid = currentId.toULongLong();
+                    m_accountId = QString::number(sid & 0xFFFFFFFF);
+                    m_accountName = currentPersonaName;
+                }
+                if (m_accountId.isEmpty() && trimmed.contains("\"Timestamp\"")) {
+                    static const QString kTimestamp = "\"Timestamp\"";
+                    int vStart = trimmed.indexOf('"', trimmed.indexOf(kTimestamp) + kTimestamp.length());
+                    if (vStart > 0) {
+                        int vEnd = trimmed.indexOf('"', vStart + 1);
+                        if (vEnd > vStart) {
+                            quint64 ts = trimmed.mid(vStart + 1, vEnd - vStart - 1).toULongLong();
+                            if (ts > bestTs) {
+                                bestTs = ts;
+                                bestTsSid = currentId.toULongLong();
+                                bestTsPersona = currentPersonaName;
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        // Last resort: use the user with the highest Timestamp
+        if (m_accountId.isEmpty() && bestTsSid != 0) {
+            m_accountId = QString::number(bestTsSid & 0xFFFFFFFF);
+            m_accountName = bestTsPersona;
         }
     }
 }
@@ -221,7 +257,7 @@ void Backend::loadSLSsteamApps()
     QString home = realHomePath();
 
     QStringList configPaths = {
-        home + "/.config/SLSsteam/config.yaml",
+        xdgConfigHome() + "/SLSsteam/config.yaml",
         home + "/.var/app/com.valvesoftware.Steam/.config/SLSsteam/config.yaml",
     };
 
@@ -268,7 +304,7 @@ void Backend::loadSLSsteamApps()
 
 void Backend::loadConfig()
 {
-    QString configPath = realHomePath() + "/.config/CloudRedirect/config.json";
+    QString configPath = crConfigDir() + "/config.json";
     fprintf(stderr, "[Backend] loadConfig from: %s\n", configPath.toUtf8().constData());
     QFile f(configPath);
     if (!f.open(QIODevice::ReadOnly)) {
@@ -287,6 +323,9 @@ void Backend::loadConfig()
     m_providerName = obj.value("provider").toString("local");
     m_syncFolderPath = obj.value("sync_folder_path").toString();
     m_notificationsEnabled = obj.value("notifications_enabled").toBool(true);
+    m_statsSyncEnabled = obj.value("stats_sync_enabled").toBool(true);
+    m_syncAchievements = obj.value("sync_achievements").toBool(false);
+    m_syncPlaytime = obj.value("sync_playtime").toBool(false);
     fprintf(stderr, "[Backend] loadConfig: provider=%s syncFolder=%s notifications=%s\n",
         m_providerName.toUtf8().constData(), m_syncFolderPath.toUtf8().constData(),
         m_notificationsEnabled ? "true" : "false");
@@ -297,12 +336,16 @@ void Backend::loadConfig()
         if (QFile::exists(tokenPath)) {
             m_providerAuthenticated = true;
         }
+    } else if (m_providerName == "r2") {
+        m_providerAuthenticated = r2CredentialsValid(r2CredentialPath());
+    } else if (m_providerName == "s3") {
+        m_providerAuthenticated = s3CredentialsValid(s3CredentialPath());
     } else if (m_providerName == "folder" && !m_syncFolderPath.isEmpty()) {
         m_providerAuthenticated = QDir(m_syncFolderPath).exists();
     }
 
     // Load store cache (names and header URLs)
-    QString cachePath = realHomePath() + "/.config/CloudRedirect/store_cache.json";
+    QString cachePath = crConfigDir() + "/store_cache.json";
     QFile cacheFile(cachePath);
     if (cacheFile.open(QIODevice::ReadOnly)) {
         QJsonDocument cacheDoc = QJsonDocument::fromJson(cacheFile.readAll());
@@ -337,7 +380,7 @@ void Backend::loadConfig()
 
 void Backend::saveConfig()
 {
-    QString configDir = realHomePath() + "/.config/CloudRedirect";
+    QString configDir = crConfigDir();
     QDir().mkpath(configDir);
 
     QString configPath = configDir + "/config.json";
@@ -355,6 +398,9 @@ void Backend::saveConfig()
     obj["provider"] = m_providerName;
     obj["sync_folder_path"] = m_syncFolderPath;
     obj["notifications_enabled"] = m_notificationsEnabled;
+    obj["stats_sync_enabled"] = m_statsSyncEnabled;
+    obj["sync_achievements"] = m_syncAchievements;
+    obj["sync_playtime"] = m_syncPlaytime;
 
     // Atomic write: write to temp, then rename
     QString tempPath = configPath + ".tmp";
@@ -409,6 +455,33 @@ void Backend::setNotificationsEnabled(bool enabled)
     saveConfig();
 }
 
+bool Backend::statsSyncEnabled() const { return m_statsSyncEnabled; }
+void Backend::setStatsSyncEnabled(bool enabled)
+{
+    if (m_statsSyncEnabled == enabled) return;
+    m_statsSyncEnabled = enabled;
+    saveConfig();
+    emit settingsChanged();
+}
+
+bool Backend::syncAchievements() const { return m_syncAchievements; }
+void Backend::setSyncAchievements(bool enabled)
+{
+    if (m_syncAchievements == enabled) return;
+    m_syncAchievements = enabled;
+    saveConfig();
+    emit settingsChanged();
+}
+
+bool Backend::syncPlaytime() const { return m_syncPlaytime; }
+void Backend::setSyncPlaytime(bool enabled)
+{
+    if (m_syncPlaytime == enabled) return;
+    m_syncPlaytime = enabled;
+    saveConfig();
+    emit settingsChanged();
+}
+
 QVariantList Backend::getManagedApps()
 {
     QVariantList list;
@@ -455,7 +528,7 @@ void Backend::deleteAppData(uint appId)
 
     QString appDir = m_storagePath + "/" + m_accountId + "/" + QString::number(appId);
     QString userdataDir = m_steamPath + "/userdata/" + m_accountId + "/" + QString::number(appId);
-    QString backupRoot = realHomePath() + "/.config/CloudRedirect/backups/" + m_accountId;
+    QString backupRoot = crConfigDir() + "/backups/" + m_accountId;
     QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss");
     QString backupDir = backupRoot + "/" + QString::number(appId) + "_" + timestamp;
 
@@ -605,7 +678,7 @@ void Backend::resolveAppNames()
         }
 
         // Save cache
-        QString cachePath = realHomePath() + "/.config/CloudRedirect/store_cache.json";
+        QString cachePath = crConfigDir() + "/store_cache.json";
         QJsonObject cacheObj;
         for (auto it = m_nameCache.begin(); it != m_nameCache.end(); ++it) {
             QJsonObject entry;
@@ -638,7 +711,7 @@ void Backend::refreshStatus()
 
 QString Backend::defaultTokenPath(const QString &provider) const
 {
-    return realHomePath() + "/.config/CloudRedirect/tokens_" + provider + ".json";
+    return crConfigDir() + "/tokens_" + provider + ".json";
 }
 
 void Backend::startOAuth(const QString &provider)
@@ -653,7 +726,7 @@ void Backend::startOAuth(const QString &provider)
 
 void Backend::openLogFile()
 {
-    QString logPath = realHomePath() + "/.config/CloudRedirect/cloud_redirect.log";
+    QString logPath = crConfigDir() + "/cloud_redirect.log";
     if (QFile::exists(logPath)) {
         QDesktopServices::openUrl(QUrl::fromLocalFile(logPath));
     }
@@ -661,7 +734,7 @@ void Backend::openLogFile()
 
 void Backend::openConfigFolder()
 {
-    QString configPath = realHomePath() + "/.config/CloudRedirect";
+    QString configPath = crConfigDir();
     QDir().mkpath(configPath);
     QDesktopServices::openUrl(QUrl::fromLocalFile(configPath));
 }
@@ -867,6 +940,13 @@ void Backend::fetchRemoteApps()
     if (m_accountId.isEmpty()) {
         return;
     }
+
+    // R2/S3: use CLI scan-all to list remote apps.
+    if (m_providerName == "r2" || m_providerName == "s3") {
+        fetchCliRemoteApps(m_providerName);
+        return;
+    }
+
     if (m_providerName != "gdrive" && m_providerName != "onedrive" && m_providerName != "proton") {
         fprintf(stderr, "[Backend] provider is not gdrive/onedrive/proton, skipping\n");
         emit remoteAppsFetched();
@@ -894,6 +974,80 @@ void Backend::fetchRemoteApps()
 void Backend::refreshAndFetch()
 {
     fetchRemoteApps();
+}
+
+void Backend::fetchCliRemoteApps(const QString &provider)
+{
+    QString cli = cliExecutablePath();
+    if (cli.isEmpty()) {
+        emit remoteAppsFetched();
+        return;
+    }
+
+    auto *proc = new QProcess(this);
+    proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError) {
+        fprintf(stderr, "[Backend] CLI scan-all failed to launch: %s\n",
+                proc->errorString().toUtf8().constData());
+        proc->deleteLater();
+        emit remoteAppsFetched();
+    });
+
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc](int exitCode, QProcess::ExitStatus) {
+        const QByteArray out = proc->readAllStandardOutput();
+        proc->deleteLater();
+
+        QJsonParseError perr;
+        QJsonDocument doc = QJsonDocument::fromJson(out, &perr);
+        if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+            fprintf(stderr, "[Backend] CLI scan-all: invalid JSON (exit %d)\n", exitCode);
+            emit remoteAppsFetched();
+            return;
+        }
+        QJsonObject root = doc.object();
+        if (root.contains("error")) {
+            fprintf(stderr, "[Backend] CLI scan-all error: %s\n",
+                    root.value("error").toString().toUtf8().constData());
+            emit remoteAppsFetched();
+            return;
+        }
+
+        m_remoteAppIds.clear();
+        for (const QJsonValue &v : root.value("apps").toArray()) {
+            QJsonObject o = v.toObject();
+            QString appIdStr = o.value("app_id").toString();
+            bool ok;
+            uint32_t appId = appIdStr.toUInt(&ok);
+            if (ok && appId > 0 && !kHiddenAppIds.contains(appId))
+                m_remoteAppIds.insert(appId);
+        }
+
+        QSet<uint32_t> localAppIds;
+        for (auto &app : m_apps) {
+            localAppIds.insert(app.appId);
+            if (m_remoteAppIds.contains(app.appId))
+                app.isRemote = true;
+        }
+        for (uint32_t appId : m_remoteAppIds) {
+            if (!localAppIds.contains(appId)) {
+                QString name = m_nameCache.value(appId, QString("App %1").arg(appId));
+                m_apps.append({appId, name, QString(), QString(), 0, 0, false, true});
+            }
+        }
+
+        fprintf(stderr, "[Backend] CLI remote apps: %d remote IDs, %d total apps\n",
+                (int)m_remoteAppIds.size(), (int)m_apps.size());
+        emit appsChanged();
+        emit remoteAppsFetched();
+        QTimer::singleShot(0, this, &Backend::resolveAppNames);
+    });
+
+    QString program;
+    QStringList args;
+    cliLaunch(cli, {"scan-all", provider}, program, args);
+    proc->start(program, args);
 }
 
 void Backend::fetchGoogleDriveApps(const QString &token)
@@ -1491,14 +1645,363 @@ QString Backend::getAppHeaderUrl(uint appId) const
     return QString("https://shared.steamstatic.com/store_item_assets/steam/apps/%1/header.jpg").arg(appId);
 }
 
+// Verify an R2 credentials file exists and carries all four required fields.
+// Mirrors the native R2Provider::Init validation (account_id, access_key_id,
+// secret_access_key, bucket must all be non-empty). Values are not checked
+// against R2 -- that happens at runtime in the DLL.
+static bool r2CredentialsValid(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    f.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject o = doc.object();
+    const char *required[] = { "account_id", "access_key_id",
+                               "secret_access_key", "bucket" };
+    for (const char *k : required) {
+        if (o.value(k).toString().isEmpty())
+            return false;
+    }
+    return true;
+}
+
+static bool s3CredentialsValid(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    f.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject o = doc.object();
+    // Generic S3 needs an explicit endpoint + region (no account-derived host).
+    const char *required[] = { "access_key_id", "secret_access_key",
+                               "bucket", "endpoint", "region" };
+    for (const char *k : required) {
+        if (o.value(k).toString().isEmpty())
+            return false;
+    }
+    return true;
+}
+
 bool Backend::isProviderAuthenticated(const QString &provider) const
 {
-    // OAuth-based providers only - "folder" and "local" don't use OAuth
+    // "folder"/"local" don't authenticate.
     if (provider == "local" || provider == "folder")
         return false;
-    
+
+    // R2 uses static credentials in r2_credentials.json, not an OAuth token.
+    if (provider == "r2")
+        return r2CredentialsValid(r2CredentialPath());
+
+    // S3-compatible providers likewise use static credentials, not OAuth.
+    if (provider == "s3")
+        return s3CredentialsValid(s3CredentialPath());
+
     QString tokenPath = defaultTokenPath(provider);
     return QFile::exists(tokenPath);
+}
+
+QString Backend::r2CredentialPath() const
+{
+    // Must match the native CLI convention (cli.cpp: provider "r2" ->
+    // r2_credentials.json) so the DLL finds it without an explicit token_path.
+    return crConfigDir() + "/r2_credentials.json";
+}
+
+QVariantMap Backend::getR2Credentials() const
+{
+    QVariantMap out;
+    QFile f(r2CredentialPath());
+    if (!f.open(QIODevice::ReadOnly))
+        return out;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    f.close();
+    if (!doc.isObject())
+        return out;
+    QJsonObject o = doc.object();
+    out["account_id"]   = o.value("account_id").toString();
+    out["access_key_id"]= o.value("access_key_id").toString();
+    out["bucket"]       = o.value("bucket").toString();
+    out["key_prefix"]   = o.value("key_prefix").toString();
+    out["endpoint"]     = o.value("endpoint").toString();
+    // Never expose the secret back to the UI; just report whether one is set so
+    // the form can show a placeholder and leave the field blank on re-edit.
+    out["has_secret"]   = !o.value("secret_access_key").toString().isEmpty();
+    return out;
+}
+
+bool Backend::saveR2Credentials(const QString &accountId,
+                                const QString &accessKeyId,
+                                const QString &secretAccessKey,
+                                const QString &bucket,
+                                const QString &keyPrefix,
+                                const QString &endpoint)
+{
+    const QString acct   = accountId.trimmed();
+    const QString access = accessKeyId.trimmed();
+    QString secret       = secretAccessKey.trimmed();
+    const QString buck   = bucket.trimmed();
+
+    if (acct.isEmpty() || access.isEmpty() || buck.isEmpty()) {
+        fprintf(stderr, "[Backend] saveR2Credentials: missing required field\n");
+        return false;
+    }
+
+    // The secret may be left blank on re-edit to keep the existing one. Only
+    // reuse it when a valid file already exists; otherwise a blank secret is an
+    // error (nothing to fall back to).
+    const QString credPath = r2CredentialPath();
+    if (secret.isEmpty()) {
+        QFile f(credPath);
+        if (f.open(QIODevice::ReadOnly)) {
+            QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+            f.close();
+            if (doc.isObject())
+                secret = doc.object().value("secret_access_key").toString();
+        }
+        if (secret.isEmpty()) {
+            fprintf(stderr, "[Backend] saveR2Credentials: no secret provided and "
+                            "none on file\n");
+            return false;
+        }
+    }
+
+    QJsonObject o;
+    o["account_id"]        = acct;
+    o["access_key_id"]     = access;
+    o["secret_access_key"] = secret;
+    o["bucket"]            = buck;
+    if (!keyPrefix.trimmed().isEmpty())
+        o["key_prefix"] = keyPrefix.trimmed();
+    if (!endpoint.trimmed().isEmpty())
+        o["endpoint"] = endpoint.trimmed();
+
+    QDir().mkpath(crConfigDir());
+
+    // Atomic write with 0600 perms (credentials are sensitive), mirroring the
+    // OAuth token writer in oauthservice.cpp.
+    const QByteArray data = QJsonDocument(o).toJson();
+    const QString tempPath = credPath + ".tmp";
+    int fd = open(tempPath.toUtf8().constData(),
+                  O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[Backend] saveR2Credentials: cannot open temp file\n");
+        return false;
+    }
+    qint64 written = 0;
+    while (written < data.size()) {
+        ssize_t n = ::write(fd, data.constData() + written, data.size() - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            unlink(tempPath.toUtf8().constData());
+            fprintf(stderr, "[Backend] saveR2Credentials: write failed\n");
+            return false;
+        }
+        written += n;
+    }
+    ::close(fd);
+    if (rename(tempPath.toUtf8().constData(), credPath.toUtf8().constData()) != 0) {
+        unlink(tempPath.toUtf8().constData());
+        fprintf(stderr, "[Backend] saveR2Credentials: rename failed\n");
+        return false;
+    }
+
+    // Register the credential path in config so the native side resolves it even
+    // if the convention filename ever changes. saveConfig() preserves unknown
+    // keys, so read-modify-write token_paths here directly.
+    const QString configPath = crConfigDir() + "/config.json";
+    QJsonObject cfg;
+    QFile cf(configPath);
+    if (cf.open(QIODevice::ReadOnly)) {
+        QJsonDocument d = QJsonDocument::fromJson(cf.readAll());
+        cf.close();
+        if (d.isObject())
+            cfg = d.object();
+    }
+    QJsonObject tokenPaths = cfg.value("token_paths").toObject();
+    tokenPaths["r2"] = credPath;
+    cfg["token_paths"] = tokenPaths;
+    {
+        const QByteArray cfgData = QJsonDocument(cfg).toJson();
+        const QString cfgTemp = configPath + ".tmp";
+        QFile w(cfgTemp);
+        if (w.open(QIODevice::WriteOnly)) {
+            w.write(cfgData);
+            w.close();
+            if (!QFile::rename(cfgTemp, configPath)) {
+                QFile::remove(configPath);
+                QFile::rename(cfgTemp, configPath);
+            }
+        }
+    }
+
+    // Refresh cached auth flag and notify QML.
+    m_providerAuthenticated = (m_providerName == "r2");
+    emit settingsChanged();
+    return true;
+}
+
+QString Backend::s3CredentialPath() const
+{
+    // Must match the native CLI convention (cli.cpp / ResolveProviderTokenPath:
+    // provider "s3" -> s3_credentials.json) so the DLL finds it without an
+    // explicit token_path.
+    return crConfigDir() + "/s3_credentials.json";
+}
+
+QVariantMap Backend::getS3Credentials() const
+{
+    QVariantMap out;
+    QFile f(s3CredentialPath());
+    if (!f.open(QIODevice::ReadOnly))
+        return out;
+    QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+    f.close();
+    if (!doc.isObject())
+        return out;
+    QJsonObject o = doc.object();
+    out["access_key_id"]       = o.value("access_key_id").toString();
+    out["bucket"]              = o.value("bucket").toString();
+    out["endpoint"]            = o.value("endpoint").toString();
+    out["region"]              = o.value("region").toString();
+    out["key_prefix"]          = o.value("key_prefix").toString();
+    out["sign_payload"]        = o.value("sign_payload").toBool();
+    out["allow_insecure_http"] = o.value("allow_insecure_http").toBool();
+    out["allow_insecure_tls"]  = o.value("allow_insecure_tls").toBool();
+    out["ca_cert_path"]        = o.value("ca_cert_path").toString();
+    // Never expose the secret back to the UI; just report whether one is set.
+    out["has_secret"]          = !o.value("secret_access_key").toString().isEmpty();
+    return out;
+}
+
+bool Backend::saveS3Credentials(const QString &accessKeyId,
+                                const QString &secretAccessKey,
+                                const QString &bucket,
+                                const QString &endpoint,
+                                const QString &region,
+                                const QString &keyPrefix,
+                                bool signPayload,
+                                bool allowInsecureHttp,
+                                bool allowInsecureTls,
+                                const QString &caCertPath)
+{
+    const QString access = accessKeyId.trimmed();
+    QString secret       = secretAccessKey.trimmed();
+    const QString buck   = bucket.trimmed();
+    const QString endp   = endpoint.trimmed();
+    const QString reg    = region.trimmed();
+
+    if (access.isEmpty() || buck.isEmpty() || endp.isEmpty() || reg.isEmpty()) {
+        fprintf(stderr, "[Backend] saveS3Credentials: missing required field\n");
+        return false;
+    }
+
+    // The secret may be left blank on re-edit to keep the existing one. Only
+    // reuse it when a valid file already exists; otherwise a blank secret is an
+    // error (nothing to fall back to).
+    const QString credPath = s3CredentialPath();
+    if (secret.isEmpty()) {
+        QFile f(credPath);
+        if (f.open(QIODevice::ReadOnly)) {
+            QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+            f.close();
+            if (doc.isObject())
+                secret = doc.object().value("secret_access_key").toString();
+        }
+        if (secret.isEmpty()) {
+            fprintf(stderr, "[Backend] saveS3Credentials: no secret provided and "
+                            "none on file\n");
+            return false;
+        }
+    }
+
+    QJsonObject o;
+    o["access_key_id"]     = access;
+    o["secret_access_key"] = secret;
+    o["bucket"]            = buck;
+    o["endpoint"]          = endp;
+    o["region"]            = reg;
+    if (!keyPrefix.trimmed().isEmpty())
+        o["key_prefix"] = keyPrefix.trimmed();
+    // Transport/signing options -- only emit when set to keep the file minimal.
+    if (signPayload)
+        o["sign_payload"] = true;
+    if (allowInsecureHttp)
+        o["allow_insecure_http"] = true;
+    if (allowInsecureTls)
+        o["allow_insecure_tls"] = true;
+    if (!caCertPath.trimmed().isEmpty())
+        o["ca_cert_path"] = caCertPath.trimmed();
+
+    QDir().mkpath(crConfigDir());
+
+    // Atomic write with 0600 perms (credentials are sensitive), mirroring the
+    // R2 credential writer above.
+    const QByteArray data = QJsonDocument(o).toJson();
+    const QString tempPath = credPath + ".tmp";
+    int fd = open(tempPath.toUtf8().constData(),
+                  O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "[Backend] saveS3Credentials: cannot open temp file\n");
+        return false;
+    }
+    qint64 written = 0;
+    while (written < data.size()) {
+        ssize_t n = ::write(fd, data.constData() + written, data.size() - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            unlink(tempPath.toUtf8().constData());
+            fprintf(stderr, "[Backend] saveS3Credentials: write failed\n");
+            return false;
+        }
+        written += n;
+    }
+    ::close(fd);
+    if (rename(tempPath.toUtf8().constData(), credPath.toUtf8().constData()) != 0) {
+        unlink(tempPath.toUtf8().constData());
+        fprintf(stderr, "[Backend] saveS3Credentials: rename failed\n");
+        return false;
+    }
+
+    // Register the credential path in config so the native side resolves it even
+    // if the convention filename ever changes.
+    const QString configPath = crConfigDir() + "/config.json";
+    QJsonObject cfg;
+    QFile cf(configPath);
+    if (cf.open(QIODevice::ReadOnly)) {
+        QJsonDocument d = QJsonDocument::fromJson(cf.readAll());
+        cf.close();
+        if (d.isObject())
+            cfg = d.object();
+    }
+    QJsonObject tokenPaths = cfg.value("token_paths").toObject();
+    tokenPaths["s3"] = credPath;
+    cfg["token_paths"] = tokenPaths;
+    {
+        const QByteArray cfgData = QJsonDocument(cfg).toJson();
+        const QString cfgTemp = configPath + ".tmp";
+        QFile w(cfgTemp);
+        if (w.open(QIODevice::WriteOnly)) {
+            w.write(cfgData);
+            w.close();
+            if (!QFile::rename(cfgTemp, configPath)) {
+                QFile::remove(configPath);
+                QFile::rename(cfgTemp, configPath);
+            }
+        }
+    }
+
+    // Refresh cached auth flag and notify QML.
+    m_providerAuthenticated = (m_providerName == "s3");
+    emit settingsChanged();
+    return true;
 }
 
 bool Backend::shouldOfferAutoUpdates() const
@@ -1511,7 +2014,7 @@ bool Backend::shouldOfferAutoUpdates() const
         return false;
 
     // Check if user already dismissed
-    QString configPath = realHomePath() + "/.config/CloudRedirect/config.json";
+    QString configPath = crConfigDir() + "/config.json";
     QFile f(configPath);
     if (f.open(QIODevice::ReadOnly)) {
         QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
@@ -1566,7 +2069,7 @@ void Backend::enableAutoUpdates()
 void Backend::dismissAutoUpdatePrompt()
 {
     // Set flag in config
-    QString configPath = realHomePath() + "/.config/CloudRedirect/config.json";
+    QString configPath = crConfigDir() + "/config.json";
     QJsonObject obj;
 
     QFile f(configPath);
@@ -1578,7 +2081,7 @@ void Backend::dismissAutoUpdatePrompt()
 
     obj["auto_update_prompted"] = true;
 
-    QDir().mkpath(realHomePath() + "/.config/CloudRedirect");
+    QDir().mkpath(crConfigDir());
     QString tempPath = configPath + ".tmp";
     QFile tmp(tempPath);
     if (tmp.open(QIODevice::WriteOnly)) {
@@ -1610,10 +2113,41 @@ void Backend::checkForFlatpakUpdate()
     if (!remotes.contains("cloudredirect"))
         return;
 
-    QString updates = runFlatpakHostCommand({"remote-ls", "--user", "--updates", "--app", "cloudredirect"});
-    if (updates.contains("org.cloudredirect.CloudRedirect")) {
-        emit flatpakUpdateAvailable();
+    // Get remote version and compare against running version
+    QString info = runFlatpakHostCommand({"remote-info", "--user", "cloudredirect", "org.cloudredirect.CloudRedirect"});
+    QString remoteVersion;
+    for (const QString &line : info.split('\n')) {
+        if (line.trimmed().startsWith("Version:")) {
+            remoteVersion = line.mid(line.indexOf(':') + 1).trimmed();
+            break;
+        }
     }
+
+    if (remoteVersion.isEmpty())
+        return;
+
+    // Compare versions: only notify if remote is strictly newer
+    QString current = QCoreApplication::applicationVersion();
+    auto parseVer = [](const QString &v) -> QList<int> {
+        // Strip prerelease suffix (e.g. "-TEST4") for comparison
+        QString base = v.section('-', 0, 0);
+        QList<int> parts;
+        for (const QString &p : base.split('.'))
+            parts.append(p.toInt());
+        while (parts.size() < 3) parts.append(0);
+        return parts;
+    };
+
+    QList<int> rv = parseVer(remoteVersion);
+    QList<int> cv = parseVer(current);
+    bool remoteNewer = false;
+    for (int i = 0; i < 3; ++i) {
+        if (rv[i] > cv[i]) { remoteNewer = true; break; }
+        if (rv[i] < cv[i]) break;
+    }
+
+    if (remoteNewer)
+        emit flatpakUpdateAvailable();
 }
 
 void Backend::applyFlatpakUpdate()
@@ -1621,4 +2155,519 @@ void Backend::applyFlatpakUpdate()
     QString output = runFlatpakHostCommand({"update", "--user", "-y", "org.cloudredirect.CloudRedirect"}, 120000);
     bool ok = (output.contains("org.cloudredirect.CloudRedirect") && !output.contains("error:"));
     emit flatpakUpdateCompleted(ok);
+}
+
+// ── Cloud provider migration ────────────────────────────────────────────
+
+QString Backend::providerLabel(const QString &provider) const
+{
+    if (provider == "gdrive")   return "Google Drive";
+    if (provider == "onedrive") return "OneDrive";
+    if (provider == "r2")       return "Cloudflare R2";
+    if (provider == "s3")       return "S3 Compatible";
+    if (provider == "folder")   return "Custom Folder";
+    if (provider == "local")    return "Local Storage";
+    return provider;
+}
+
+QString Backend::activeProvider() const
+{
+    return m_providerName;
+}
+
+// Resolve <provider>'s token path: token_paths registry, then active
+// provider's token_path, then convention filename. Mirrors the native side.
+QString Backend::resolveTokenPath(const QString &provider) const
+{
+    const QString configPath = crConfigDir() + "/config.json";
+    QFile f(configPath);
+    if (f.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+        f.close();
+        if (doc.isObject()) {
+            QJsonObject root = doc.object();
+
+            // 1) Per-provider registry (survives provider switches).
+            QJsonObject tps = root.value("token_paths").toObject();
+            QString perProv = tps.value(provider).toString();
+            if (!perProv.isEmpty())
+                return perProv;
+
+            // 2) Active provider's token_path.
+            if (root.value("provider").toString() == provider) {
+                QString tp = root.value("token_path").toString();
+                if (!tp.isEmpty())
+                    return tp;
+            }
+        }
+    }
+
+    // 3) Convention fallback: Linux writes tokens_<provider>.json (defaultTokenPath).
+    if (provider == "r2")
+        return crConfigDir() + "/r2_credentials.json";
+    if (provider == "s3")
+        return crConfigDir() + "/s3_credentials.json";
+    return defaultTokenPath(provider);
+}
+
+QVariantMap Backend::checkProviderCredentials(const QString &provider) const
+{
+    QVariantMap out;
+    QString tokenPath = resolveTokenPath(provider);
+    if (tokenPath.isEmpty()) {
+        out["ok"] = false;
+        out["message"] = "Cannot determine credential path";
+        return out;
+    }
+    QFileInfo fi(tokenPath);
+    if (!fi.exists()) {
+        out["ok"] = false;
+        out["message"] = "Credential file not found.\nExpected: " + tokenPath;
+        return out;
+    }
+    if (fi.size() == 0) {
+        out["ok"] = false;
+        out["message"] = "Credential file is empty: " + fi.fileName();
+        return out;
+    }
+    out["ok"] = true;
+    out["message"] = "Credentials found";
+    return out;
+}
+
+// Locate the deployed CLI (crDataDir()/cloud_redirect_cli). It's a 32-bit
+// binary run on the host via flatpak-spawn, so resolve the host path.
+QString Backend::cliExecutablePath() const
+{
+    QString deployed = crDataDir() + "/cloud_redirect_cli";
+    if (QFile::exists(deployed))
+        return deployed;
+
+    // Not deployed; outside a flatpak, try local candidates.
+    if (!inFlatpak()) {
+        const QString bundledEnv = qEnvironmentVariable("CR_BUNDLED_CLI");
+        if (!bundledEnv.isEmpty() && QFile::exists(bundledEnv))
+            return bundledEnv;
+        const QStringList candidates = {
+            QCoreApplication::applicationDirPath() + "/cloud_redirect_cli",
+            xdgDataHome() + "/cloud_redirect/cloud_redirect_cli",
+        };
+        for (const QString &c : candidates) {
+            if (QFile::exists(c))
+                return c;
+        }
+    }
+
+    // Auto-deploy: if a bundled source exists, copy it to the data dir now.
+    QString source;
+    const QString bundledEnv = qEnvironmentVariable("CR_BUNDLED_CLI");
+    if (!bundledEnv.isEmpty() && QFile::exists(bundledEnv))
+        source = bundledEnv;
+    else if (QFile::exists(QCoreApplication::applicationDirPath() + "/cloud_redirect_cli"))
+        source = QCoreApplication::applicationDirPath() + "/cloud_redirect_cli";
+    else if (QFile::exists("/app/share/cloud_redirect/cloud_redirect_cli"))
+        source = "/app/share/cloud_redirect/cloud_redirect_cli";
+
+    if (!source.isEmpty()) {
+        QDir().mkpath(crDataDir());
+        if (QFile::copy(source, deployed)) {
+            QFile::setPermissions(deployed,
+                QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+                QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+                QFileDevice::ReadOther | QFileDevice::ExeOther);
+            return deployed;
+        }
+    }
+
+    return QString();
+}
+
+// Build the (program, args) to launch the CLI: via flatpak-spawn on the host
+// inside a flatpak, directly otherwise.
+void Backend::cliLaunch(const QString &cliPath, const QStringList &cliArgs,
+                        QString &program, QStringList &args) const
+{
+    if (inFlatpak()) {
+        program = "flatpak-spawn";
+        args = QStringList{"--host", cliPath} + cliArgs;
+    } else {
+        program = cliPath;
+        args = cliArgs;
+    }
+}
+
+void Backend::scanProvider(const QString &provider)
+{
+    // Cancel any previous scan.
+    if (m_scanProc) {
+        m_scanProc->disconnect(this);
+        m_scanProc->kill();
+        m_scanProc->deleteLater();
+        m_scanProc = nullptr;
+    }
+
+    emit migrationScanStarted();
+
+    QString cli = cliExecutablePath();
+    if (cli.isEmpty()) {
+        emit migrationScanFinished(QVariantList(), "CLI executable not available. Deploy CloudRedirect first.");
+        return;
+    }
+
+    auto *proc = new QProcess(this);
+    m_scanProc = proc;
+    proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError) {
+        if (proc != m_scanProc) return;
+        emit migrationScanFinished(QVariantList(), "Failed to launch CLI: " + proc->errorString());
+        m_scanProc = nullptr;
+        proc->deleteLater();
+    });
+
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc](int exitCode, QProcess::ExitStatus) {
+        if (proc != m_scanProc) return;
+        m_scanProc = nullptr;
+        const QByteArray out = proc->readAllStandardOutput();
+        proc->deleteLater();
+
+        QJsonParseError perr;
+        QJsonDocument doc = QJsonDocument::fromJson(out, &perr);
+        if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit migrationScanFinished(QVariantList(),
+                exitCode == 0 ? "Invalid CLI response" : "CLI exited with code " + QString::number(exitCode));
+            return;
+        }
+        QJsonObject root = doc.object();
+        if (root.contains("error")) {
+            emit migrationScanFinished(QVariantList(), root.value("error").toString("Unknown error"));
+            return;
+        }
+
+        QVariantList apps;
+        QSet<uint32_t> pending;
+        for (const QJsonValue &v : root.value("apps").toArray()) {
+            QJsonObject o = v.toObject();
+            QString appId = o.value("app_id").toString();
+            QString accountId = o.value("account_id").toString();
+            if (appId.isEmpty() || appId == "0")
+                continue;
+            QVariantMap m;
+            m["appId"] = appId;
+            m["accountId"] = accountId;
+            apps.append(m);
+            bool ok = false;
+            uint32_t id = appId.toUInt(&ok);
+            if (ok && id != 0 && !m_nameCache.contains(id))
+                pending.insert(id);
+        }
+
+        // Seed placeholders and kick off name/art resolution for uncached apps.
+        for (uint32_t id : pending) {
+            AppInfo info;
+            info.appId = id;
+            info.name = QString("App %1").arg(id);
+            bool already = false;
+            for (const auto &a : m_apps) { if (a.appId == id) { already = true; break; } }
+            if (!already)
+                m_apps.append(info);
+        }
+        if (!pending.isEmpty())
+            QTimer::singleShot(0, this, &Backend::resolveAppNames);
+
+        emit migrationScanFinished(apps, QString());
+    });
+
+    QString scanProg;
+    QStringList scanArgs;
+    cliLaunch(cli, {"scan-all", provider}, scanProg, scanArgs);
+    proc->start(scanProg, scanArgs);
+}
+
+void Backend::testProviderConnection(const QString &provider)
+{
+    // Cancel any previous test.
+    if (m_testProc) {
+        m_testProc->disconnect(this);
+        m_testProc->kill();
+        m_testProc->deleteLater();
+        m_testProc = nullptr;
+    }
+
+    QString cli = cliExecutablePath();
+    if (cli.isEmpty()) {
+        emit providerTestFinished(provider, false,
+            "CLI not available. Deploy CloudRedirect first.");
+        return;
+    }
+
+    auto *proc = new QProcess(this);
+    m_testProc = proc;
+    proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    // A wrong endpoint can hang on connect; bound the wait and treat it as a
+    // failed test rather than leaving the UI stuck.
+    auto *timeout = new QTimer(proc);
+    timeout->setSingleShot(true);
+    connect(timeout, &QTimer::timeout, this, [this, proc, provider]() {
+        if (proc != m_testProc) return;
+        m_testProc = nullptr;
+        proc->disconnect(this);
+        proc->kill();
+        proc->deleteLater();
+        emit providerTestFinished(provider, false,
+            "Timed out reaching the endpoint. Check the endpoint and port.");
+    });
+    timeout->start(30000);
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, provider](QProcess::ProcessError) {
+        if (proc != m_testProc) return;
+        m_testProc = nullptr;
+        emit providerTestFinished(provider, false, "Failed to launch CLI: " + proc->errorString());
+        proc->deleteLater();
+    });
+
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc, provider, timeout](int exitCode, QProcess::ExitStatus) {
+        if (proc != m_testProc) return;
+        timeout->stop();
+        m_testProc = nullptr;
+        const QByteArray out = proc->readAllStandardOutput();
+        proc->deleteLater();
+
+        // The CLI emits log lines before the JSON; take the last JSON object.
+        QByteArray json;
+        int brace = out.lastIndexOf('{');
+        if (brace >= 0)
+            json = out.mid(brace);
+
+        QJsonParseError perr;
+        QJsonDocument doc = QJsonDocument::fromJson(json, &perr);
+        if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit providerTestFinished(provider, false,
+                exitCode == 0 ? "Could not reach the endpoint. Check the endpoint, port and keys."
+                              : "Connection test failed (exit " + QString::number(exitCode) + ").");
+            return;
+        }
+
+        QJsonObject o = doc.object();
+        if (o.value("success").toBool()) {
+            emit providerTestFinished(provider, true, QString());
+        } else {
+            const QString err = o.value("error").toString(
+                "Could not reach the endpoint. Check the endpoint, port and keys.");
+            emit providerTestFinished(provider, false, err);
+        }
+    });
+
+    // A real bucket op (account 0) -- unlike auth-status, this fails on a bad
+    // endpoint because it actually lists objects.
+    QString prog;
+    QStringList args;
+    cliLaunch(cli, {"list-remote-app-ids", provider, "0"}, prog, args);
+    proc->start(prog, args);
+}
+
+void Backend::startMigration(const QString &src, const QString &dst)
+{
+    if (m_migrateProc) {
+        // A migration is already running; ignore.
+        return;
+    }
+
+    QString cli = cliExecutablePath();
+    if (cli.isEmpty()) {
+        QVariantMap r;
+        r["error"] = "CLI executable not available. Deploy CloudRedirect first.";
+        emit migrationFinished(r);
+        return;
+    }
+
+    // Reset accumulators.
+    m_migrateSrc = src;
+    m_migrateDst = dst;
+    m_migrateBuf.clear();
+    m_migrateCancelled = false;
+    m_migMigrated = m_migSkipped = m_migFailed = m_migDone = m_migTotal = 0;
+    m_migTotalBytes = 0;
+    m_migCompleted = false;
+    m_migError.clear();
+    m_migLastError.clear();
+
+    auto *proc = new QProcess(this);
+    m_migrateProc = proc;
+    proc->setProcessChannelMode(QProcess::SeparateChannels);
+
+    connect(proc, &QProcess::readyReadStandardOutput, this, [this, proc]() {
+        if (proc != m_migrateProc) return;
+        m_migrateBuf += proc->readAllStandardOutput();
+        int nl;
+        while ((nl = m_migrateBuf.indexOf('\n')) >= 0) {
+            QByteArray line = m_migrateBuf.left(nl);
+            m_migrateBuf.remove(0, nl + 1);
+            if (!line.trimmed().isEmpty())
+                handleMigrationLine(line);
+        }
+    });
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError) {
+        if (proc != m_migrateProc) return;
+        if (m_migError.isEmpty() && !m_migrateCancelled)
+            m_migError = "Failed to launch CLI: " + proc->errorString();
+    });
+
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc, dst](int exitCode, QProcess::ExitStatus) {
+        if (proc != m_migrateProc) return;
+        m_migrateProc = nullptr;
+
+        // Flush any trailing buffered line.
+        if (!m_migrateBuf.trimmed().isEmpty())
+            handleMigrationLine(m_migrateBuf);
+        m_migrateBuf.clear();
+
+        // A nonzero exit with a "complete" line is partial success (some files
+        // failed) -- NOT fatal. Only surface stderr as a hard error when the
+        // run never completed and no error was streamed.
+        if (exitCode != 0 && !m_migCompleted && m_migError.isEmpty() && !m_migrateCancelled) {
+            QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+            m_migError = err.isEmpty() ? ("CLI exited with code " + QString::number(exitCode)) : err;
+        }
+        proc->deleteLater();
+
+        QVariantMap r;
+        r["migrated"]   = m_migMigrated;
+        r["skipped"]    = m_migSkipped;
+        r["failed"]     = m_migFailed;
+        r["totalBytes"] = m_migTotalBytes;
+        r["completed"]  = m_migCompleted;
+        r["cancelled"]  = m_migrateCancelled;
+        r["error"]      = m_migError;
+        r["lastError"]  = m_migLastError;
+
+        // Switch to the destination provider once any data moved.
+        bool switched = false;
+        if (!m_migrateCancelled && m_migError.isEmpty() &&
+            (m_migMigrated > 0 || m_migSkipped > 0)) {
+            switched = switchActiveProvider(dst);
+        }
+        r["switched"] = switched;
+
+        emit migrationFinished(r);
+    });
+
+    QString migProg;
+    QStringList migArgs;
+    cliLaunch(cli, {"migrate", src, dst}, migProg, migArgs);
+    proc->start(migProg, migArgs);
+}
+
+void Backend::handleMigrationLine(const QByteArray &line)
+{
+    QJsonParseError perr;
+    QJsonDocument doc = QJsonDocument::fromJson(line, &perr);
+    if (perr.error != QJsonParseError::NoError || !doc.isObject())
+        return;
+    QJsonObject o = doc.object();
+    const QString type = o.value("type").toString();
+
+    if (type == "status") {
+        emit migrationStatus(
+            o.value("message").toString(),
+            o.contains("done")  ? o.value("done").toInt()  : -1,
+            o.contains("total") ? o.value("total").toInt() : -1,
+            o.contains("found") ? o.value("found").toInt() : -1);
+    } else if (type == "start") {
+        m_migTotal = o.value("total").toInt();
+        emit migrationStarted(m_migTotal);
+    } else if (type == "progress" || type == "skip" ||
+               (type == "error" && o.contains("file"))) {
+        // Per-file line; use the CLI's monotonic "done" counter directly.
+        if (o.contains("done"))
+            m_migDone = o.value("done").toInt();
+        if (type == "progress") {
+            m_migMigrated++;
+            m_migTotalBytes += static_cast<qint64>(o.value("bytes").toDouble());
+        } else if (type == "skip") {
+            m_migSkipped++;
+        } else {  // per-file error
+            m_migFailed++;
+            m_migLastError = o.value("message").toString("Unknown error");
+        }
+        emit migrationProgress(m_migDone, m_migTotal, o.value("file").toString(), m_migTotalBytes);
+    } else if (type == "error") {
+        // No "file" field -> fatal error.
+        m_migError = o.value("message").toString("Unknown error");
+    } else if (type == "complete") {
+        // Authoritative final tally from the CLI overrides the running counts.
+        m_migMigrated  = o.value("migrated").toInt(m_migMigrated);
+        m_migSkipped   = o.value("skipped").toInt(m_migSkipped);
+        m_migFailed    = o.value("failed").toInt(m_migFailed);
+        m_migTotalBytes= static_cast<qint64>(o.value("total_bytes").toDouble());
+        m_migCompleted = true;
+    }
+}
+
+void Backend::cancelMigration()
+{
+    m_migrateCancelled = true;
+    if (m_scanProc) {
+        m_scanProc->disconnect(this);
+        m_scanProc->kill();
+        m_scanProc->deleteLater();
+        m_scanProc = nullptr;
+        emit migrationScanFinished(QVariantList(), QString());
+    }
+    if (m_migrateProc) {
+        // Kill promptly so in-flight API calls die.
+        m_migrateProc->kill();
+    }
+}
+
+// Write provider + token_path into config.json, preserving unknown keys.
+bool Backend::switchActiveProvider(const QString &provider)
+{
+    QString tokenPath = resolveTokenPath(provider);
+    if (tokenPath.isEmpty())
+        return false;
+
+    const QString configPath = crConfigDir() + "/config.json";
+    QJsonObject cfg;
+    QFile cf(configPath);
+    if (cf.open(QIODevice::ReadOnly)) {
+        QJsonDocument d = QJsonDocument::fromJson(cf.readAll());
+        cf.close();
+        if (d.isObject())
+            cfg = d.object();
+    }
+    cfg["provider"]   = provider;
+    cfg["token_path"] = tokenPath;
+
+    // Register in token_paths so the resolver survives later switches.
+    QJsonObject tokenPaths = cfg.value("token_paths").toObject();
+    tokenPaths[provider] = tokenPath;
+    cfg["token_paths"] = tokenPaths;
+
+    QDir().mkpath(crConfigDir());
+    const QByteArray data = QJsonDocument(cfg).toJson();
+    const QString tempPath = configPath + ".tmp";
+    QFile w(tempPath);
+    if (!w.open(QIODevice::WriteOnly))
+        return false;
+    w.write(data);
+    w.close();
+    if (!QFile::rename(tempPath, configPath)) {
+        QFile::remove(configPath);
+        if (!QFile::rename(tempPath, configPath)) {
+            QFile::remove(tempPath);
+            return false;
+        }
+    }
+
+    // Reflect in the in-memory state + notify QML bindings.
+    m_providerName = provider;
+    m_providerPath = tokenPath;
+    emit settingsChanged();
+    return true;
 }

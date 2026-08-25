@@ -7,6 +7,9 @@
 #include <chrono>
 #include <random>
 #include <fstream>
+#include <atomic>
+#include <mutex>
+#include <vector>
 
 #ifdef _WIN32
 #include <bcrypt.h>
@@ -157,17 +160,25 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindDriveFolderStatus(
         InvalidateFolderChild(parentId, name);
         return LookupStatus::Missing;
     }
+    if (files.size() > 1) {
+        LOG("[GDrive] FindDriveFolderStatus '%s' parent=%s: found %zu results (T%zu)",
+            name.c_str(), parentId.c_str(), files.size(),
+            std::hash<std::thread::id>{}(std::this_thread::get_id()) % 10000);
+        for (size_t i = 0; i < files.size(); ++i) {
+            LOG("[GDrive]   [%zu] id=%s created=%s", i,
+                files[i]["id"].str().c_str(),
+                files[i]["createdTime"].str().c_str());
+        }
+    }
     // Keep the oldest folder (first by createdTime ascending)
     std::string keepId = files[(size_t)0]["id"].str();
-    // clean up duplicate folders (can happen from eventual consistency)
+    // Merge duplicate folders (can appear from cross-machine eventual consistency).
+    // Never delete: move children to kept folder, rename empty dup.
     for (size_t i = 1; i < files.size(); ++i) {
         std::string dupId = files[i]["id"].str();
-        LOG("[GDrive] Deleting duplicate folder '%s' (id=%s, keeping %s)",
+        LOG("[GDrive] Merging duplicate folder '%s' (id=%s into %s)",
             name.c_str(), dupId.c_str(), keepId.c_str());
-        if (!DeleteById(dupId)) {
-            LOG("[GDrive] WARNING: Failed to delete duplicate folder %s; manual cleanup required",
-                dupId.c_str());
-        }
+        MergeDuplicateFolder(keepId, dupId, name, parentId);
     }
     CacheFolderChild(parentId, name, keepId);
     if (outId) *outId = keepId;
@@ -283,12 +294,17 @@ std::string GoogleDriveProvider::CreateDriveFolder(const std::string& name,
         arr.arrVal.push_back(Json::String(parentId));
         meta.objVal["parents"] = std::move(arr);
     }
+    LOG("[GDrive] CreateFolder '%s' under parent=%s (T%zu)",
+        name.c_str(), parentId.empty() ? "root" : parentId.c_str(),
+        std::hash<std::thread::id>{}(std::this_thread::get_id()) % 10000);
     auto r = ApiRequest("POST", "/drive/v3/files?fields=id", Json::Stringify(meta));
     if (r.status < 200 || r.status >= 300) {
         LOG("[GDrive] CreateFolder '%s' failed: HTTP %d", name.c_str(), r.status);
         return {};
     }
-    return Json::Parse(r.body)["id"].str();
+    auto id = Json::Parse(r.body)["id"].str();
+    LOG("[GDrive] CreateFolder '%s' -> %s (HTTP %d)", name.c_str(), id.c_str(), r.status);
+    return id;
 }
 
 std::string GoogleDriveProvider::GetRootFolder() {
@@ -395,9 +411,8 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::ResolveSubfolders(
         return LookupStatus::Exists;
     }
 
-    // Only hold the creation mutex during CreateDriveFolder calls.
-    // FindDriveFolder (network I/O) runs unlocked so other threads
-    // can look up already-existing folders concurrently.
+    // Hold the creation mutex only during CreateDriveFolder; FindDriveFolder (network
+    // I/O) runs unlocked so threads can resolve existing folders concurrently.
     std::unique_lock<std::recursive_mutex> createLock(m_folderCreateMtx, std::defer_lock);
 
     std::string current = parentId;
@@ -422,9 +437,8 @@ GoogleDriveProvider::LookupStatus GoogleDriveProvider::ResolveSubfolders(
             std::string id = FindDriveFolder(seg, current);
             if (id.empty()) {
                 if (!create) return LookupStatus::Missing;
-                // Only hold creation mutex for the actual folder creation
                 if (!createLock.owns_lock()) createLock.lock();
-                // Double-check cache after acquiring the creation lock
+                // Re-check cache after acquiring the creation lock.
                 {
                     std::lock_guard<std::recursive_mutex> lock(m_folderMtx);
                     auto it = m_folders.find(cacheKey);
@@ -558,6 +572,84 @@ GoogleDriveProvider::DownloadFileById(const std::string& fileId) {
     return std::vector<uint8_t>(r.body.begin(), r.body.end());
 }
 
+std::vector<ICloudProvider::SearchHit>
+GoogleDriveProvider::SearchByName(const std::string& filename, bool* outSupported) {
+    if (outSupported) *outSupported = true;
+    std::vector<SearchHit> hits;
+
+    // Per-folder-id name resolution with a tiny local cache (account/app
+    // folders repeat across hits). Returns "" on failure.
+    std::unordered_map<std::string, std::pair<std::string, std::string>> folderInfo; // id -> {name, parentId}
+    auto getFolder = [&](const std::string& id) -> std::pair<std::string, std::string> {
+        auto it = folderInfo.find(id);
+        if (it != folderInfo.end()) return it->second;
+        auto r = ApiGet("/drive/v3/files/" + id + "?fields=name,parents");
+        std::pair<std::string, std::string> info;
+        if (r.status == 200) {
+            auto j = Json::Parse(r.body);
+            info.first = j["name"].str();
+            auto& parents = j["parents"];
+            if (parents.size() > 0) info.second = parents[(size_t)0].str();
+        }
+        folderInfo[id] = info;
+        return info;
+    };
+
+    // Global search for the exact filename.
+    std::string q = "name='" + EscapeQuery(filename) + "'"
+                    " and mimeType!='application/vnd.google-apps.folder'"
+                    " and trashed=false";
+    std::string baseUrl = "/drive/v3/files?q=" + UrlEncode(q) +
+        "&fields=nextPageToken,files(id,name,parents)&pageSize=1000";
+    std::string pageToken;
+
+    do {
+        std::string url = baseUrl;
+        if (!pageToken.empty()) url += "&pageToken=" + UrlEncode(pageToken);
+
+        auto r = ApiGet(url);
+        if (r.status != 200) {
+            LOG("[GDrive] SearchByName('%s'): HTTP %d", filename.c_str(), r.status);
+            if (hits.empty() && outSupported) *outSupported = (r.status == 404);
+            return hits;
+        }
+
+        auto j = Json::Parse(r.body);
+        auto& files = j["files"];
+        for (size_t i = 0; i < files.size(); ++i) {
+            std::string fileId = files[i]["id"].str();
+            auto& parents = files[i]["parents"];
+            if (parents.size() == 0) continue;
+
+            // parent = appId folder, grandparent = accountId folder.
+            std::string appFolderId = parents[(size_t)0].str();
+            auto appInfo = getFolder(appFolderId);          // {appId, accountFolderId}
+            if (appInfo.first.empty() || appInfo.second.empty()) continue;
+            auto acctInfo = getFolder(appInfo.second);      // {accountId, rootFolderId}
+            if (acctInfo.first.empty()) continue;
+
+            // Only accept numeric account/app folder names (our layout).
+            bool ok = !appInfo.first.empty() && !acctInfo.first.empty();
+            for (char c : appInfo.first)  if (c < '0' || c > '9') { ok = false; break; }
+            for (char c : acctInfo.first) if (c < '0' || c > '9') { ok = false; break; }
+            if (!ok) continue;
+
+            auto content = DownloadFileById(fileId);
+            if (!content || content->empty()) continue;
+
+            SearchHit hit;
+            hit.path = acctInfo.first + "/" + appInfo.first + "/" + filename;
+            hit.content = std::move(*content);
+            hits.push_back(std::move(hit));
+        }
+
+        pageToken = j["nextPageToken"].str();
+    } while (!pageToken.empty());
+
+    LOG("[GDrive] SearchByName('%s'): %zu match(es)", filename.c_str(), hits.size());
+    return hits;
+}
+
 GoogleDriveProvider::LookupStatus GoogleDriveProvider::FindFileInFolderStatus(
     const std::string& name, const std::string& folderId, std::string* outId) {
     std::string q = "name='" + EscapeQuery(name) + "'"
@@ -646,7 +738,18 @@ GoogleDriveProvider::UploadStatus GoogleDriveProvider::UploadOrUpdate(
     }
     std::string metaJson = Json::Stringify(meta);
 
-    // multipart body with random boundary
+    // Google Drive API limits simple/multipart upload to 5 MB.
+    // Use resumable upload for larger files.
+    static constexpr size_t kResumableThreshold = 5 * 1024 * 1024;
+    if (len > kResumableThreshold) {
+        auto status = ResumableUpload(name, folderId, data, len, metaJson, existingId);
+        if (status != UploadStatus::Error) return status;
+        // Resumable failed; don't fall through to multipart since it will
+        // also fail for files over 5 MB.
+        return UploadStatus::Error;
+    }
+
+    // multipart body with random boundary (files <= 5 MB)
     char randHex[33];
     {
         uint8_t randBytes[16];
@@ -692,18 +795,27 @@ GoogleDriveProvider::UploadStatus GoogleDriveProvider::UploadOrUpdate(
         std::string("Content-Type: multipart/related; boundary=") + boundary};
 
     HttpResp r;
-    for (int attempt = 0; attempt < 3; ++attempt) {
+    static thread_local std::mt19937 rng{std::random_device{}()};
+    for (int attempt = 0; attempt < 5; ++attempt) {
         if (attempt > 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(attempt));
+            int baseMs = 1000 * (1 << (attempt - 1)); // 1s, 2s, 4s, 8s
+            int jitter = std::uniform_int_distribution<int>(0, baseMs / 2)(rng);
+            int delayMs = baseMs + jitter;
+            LOG("[GDrive] Upload backoff attempt %d, waiting %dms", attempt + 1, delayMs);
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             token = GetAccessToken();
             if (token.empty()) return UploadStatus::Error;
             uploadHdrs[0] = "Authorization: Bearer " + token;
         }
         ThrottleApiCall();
         r = Request(method, "www.googleapis.com", path, body, uploadHdrs);
-        if (!IsRateLimited(r.status, r.body)) break;
-        LOG("[GDrive] Rate limited (upload attempt %d), backing off %ds",
-            attempt + 1, attempt + 1);
+        bool rateLimited = IsRateLimited(r.status, r.body);
+        bool timedOut = (r.status == 0);
+        if (!rateLimited && !timedOut) break;
+        if (rateLimited)
+            g_rateLimitHits.fetch_add(1, std::memory_order_relaxed);
+        LOG("[GDrive] Upload %s (attempt %d, HTTP %d)",
+            rateLimited ? "rate limited" : "timeout", attempt + 1, r.status);
     }
 
     if (r.status == 404 && !existingId.empty()) {
@@ -723,8 +835,176 @@ GoogleDriveProvider::UploadStatus GoogleDriveProvider::UploadOrUpdate(
     return UploadStatus::Success;
 }
 
+GoogleDriveProvider::UploadStatus GoogleDriveProvider::ResumableUpload(
+    const std::string& name, const std::string& folderId,
+    const uint8_t* data, size_t len, const std::string& metaJson,
+    const std::string& existingId) {
+    // Step 1: Initiate resumable upload session.
+    // POST (create) or PATCH (update) with metadata → server returns session URI
+    // in the Location header.
+    auto token = GetAccessToken();
+    if (token.empty()) return UploadStatus::Error;
+
+    std::string initPath;
+    const char* method;
+    if (existingId.empty()) {
+        initPath = "/upload/drive/v3/files?uploadType=resumable&fields=id";
+        method = "POST";
+    } else {
+        initPath = "/upload/drive/v3/files/" + existingId + "?uploadType=resumable&fields=id";
+        method = "PATCH";
+    }
+
+    std::vector<std::string> initHdrs = {
+        "Authorization: Bearer " + token,
+        "Content-Type: application/json; charset=UTF-8",
+        "X-Upload-Content-Type: application/octet-stream",
+        "X-Upload-Content-Length: " + std::to_string(len)
+    };
+
+    HttpResp initResp;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) {
+            std::this_thread::sleep_for(std::chrono::seconds(attempt));
+            token = GetAccessToken();
+            if (token.empty()) return UploadStatus::Error;
+            initHdrs[0] = "Authorization: Bearer " + token;
+        }
+        ThrottleApiCall();
+        initResp = Request(method, "www.googleapis.com", initPath, metaJson, initHdrs);
+        if (!IsRateLimited(initResp.status, initResp.body)) break;
+        LOG("[GDrive] Rate limited (resumable init attempt %d), backing off %ds",
+            attempt + 1, attempt + 1);
+    }
+
+    if (initResp.status == 404 && !existingId.empty()) {
+        InvalidateFileChild(folderId, name);
+        return UploadStatus::MissingTarget;
+    }
+    if (initResp.status < 200 || initResp.status >= 300) {
+        LOG("[GDrive] Resumable init '%s' failed: HTTP %d", name.c_str(), initResp.status);
+        return UploadStatus::Error;
+    }
+
+    std::string sessionUrl = initResp.location;
+    if (sessionUrl.empty() || sessionUrl.find("https://") != 0) {
+        LOG("[GDrive] Resumable init '%s': missing or invalid Location header", name.c_str());
+        return UploadStatus::Error;
+    }
+
+    // Step 2: Upload data in a single PUT to the session URI.
+    // Google streams data as it arrives, so the response comes quickly after
+    // the final byte is received (no multipart parsing delay).
+    std::string dataBody((const char*)data, len);
+    std::vector<std::string> dataHdrs = {
+        "Content-Length: " + std::to_string(len),
+        "Content-Type: application/octet-stream"
+    };
+
+    HttpResp dataResp;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) {
+            std::this_thread::sleep_for(std::chrono::seconds(attempt * 2));
+        }
+        ThrottleApiCall();
+        dataResp = RequestUrl("PUT", sessionUrl, dataBody, dataHdrs);
+        if (dataResp.status == 200 || dataResp.status == 201) break;
+        if (!IsRateLimited(dataResp.status, dataResp.body) &&
+            dataResp.status != 0 && dataResp.status != 503) break;
+        LOG("[GDrive] Resumable upload '%s' retry %d (HTTP %d)",
+            name.c_str(), attempt + 1, dataResp.status);
+    }
+
+    if (dataResp.status == 404 && !existingId.empty()) {
+        InvalidateFileChild(folderId, name);
+        return UploadStatus::MissingTarget;
+    }
+    if (dataResp.status < 200 || dataResp.status >= 300) {
+        LOG("[GDrive] Resumable upload '%s' failed: HTTP %d", name.c_str(), dataResp.status);
+        return UploadStatus::Error;
+    }
+
+    auto uploadedId = Json::Parse(dataResp.body)["id"].str();
+    if (!uploadedId.empty()) {
+        CacheFileChild(folderId, name, uploadedId);
+    } else if (!existingId.empty()) {
+        CacheFileChild(folderId, name, existingId);
+    }
+    return UploadStatus::Success;
+}
+
+bool GoogleDriveProvider::MoveFileToFolder(const std::string& fileId,
+                                            const std::string& oldParentId,
+                                            const std::string& newParentId) {
+    std::string path = "/drive/v3/files/" + fileId +
+        "?addParents=" + UrlEncode(newParentId) +
+        "&removeParents=" + UrlEncode(oldParentId) +
+        "&fields=id";
+    auto r = ApiRequest("PATCH", path, "", "application/json");
+    return r.status >= 200 && r.status < 300;
+}
+
+bool GoogleDriveProvider::RenameDriveItem(const std::string& itemId, const std::string& newName) {
+    auto obj = Json::Object();
+    obj.objVal["name"] = Json::String(newName);
+    std::string body = Json::Stringify(obj);
+    auto r = ApiRequest("PATCH", "/drive/v3/files/" + itemId + "?fields=id",
+                        body, "application/json");
+    return r.status >= 200 && r.status < 300;
+}
+
+void GoogleDriveProvider::MergeDuplicateFolder(const std::string& keepId,
+                                                const std::string& dupId,
+                                                const std::string& folderName,
+                                                const std::string& parentId) {
+    // Move all children from the duplicate folder into the kept folder,
+    // then rename the (now-empty) dup so it won't match future queries.
+    // Never delete folders — a partial move must not lose files.
+    bool listOk = false;
+    auto children = ListFolder(dupId, &listOk);
+    if (!listOk) {
+        LOG("[GDrive] MergeDuplicateFolder: failed to list dup folder %s; skipping merge",
+            dupId.c_str());
+        return;
+    }
+
+    int moved = 0;
+    for (const auto& child : children) {
+        if (MoveFileToFolder(child.id, dupId, keepId)) {
+            ++moved;
+        } else {
+            LOG("[GDrive] MergeDuplicateFolder: failed to move %s (%s) from %s to %s",
+                child.name.c_str(), child.id.c_str(), dupId.c_str(), keepId.c_str());
+        }
+    }
+
+    // Rename the empty dup to prevent future folder-name queries from matching it.
+    char dateBuf[32];
+    time_t now = time(nullptr);
+    struct tm tm;
+#ifdef _WIN32
+    gmtime_s(&tm, &now);
+#else
+    gmtime_r(&now, &tm);
+#endif
+    strftime(dateBuf, sizeof(dateBuf), "%Y%m%d%H%M%S", &tm);
+    std::string newName = folderName + "_dup_" + dateBuf;
+    if (!RenameDriveItem(dupId, newName)) {
+        LOG("[GDrive] MergeDuplicateFolder: rename of %s failed; folder may re-match on next lookup",
+            dupId.c_str());
+    }
+
+    InvalidateFolderChild(parentId, folderName);
+    LOG("[GDrive] MergeDuplicateFolder: merged %d/%zu children from %s into %s",
+        moved, children.size(), dupId.c_str(), keepId.c_str());
+}
+
 bool GoogleDriveProvider::DeleteById(const std::string& fileId) {
     auto r = ApiRequest("DELETE", "/drive/v3/files/" + fileId, "", "");
+    if (r.status < 200 || r.status >= 300) {
+        LOG("[GDrive] DeleteById %s: HTTP %d body=%s",
+            fileId.c_str(), r.status, r.body.substr(0, 200).c_str());
+    }
     return r.status >= 200 && r.status < 300;
 }
 
@@ -838,19 +1118,105 @@ bool GoogleDriveProvider::Upload(const std::string& path,
 }
 
 bool GoogleDriveProvider::UploadBatch(const std::vector<UploadItem>& items) {
-    // Google Drive batch API does not support file upload (multipart/related)
-    // requests -- only metadata-only operations. Use individual Upload() calls.
-    std::vector<std::string> uploadedPaths;
-    for (const auto& item : items) {
-        if (!Upload(item.path, item.data.data(), item.data.size())) {
-            LOG("[GDriveProvider] UploadBatch: failed to upload '%s', rolling back %zu prior upload(s)",
-                item.path.c_str(), uploadedPaths.size());
-            for (const auto& path : uploadedPaths) Remove(path);
-            return false;
+    // Drive has no batch upload API. Parallel workers mirror native (10 max, MB-capped).
+    if (items.empty()) return true;
+
+    // Per-batch throughput telemetry: wall time + rate-limit hit delta.
+    auto batchStart = std::chrono::steady_clock::now();
+    uint64_t rlBefore = g_rateLimitHits.load(std::memory_order_relaxed);
+
+    static constexpr size_t kMaxParallel = 10;                 // native @nClientCloudMaxNumParallelUploads
+    // Lower than native's 64MB: Drive throttles per connection, so capping in-flight
+    // bytes keeps each blob above the request receive timeout on a home uplink.
+    // Runtime-configurable (config.json "upload_inflight_mb"); default 24 MB.
+    const uint64_t kMaxBytesInFlight =
+        g_uploadInFlightCapBytes.load(std::memory_order_relaxed);
+
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::atomic<size_t> dedupSkips{0};        // CAS-existing blobs skipped in-worker
+    std::mutex doneMtx;
+    std::vector<std::string> uploadedPaths;   // for rollback, guarded by doneMtx
+
+    // Worker: claim items by index until exhausted or a failure is seen.
+    auto worker = [&]() {
+        for (;;) {
+            if (failed.load(std::memory_order_relaxed)) return;
+            size_t i = next.fetch_add(1, std::memory_order_relaxed);
+            if (i >= items.size()) return;
+            const UploadItem& item = items[i];
+            // An exception escaping a std::thread entry calls std::terminate, so catch
+            // here (bad_alloc is likelier with up to 10 buffers in flight).
+            bool ok = false;
+            try {
+                // CAS dedup: skip upload if blob already exists (mirrors native EResult-29).
+                if (CheckExists(item.path) == ExistsStatus::Exists) {
+                    dedupSkips.fetch_add(1, std::memory_order_relaxed);
+                    ok = true;  // already durable; nothing to roll back
+                } else {
+                    ok = Upload(item.path, item.data.data(), item.data.size());
+                    if (ok) {
+                        std::lock_guard<std::mutex> lk(doneMtx);
+                        uploadedPaths.push_back(item.path);
+                    }
+                }
+            } catch (const std::exception& e) {
+                LOG("[GDriveProvider] UploadBatch: worker threw on '%s': %s",
+                    item.path.c_str(), e.what());
+            } catch (...) {
+                LOG("[GDriveProvider] UploadBatch: worker threw (unknown) on '%s'",
+                    item.path.c_str());
+            }
+            if (!ok) {
+                failed.store(true, std::memory_order_relaxed);
+                LOG("[GDriveProvider] UploadBatch: failed to upload '%s'", item.path.c_str());
+                return;
+            }
         }
-        uploadedPaths.push_back(item.path);
+    };
+
+    // Worker count = min(kMaxParallel, items), capped further by avg size so total
+    // bytes in flight stay roughly under kMaxBytesInFlight.
+    uint64_t totalBytes = 0;
+    for (const auto& it : items) totalBytes += it.data.size();
+    size_t byCount = (std::min)(kMaxParallel, items.size());
+    size_t byBytes = byCount;
+    if (totalBytes > kMaxBytesInFlight && items.size() > 1) {
+        // Keep concurrent bytes roughly under the cap (avg item size based).
+        uint64_t avg = totalBytes / items.size();
+        if (avg > 0) {
+            size_t cap = (size_t)(kMaxBytesInFlight / avg);
+            byBytes = (cap < 1) ? 1 : cap;
+        }
     }
-    LOG("[GDriveProvider] UploadBatch: uploaded %zu files individually", items.size());
+    size_t workerCount = (std::min)(byCount, byBytes);
+    if (workerCount < 1) workerCount = 1;
+
+    std::vector<std::thread> pool;
+    pool.reserve(workerCount);
+
+    // Plain spawn-then-join worker pool. BMainLoop responsiveness is handled by the
+    // CompleteBatch handler (PumpUntil at the active-coroutine level), not here -- the
+    // coroutine is inactive this deep, so a yield would corrupt it.
+    for (size_t t = 0; t < workerCount; ++t) pool.emplace_back(worker);
+    for (auto& th : pool) th.join();
+
+    if (failed.load(std::memory_order_relaxed)) {
+        LOG("[GDriveProvider] UploadBatch: a parallel upload failed; rolling back %zu uploaded blob(s)",
+            uploadedPaths.size());
+        for (const auto& path : uploadedPaths) Remove(path);
+        return false;
+    }
+    double elapsedSec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - batchStart).count();
+    uint64_t rlHits = g_rateLimitHits.load(std::memory_order_relaxed) - rlBefore;
+    double filesPerSec = elapsedSec > 0 ? items.size() / elapsedSec : 0.0;
+    double mbPerSec = elapsedSec > 0 ? (totalBytes / (1024.0 * 1024.0)) / elapsedSec : 0.0;
+    LOG("[GDriveProvider] UploadBatch: %zu file(s) (%zu uploaded, %zu CAS-skipped) "
+        "with %zu parallel worker(s) in %.1fs (%.2f files/s, %.2f MB/s, %llu rate-limit hits)",
+        items.size(), items.size() - dedupSkips.load(), dedupSkips.load(),
+        workerCount, elapsedSec, filesPerSec, mbPerSec,
+        (unsigned long long)rlHits);
     return true;
 }
 

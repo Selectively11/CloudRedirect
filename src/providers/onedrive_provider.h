@@ -22,6 +22,8 @@ public:
     std::vector<std::string> ListSubfolders(const std::string& prefix) override;
     bool ListChecked(const std::string& prefix, std::vector<FileInfo>& outFiles,
                      bool* outComplete = nullptr) override;
+    std::vector<SearchHit> SearchByName(const std::string& filename,
+                                        bool* outSupported = nullptr) override;
 
 protected:
     // CloudProviderBase hooks

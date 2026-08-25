@@ -11,6 +11,7 @@
 #include <iphlpapi.h>
 #include <tcpmib.h>
 #include <thread>
+#include <chrono>
 #include <atomic>
 #include <mutex>
 #include <memory>
@@ -69,6 +70,11 @@ struct ClientSlot {
     std::shared_ptr<std::atomic<bool>> done;
 };
 static std::vector<ClientSlot> g_clientSlots;
+// High-file-count manifests (e.g. Everwind, 827 files) burst-request downloads; 16
+// starved the pool and rejected connections, surfacing as a Steam cloud error.
+static constexpr size_t kMaxClientThreads = 64;
+// At the cap, wait this long for a slot before rejecting (backpressure).
+static constexpr int    kAcceptBackpressureMaxMs = 5000;
 
 // Decompress Steam's cloud-compression ZIP. Returns false (and leaves out untouched) on non-ZIP or failure.
 static bool TryDecompressZip(const std::vector<uint8_t>& data, std::vector<uint8_t>& out) {
@@ -495,7 +501,7 @@ static void AcceptLoop() {
             continue;
         }
 
-        // SO_SNDTIMEO matters too: a stalled final send() can wedge a slot and saturate the 16-thread cap.
+        // SO_SNDTIMEO matters too: a stalled final send() can wedge a slot and saturate the thread cap.
         DWORD rcvTimeout = 30000; // 30s
         DWORD sndTimeout = 30000; // 30s
         setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
@@ -506,9 +512,18 @@ static void AcceptLoop() {
             std::lock_guard<std::mutex> lk(g_clientMtx);
             PruneClientThreads();
 
-            // Cap active client threads to prevent resource exhaustion
-            if (g_clientSlots.size() >= 16) {
-                LOG("[HTTP] Max client threads reached (16), rejecting connection");
+            // At the cap: backpressure instead of rejecting. A closed socket surfaces
+            // as a Steam cloud error; waiting for a slot lets large bursts drain.
+            int waitMs = 0;
+            while (g_clientSlots.size() >= kMaxClientThreads && g_running.load() &&
+                   waitMs < kAcceptBackpressureMaxMs) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                waitMs += 20;
+                PruneClientThreads();
+            }
+            if (g_clientSlots.size() >= kMaxClientThreads) {
+                LOG("[HTTP] Thread cap (%zu) still full after %dms, rejecting connection",
+                    kMaxClientThreads, waitMs);
                 closesocket(client);
                 continue;
             }

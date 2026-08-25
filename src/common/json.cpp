@@ -314,4 +314,27 @@ Value Object() {
     Value v; v.type = Type::Object; return v;
 }
 
+bool DeepEqual(const Value& a, const Value& b) {
+    if (a.type != b.type) return false;
+    switch (a.type) {
+        case Type::Null:   return true;
+        case Type::Bool:   return a.boolVal == b.boolVal;
+        case Type::Number: return a.numVal == b.numVal;
+        case Type::String: return a.strVal == b.strVal;
+        case Type::Array:
+            if (a.arrVal.size() != b.arrVal.size()) return false;
+            for (size_t i = 0; i < a.arrVal.size(); ++i)
+                if (!DeepEqual(a.arrVal[i], b.arrVal[i])) return false;
+            return true;
+        case Type::Object:
+            if (a.objVal.size() != b.objVal.size()) return false;
+            for (const auto& [key, av] : a.objVal) {
+                auto it = b.objVal.find(key);
+                if (it == b.objVal.end() || !DeepEqual(av, it->second)) return false;
+            }
+            return true;
+    }
+    return false;
+}
+
 } // namespace Json

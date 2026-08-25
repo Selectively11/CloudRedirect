@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text.Json;
 
 namespace CloudRedirect.Services.Providers;
 
@@ -57,15 +58,115 @@ internal sealed class FolderUiCloudProvider : IUiCloudProvider
         return Task.FromResult(new CloudProviderClient.ListBlobsResult(names, true, null));
     }
 
+    public Task<CloudProviderClient.DownloadBlobResult> DownloadAppBlobAsync(
+        string accountId, string appId, string filename, CancellationToken cancel)
+    {
+        // Metadata-text blobs (stats.json) live at {accountId}/{appId}/{name},
+        // not under blobs/ (those are SHA content blobs).
+        var appDir = Path.Combine(_syncPath, accountId, appId);
+        var appDirFull = Path.GetFullPath(appDir);
+        if (!appDirFull.EndsWith(Path.DirectorySeparatorChar) &&
+            !appDirFull.EndsWith(Path.AltDirectorySeparatorChar))
+        {
+            appDirFull += Path.DirectorySeparatorChar;
+        }
+
+        string path;
+        try { path = Path.GetFullPath(Path.Combine(appDir, filename)); }
+        catch { return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, "Invalid path")); }
+
+        if (!path.StartsWith(appDirFull, StringComparison.OrdinalIgnoreCase))
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, "Path traversal rejected"));
+
+        if (!File.Exists(path))
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, null));
+
+        try
+        {
+            var content = File.ReadAllText(path);
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(true, content, null));
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new CloudProviderClient.DownloadBlobResult(false, null, ex.Message));
+        }
+    }
+
+    public Task<CloudProviderClient.ListAllStatsResult> ListAllStatsAsync(CancellationToken cancel)
+    {
+        // Scan stats.json files; account-scope blob (appId=0) wins over legacy per-app files.
+        var entries = new List<CloudProviderClient.CloudStatsEntry>();
+        var seen = new HashSet<string>();
+        try
+        {
+            if (!Directory.Exists(_syncPath))
+                return Task.FromResult(new CloudProviderClient.ListAllStatsResult(entries, null));
+
+            foreach (var acctDir in Directory.GetDirectories(_syncPath))
+            {
+                var accountId = Path.GetFileName(acctDir);
+                if (string.IsNullOrEmpty(accountId) || !ulong.TryParse(accountId, out _)) continue;
+
+                // Pass 1: account-scope blob ({accountId}/0/stats.json)
+                var accountBlobPath = Path.Combine(acctDir, "0", "stats.json");
+                if (File.Exists(accountBlobPath))
+                {
+                    try
+                    {
+                        var raw = File.ReadAllText(accountBlobPath);
+                        using var doc = JsonDocument.Parse(raw);
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                        {
+                            if (prop.Name == "0") continue;
+                            if (!uint.TryParse(prop.Name, out _)) continue;
+                            var key = accountId + "/" + prop.Name;
+                            if (!seen.Add(key)) continue;
+                            entries.Add(new CloudProviderClient.CloudStatsEntry(
+                                accountId, prop.Name, prop.Value.GetRawText()));
+                        }
+                    }
+                    catch { }
+                }
+
+                // Pass 2: legacy per-app blobs (account blob wins on conflict)
+                foreach (var appDir in Directory.GetDirectories(acctDir))
+                {
+                    var appId = Path.GetFileName(appDir);
+                    if (string.IsNullOrEmpty(appId) || !uint.TryParse(appId, out _)) continue;
+                    if (appId == "0") continue;
+
+                    var key = accountId + "/" + appId;
+                    if (seen.Contains(key)) continue;
+
+                    var statsPath = Path.Combine(appDir, "stats.json");
+                    if (!File.Exists(statsPath)) continue;
+
+                    try
+                    {
+                        var content = File.ReadAllText(statsPath);
+                        if (!string.IsNullOrEmpty(content))
+                        {
+                            seen.Add(key);
+                            entries.Add(new CloudProviderClient.CloudStatsEntry(accountId, appId, content));
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new CloudProviderClient.ListAllStatsResult(entries, ex.Message));
+        }
+        return Task.FromResult(new CloudProviderClient.ListAllStatsResult(entries, null));
+    }
+
     public Task<CloudProviderClient.DeleteBlobsResult> DeleteAppBlobsAsync(
         string accountId, string appId,
         IReadOnlyCollection<string> blobFilenames, CancellationToken cancel)
     {
         var blobsDir = Path.Combine(_syncPath, accountId, appId, "blobs");
-        // A missing blobs directory after ScanAsync reported orphans means
-        // the sync root is offline or misconfigured (the folder is created
-        // on first write and never auto-removed). Surface as failure so the
-        // UI doesn't announce a phantom success.
+        // Missing blobs dir after scan = sync target offline; surface as failure.
         if (!Directory.Exists(blobsDir))
         {
             return Task.FromResult(new CloudProviderClient.DeleteBlobsResult(
@@ -88,11 +189,7 @@ internal sealed class FolderUiCloudProvider : IUiCloudProvider
 
         foreach (var filename in blobFilenames)
         {
-            // Belt-and-suspenders: IsUnsafeBlobName already rejected path
-            // separators and trailing-dot/space, but re-verify the combined
-            // path is under blobsDir before touching disk. Defends against
-            // edge cases where the runtime's path canonicalization differs
-            // from our string check.
+            // Defense-in-depth: re-verify resolved path is under blobsDir.
             string path;
             try
             {

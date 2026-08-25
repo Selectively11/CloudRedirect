@@ -142,8 +142,9 @@ internal sealed class SteamStoreClient : IDisposable
         if (appIds.Count == 0)
             return new Dictionary<uint, StoreAppInfo>();
 
-        // Load disk cache once
-        await EnsureDiskCacheLoaded();
+        // Load disk cache once — ConfigureAwait(false) keeps all subsequent work
+        // (File.Exists loops, HTTP calls, image checks) off the UI thread.
+        await EnsureDiskCacheLoaded().ConfigureAwait(false);
 
         var result = new Dictionary<uint, StoreAppInfo>();
         var toFetch = new List<uint>();
@@ -158,7 +159,7 @@ internal sealed class SteamStoreClient : IDisposable
 
         if (toFetch.Count > 0)
         {
-            var fetched = await FetchFromApiAsync(toFetch);
+            var fetched = await FetchFromApiAsync(toFetch).ConfigureAwait(false);
             foreach (var (id, info) in fetched)
             {
                 _mem[id] = info;
@@ -320,11 +321,11 @@ internal sealed class SteamStoreClient : IDisposable
             var encoded = Uri.EscapeDataString(inputJson);
             var url = $"https://api.steampowered.com/IStoreBrowseService/GetItems/v1?input_json={encoded}";
 
-            var resp = await _http.GetAsync(url);
+            var resp = await _http.GetAsync(url).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
                 return result;
 
-            var body = await resp.Content.ReadAsStringAsync();
+            var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
             using var doc = JsonDocument.Parse(body);
 
             if (!doc.RootElement.TryGetProperty("response", out var response))
@@ -374,14 +375,14 @@ internal sealed class SteamStoreClient : IDisposable
     {
         if (_diskLoaded) return;
 
-        await _diskLock.WaitAsync();
+        await _diskLock.WaitAsync().ConfigureAwait(false);
         try
         {
             if (_diskLoaded) return;
 
             if (File.Exists(CachePath))
             {
-                var json = await File.ReadAllTextAsync(CachePath);
+                var json = await File.ReadAllTextAsync(CachePath).ConfigureAwait(false);
                 var cache = JsonSerializer.Deserialize(json, StoreCacheJsonContext.Default.StoreCache);
                 if (cache?.Entries != null)
                 {
@@ -419,7 +420,7 @@ internal sealed class SteamStoreClient : IDisposable
                 Directory.CreateDirectory(dir);
 
             var json = JsonSerializer.Serialize(cache, StoreCacheJsonContext.Default.StoreCache);
-            await File.WriteAllTextAsync(CachePath, json);
+            await File.WriteAllTextAsync(CachePath, json).ConfigureAwait(false);
         }
         catch
         {

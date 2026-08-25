@@ -13,7 +13,9 @@
 #include <pwd.h>
 #include <unistd.h>
 #include <sys/inotify.h>
+#include <limits.h>
 #include "yaml_parser.h"
+#include "xdg.h"
 
 static std::string g_steamPath;
 static std::string g_homePath;
@@ -26,19 +28,15 @@ static std::atomic<int> g_watcherFd{-1};
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-static std::string GetHome() {
-    const char* home = getenv("HOME");
-    if (home && home[0]) return home;
-    struct passwd* pw = getpwuid(getuid());
-    if (pw && pw->pw_dir) return pw->pw_dir;
-    return "/tmp";
-}
+static std::string GetHome() { return XdgHome(); }
 
 static std::string DetectSteamPath() {
     std::string home = GetHome();
     std::string path = home + "/.local/share/Steam/";
     if (std::filesystem::is_directory(path)) return path;
     path = home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam/";
+    if (std::filesystem::is_directory(path)) return path;
+    path = home + "/.steam/debian-installation/";
     if (std::filesystem::is_directory(path)) return path;
     path = home + "/.steam/steam/";
     if (std::filesystem::is_directory(path)) return path;
@@ -85,7 +83,7 @@ static std::string LoadNamespaceAppsFromSLSsteam() {
     std::string home = GetHome();
 
     std::vector<std::string> configPaths = {
-        home + "/.config/SLSsteam/config.yaml",
+        XdgConfigHome() + "/SLSsteam/config.yaml",
         home + "/.var/app/com.valvesoftware.Steam/.config/SLSsteam/config.yaml",
     };
 
@@ -105,29 +103,44 @@ static std::string LoadNamespaceAppsFromSLSsteam() {
     return {};
 }
 
-// Watch SLSsteam config for changes; re-read AdditionalApps on modify.
 static void WatchSLSsteamConfig(std::string configPath) {
+    std::string watchDir = ".";
+    std::string targetName = configPath;
+    if (auto slash = configPath.find_last_of('/'); slash != std::string::npos) {
+        watchDir = configPath.substr(0, slash);
+        targetName = configPath.substr(slash + 1);
+    }
+
     int notifyFd = inotify_init();
     if (notifyFd == -1) {
         LOG("[Linux] inotify_init failed: %s", strerror(errno));
         return;
     }
-    int wd = inotify_add_watch(notifyFd, configPath.c_str(), IN_MODIFY);
+    int wd = inotify_add_watch(notifyFd, watchDir.c_str(),
+                               IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
     if (wd == -1) {
-        LOG("[Linux] inotify_add_watch %s failed: %s", configPath.c_str(), strerror(errno));
+        LOG("[Linux] inotify_add_watch %s failed: %s", watchDir.c_str(), strerror(errno));
         close(notifyFd);
         return;
     }
     g_watcherFd.store(notifyFd, std::memory_order_release);
-    LOG("[Linux] Watching SLSsteam config for changes: %s", configPath.c_str());
+    LOG("[Linux] Watching SLSsteam config dir for changes: %s (target: %s)",
+        watchDir.c_str(), targetName.c_str());
 
+    alignas(inotify_event) char buf[sizeof(inotify_event) + NAME_MAX + 1];
     for (;;) {
-        inotify_event event{};
-        ssize_t n = read(notifyFd, &event, sizeof(event));
+        ssize_t n = read(notifyFd, buf, sizeof(buf));
         if (n <= 0) {
             if (n == -1 && errno == EINTR) continue;
             break;
         }
+        bool hit = false;
+        for (char* p = buf; p < buf + n; ) {
+            auto* ev = reinterpret_cast<inotify_event*>(p);
+            if (ev->len > 0 && targetName == ev->name) hit = true;
+            p += sizeof(inotify_event) + ev->len;
+        }
+        if (!hit) continue;
         int added = 0;
         if (LoadNamespaceAppsFrom(configPath, &added) && added > 0) {
             LOG("[Linux] SLSsteam config change: registered %d new namespace app(s)", added);
@@ -139,19 +152,7 @@ static void WatchSLSsteamConfig(std::string configPath) {
     g_watcherFd.store(-1, std::memory_order_release);
 }
 
-// ── Parse loginusers.vdf for account ID ─────────────────────────────────
-//
-// Format:
-//   "users"
-//   {
-//       "76561198014569578"
-//       {
-//           "MostRecent"  "1"
-//           ...
-//       }
-//   }
-// 
-// SteamID64 -> AccountID = low 32 bits
+// Parse loginusers.vdf for account ID (MostRecent > AutoLogin > Timestamp)
 
 static uint32_t LoadAccountIdFromLoginUsers() {
     std::string steamPath = DetectSteamPath();
@@ -165,6 +166,9 @@ static uint32_t LoadAccountIdFromLoginUsers() {
 
     std::string line;
     uint64_t mostRecentSteamId = 0;
+    uint64_t autoLoginSteamId = 0;
+    uint64_t newestTimestampSteamId = 0;
+    uint64_t newestTimestamp = 0;
     uint64_t currentSteamId = 0;
     bool inUser = false;
     int braceDepth = 0;
@@ -200,23 +204,55 @@ static uint32_t LoadAccountIdFromLoginUsers() {
             }
         }
 
-        // At depth 2, look for "MostRecent" "1"
+        // At depth 2, look for selection markers
         if (inUser && braceDepth == 2) {
             if (trimmed.find("\"MostRecent\"") != std::string::npos &&
                 trimmed.find("\"1\"") != std::string::npos) {
                 mostRecentSteamId = currentSteamId;
             }
+            if (trimmed.find("\"AutoLogin\"") != std::string::npos &&
+                trimmed.find("\"1\"") != std::string::npos) {
+                autoLoginSteamId = currentSteamId;
+            }
+            static const std::string kTimestamp = "\"Timestamp\"";
+            if (trimmed.find(kTimestamp) != std::string::npos) {
+                size_t vStart = trimmed.find('"', trimmed.find(kTimestamp) + kTimestamp.size());
+                if (vStart != std::string::npos) {
+                    size_t vEnd = trimmed.find('"', vStart + 1);
+                    if (vEnd != std::string::npos) {
+                        std::string tsStr = trimmed.substr(vStart + 1, vEnd - vStart - 1);
+                        char* endp = nullptr;
+                        uint64_t ts = strtoull(tsStr.c_str(), &endp, 10);
+                        if (endp == tsStr.c_str() + tsStr.size() && ts > newestTimestamp) {
+                            newestTimestamp = ts;
+                            newestTimestampSteamId = currentSteamId;
+                        }
+                    }
+                }
+            }
         }
     }
 
-    if (mostRecentSteamId == 0) {
-        LOG("[Linux] No MostRecent user found in loginusers.vdf");
+    // Priority: MostRecent > AutoLogin > highest Timestamp
+    uint64_t selected = mostRecentSteamId;
+    const char* method = "MostRecent";
+    if (selected == 0) {
+        selected = autoLoginSteamId;
+        method = "AutoLogin";
+    }
+    if (selected == 0) {
+        selected = newestTimestampSteamId;
+        method = "Timestamp";
+    }
+
+    if (selected == 0) {
+        LOG("[Linux] No user found in loginusers.vdf (tried MostRecent, AutoLogin, Timestamp)");
         return 0;
     }
 
-    uint32_t accountId = (uint32_t)(mostRecentSteamId & 0xFFFFFFFF);
-    LOG("[Linux] Bootstrapped accountId=%u from SteamID64=%llu (loginusers.vdf)",
-        accountId, (unsigned long long)mostRecentSteamId);
+    uint32_t accountId = (uint32_t)(selected & 0xFFFFFFFF);
+    LOG("[Linux] Bootstrapped accountId=%u from SteamID64=%llu via %s (loginusers.vdf)",
+        accountId, (unsigned long long)selected, method);
     return accountId;
 }
 
@@ -267,6 +303,11 @@ bool HasNamespaceApps() {
     return !g_namespaceApps.empty();
 }
 
+std::vector<uint32_t> GetNamespaceApps() {
+    std::lock_guard<std::mutex> lock(g_nsMutex);
+    return std::vector<uint32_t>(g_namespaceApps.begin(), g_namespaceApps.end());
+}
+
 std::string GetSteamPath() {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_steamPath.empty())
@@ -290,23 +331,10 @@ void SetSteamPath(const std::string& path) {
         g_steamPath += '/';
 }
 
-void RecordLaunchTime(uint32_t /*appId*/) {
-    // TODO: implement playtime tracking on Linux
-}
-
 void Shutdown() {
     int fd = g_watcherFd.exchange(-1, std::memory_order_acq_rel);
     if (fd != -1) close(fd);
     LOG("[Linux] CloudIntercept shutdown");
-}
-
-// Playtime restoration stubs (called from rpc_handlers.cpp)
-bool RestorePlaytimeState(uint32_t /*appId*/, uint64_t /*playtime*/, uint64_t /*playtime2wks*/) {
-    return false;
-}
-
-bool RestoreLastPlayedState(uint32_t /*appId*/, uint64_t /*lastPlayed*/) {
-    return false;
 }
 
 } // namespace CloudIntercept

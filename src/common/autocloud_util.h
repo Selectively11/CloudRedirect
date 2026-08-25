@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 
 #ifdef _WIN32
@@ -34,7 +35,7 @@ static constexpr uintmax_t kMaxAppInfoBytes = 512ULL * 1024 * 1024;
 static constexpr uint32_t kMaxAppInfoStrings = 200000;
 static constexpr size_t kMaxAutoCloudScanFiles = 20000;
 static constexpr int kMaxAutoCloudScanMillis = 5000;
-// No per-file size cap; imports are bounded by the app's UFS quota.
+// No per-file size cap; storage is bounded by the app's cloud quota.
 
 // Wildcard matching caps against exponential backtracking.
 static constexpr size_t kMaxWildcardPatternLen = 1024;
@@ -91,20 +92,34 @@ inline bool IsSafeRelativePath(const std::string& path) {
 
 // Filesystem time conversion
 
+// Convert a filesystem mtime to whole Unix seconds, rounded to nearest. Flooring
+// recorded a time_stamp one second below the mtime Steam reads off the same file,
+// so the sync-state eval saw the local copy as newer and showed a wrong arrow.
 inline uint64_t FileTimeToUnixSeconds(std::filesystem::file_time_type ftime) {
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
+#else
+    // Pre-C++20: paired clock reads back-to-back to keep epoch jitter sub-second.
     auto fileNow = std::filesystem::file_time_type::clock::now();
-    auto sysNow = std::chrono::system_clock::now();
-    auto sctp = std::chrono::time_point_cast<std::chrono::seconds>(
-        ftime - fileNow + sysNow
-    );
-    return (uint64_t)sctp.time_since_epoch().count();
+    auto sysNow  = std::chrono::system_clock::now();
+    auto sysTime = sysNow + std::chrono::duration_cast<std::chrono::system_clock::duration>(
+        ftime - fileNow);
+#endif
+    auto secs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        sysTime.time_since_epoch()).count();
+    return (uint64_t)((secs + 500) / 1000);
 }
 
 inline std::filesystem::file_time_type UnixSecondsToFileTime(uint64_t unixSeconds) {
     auto sysTime = std::chrono::system_clock::from_time_t((time_t)unixSeconds);
-    auto sysNow = std::chrono::system_clock::now();
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    return std::chrono::clock_cast<std::filesystem::file_time_type::clock>(sysTime);
+#else
+    auto sysNow  = std::chrono::system_clock::now();
     auto fileNow = std::filesystem::file_time_type::clock::now();
-    return fileNow + (sysTime - sysNow);
+    return fileNow + std::chrono::duration_cast<std::filesystem::file_time_type::duration>(
+        sysTime - sysNow);
+#endif
 }
 
 // Platform-specific path resolution
@@ -377,8 +392,13 @@ inline void ApplyRootOverridesForPlatform(AutoCloudRuleNative& rule,
                                           const std::vector<AutoCloudRootOverrideNative>& overrides,
                                           AutoCloudEffectivePlatform platform) {
     for (const auto& overrideRule : overrides) {
-        if (!IsRootOverrideActiveForPlatform(overrideRule, platform)) continue;
-        if (_stricmp(rule.root.c_str(), overrideRule.root.c_str()) != 0) continue;
+        bool active = IsRootOverrideActiveForPlatform(overrideRule, platform);
+        bool rootMatch = _stricmp(rule.root.c_str(), overrideRule.root.c_str()) == 0;
+        LOG("ApplyRootOverride: rule.root='%s' vs override.root='%s' os='%s' active=%d rootMatch=%d -> useinstead='%s'",
+            rule.root.c_str(), overrideRule.root.c_str(), overrideRule.os.c_str(),
+            active ? 1 : 0, rootMatch ? 1 : 0, overrideRule.useInstead.c_str());
+        if (!active) continue;
+        if (!rootMatch) continue;
 
         if (!overrideRule.useInstead.empty()) {
             rule.root = overrideRule.useInstead;

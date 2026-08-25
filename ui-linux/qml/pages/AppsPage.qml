@@ -55,9 +55,7 @@ Page {
     onSearchTextChanged: updateFilteredLists()
 
     function formatProviderName(name) {
-        if (name === "gdrive") return "Google Drive"
-        if (name === "onedrive") return "OneDrive"
-        if (name === "local") return "Local"
+        if (backend) return backend.providerLabel(name)
         return name
     }
 
@@ -148,10 +146,8 @@ Page {
             Label {
                 text: {
                     var provider = backend ? backend.providerName : "local"
-                    if (provider === "gdrive")
-                        return "The cloud copy in Google Drive will also be deleted."
-                    if (provider === "onedrive")
-                        return "The cloud copy in OneDrive will also be deleted."
+                    if (provider === "gdrive" || provider === "onedrive" || provider === "r2")
+                        return "The cloud copy in " + formatProviderName(provider) + " will also be deleted."
                     return ""
                 }
                 visible: text !== ""

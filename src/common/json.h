@@ -32,6 +32,11 @@ struct Value {
 Value Parse(const std::string& json);
 std::string Stringify(const Value& val);
 
+// Structural equality, independent of object key order. Stringify can't be used
+// to compare values because objVal is an unordered_map and serializes in bucket
+// order, so two equal objects may produce different strings.
+bool DeepEqual(const Value& a, const Value& b);
+
 // builders
 Value String(const std::string& s);
 Value Number(double n);

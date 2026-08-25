@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build script for CloudRedirect Flatpak
-# Run this on a Linux system with flatpak-builder installed
+# Build script for CloudRedirect Flatpak. LOCAL TEST INSTALL ONLY.
+# For distributable builds, use release.sh (signs the OSTree summary).
 
 set -e
 
