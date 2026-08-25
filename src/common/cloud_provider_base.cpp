@@ -128,7 +128,14 @@ bool CloudProviderBase::RefreshAccessToken() {
             std::lock_guard<std::mutex> lock(m_mtx);
             m_lastRefreshFailTime = (int64_t)time(nullptr);
         }
-        if (m_authFailureCb) m_authFailureCb(AuthFailureName());
+        // Only surface the "re-authenticate" dialog for a genuine client-error
+        // response (the server explicitly rejected the refresh token). status==0
+        // means the request never reached the server at all (DNS failure, no
+        // connectivity, VPN routing issue, timeout); 5xx means the server itself
+        // is having problems. Neither means the user's credentials are bad, and
+        // re-authenticating will not fix either -- don't cry wolf.
+        if (r.status >= 400 && r.status < 500 && m_authFailureCb)
+            m_authFailureCb(AuthFailureName());
         return false;
     }
     std::string newAccess = ParseRefreshAccessToken(r.body);
