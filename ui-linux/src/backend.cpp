@@ -320,7 +320,10 @@ void Backend::loadConfig()
 
     QJsonObject obj = doc.object();
     m_providerName = obj.value("provider").toString("local");
-    m_syncFolderPath = obj.value("sync_folder_path").toString();
+    // sync_path is the key the native side reads; sync_folder_path is legacy.
+    m_syncFolderPath = obj.value("sync_path").toString();
+    if (m_syncFolderPath.isEmpty())
+        m_syncFolderPath = obj.value("sync_folder_path").toString();
     m_notificationsEnabled = obj.value("notifications_enabled").toBool(true);
     m_statsSyncEnabled = obj.value("stats_sync_enabled").toBool(true);
     m_syncAchievements = obj.value("sync_achievements").toBool(false);
@@ -395,6 +398,9 @@ void Backend::saveConfig()
     }
     
     obj["provider"] = m_providerName;
+    // Native side (cloud_hooks.cpp / cli.cpp) reads sync_path for the folder
+    // provider; write the legacy key too so older builds keep working.
+    obj["sync_path"] = m_syncFolderPath;
     obj["sync_folder_path"] = m_syncFolderPath;
     obj["notifications_enabled"] = m_notificationsEnabled;
     obj["stats_sync_enabled"] = m_statsSyncEnabled;
@@ -2560,9 +2566,18 @@ void Backend::cancelMigration()
 // Write provider + token_path into config.json, preserving unknown keys.
 bool Backend::switchActiveProvider(const QString &provider)
 {
-    QString tokenPath = resolveTokenPath(provider);
-    if (tokenPath.isEmpty())
-        return false;
+    // Folder/local providers use sync_path, not a credential file (matches
+    // the Windows UI, which skips token-path registration for them). Register
+    // tokens_folder.json as their "token path" would make LocalDiskProvider
+    // treat it as a storage root.
+    const bool isFolderProvider = (provider == "folder" || provider == "local");
+
+    QString tokenPath;
+    if (!isFolderProvider) {
+        tokenPath = resolveTokenPath(provider);
+        if (tokenPath.isEmpty())
+            return false;
+    }
 
     const QString configPath = crConfigDir() + "/config.json";
     QJsonObject cfg;
@@ -2574,12 +2589,26 @@ bool Backend::switchActiveProvider(const QString &provider)
             cfg = d.object();
     }
     cfg["provider"]   = provider;
-    cfg["token_path"] = tokenPath;
 
-    // Register in token_paths so the resolver survives later switches.
-    QJsonObject tokenPaths = cfg.value("token_paths").toObject();
-    tokenPaths[provider] = tokenPath;
-    cfg["token_paths"] = tokenPaths;
+    if (isFolderProvider) {
+        // Drop any stale registration so the native resolver never sees
+        // tokens_folder.json as a credential path for these providers.
+        QJsonObject tokenPaths = cfg.value("token_paths").toObject();
+        tokenPaths.remove(provider);
+        if (!tokenPaths.isEmpty())
+            cfg["token_paths"] = tokenPaths;
+        else
+            cfg.remove("token_paths");
+        cfg.remove("token_path");
+        tokenPath = QString();
+    } else {
+        cfg["token_path"] = tokenPath;
+
+        // Register in token_paths so the resolver survives later switches.
+        QJsonObject tokenPaths = cfg.value("token_paths").toObject();
+        tokenPaths[provider] = tokenPath;
+        cfg["token_paths"] = tokenPaths;
+    }
 
     QDir().mkpath(crConfigDir());
     const QByteArray data = QJsonDocument(cfg).toJson();

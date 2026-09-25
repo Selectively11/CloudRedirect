@@ -345,28 +345,48 @@ static void EnsureInitialized() {
             if (!providerName.empty() && providerName != "local") {
                 provider = CreateCloudProvider(providerName);
                 if (provider) {
-                    // Resolve the credential path the same way the CLI does:
-                    // config.json token_paths[provider] -> legacy token_path ->
-                    // convention filename (r2_credentials.json etc). Previously
-                    // this hardcoded "tokens_<provider>.json", which silently
-                    // failed for R2 (r2_credentials.json) and left the app in
-                    // local-only mode with no cloud sync.
-                    std::string tokenPath = ResolveProviderTokenPath(
-                        cloudRedirectRoot, configStr, providerName);
-                    LOG("[Linux] Cloud provider '%s': resolving credentials at %s",
-                        providerName.c_str(), tokenPath.c_str());
-                    if (provider->Init(tokenPath)) {
-                        LOG("[Linux] Cloud provider '%s' initialized (tokens: %s)",
-                            provider->Name(), tokenPath.c_str());
+                    // The folder/local provider takes the sync folder as its
+                    // "credentials" path (it is the storage root, not a token
+                    // file). Read sync_path (sync_folder_path is the legacy
+                    // key the Linux UI used to write); never fall back to the
+                    // token-convention path, which would make
+                    // LocalDiskProvider create tokens_folder.json/ as a
+                    // directory and store blobs there.
+                    bool isFolderProvider = providerName == "folder";
+                    std::string initPath;
+                    if (isFolderProvider) {
+                        if (cfg["sync_path"].type == Json::Type::String)
+                            initPath = cfg["sync_path"].str();
+                        if (initPath.empty() && cfg["sync_folder_path"].type == Json::Type::String)
+                            initPath = cfg["sync_folder_path"].str();
+                        if (!initPath.empty() && initPath.back() != '/')
+                            initPath += '/';
+                        LOG("[Linux] Folder provider: sync path '%s'",
+                            initPath.c_str());
+                    } else {
+                        // Resolve the credential path the same way the CLI does:
+                        // config.json token_paths[provider] -> legacy token_path ->
+                        // convention filename (r2_credentials.json etc). Previously
+                        // this hardcoded "tokens_<provider>.json", which silently
+                        // failed for R2 (r2_credentials.json) and left the app in
+                        // local-only mode with no cloud sync.
+                        initPath = ResolveProviderTokenPath(
+                            cloudRedirectRoot, configStr, providerName);
+                        LOG("[Linux] Cloud provider '%s': resolving credentials at %s",
+                            providerName.c_str(), initPath.c_str());
+                    }
+                    if (!initPath.empty() && provider->Init(initPath)) {
+                        LOG("[Linux] Cloud provider '%s' initialized (path: %s)",
+                            provider->Name(), initPath.c_str());
                         if (!provider->IsAuthenticated()) {
                             LOG("[Linux] WARNING: %s configured but not authenticated -- local-only until signed in",
                                 provider->Name());
                             provider.reset();
                         }
                     } else {
-                        LOG("[Linux] WARNING: Cloud provider '%s' init FAILED (credentials path: %s) -- "
+                        LOG("[Linux] WARNING: Cloud provider '%s' init FAILED (path: %s) -- "
                             "falling back to local-only. Check the file exists and is readable.",
-                            providerName.c_str(), tokenPath.c_str());
+                            providerName.c_str(), initPath.c_str());
                         provider.reset();
                     }
                 } else {

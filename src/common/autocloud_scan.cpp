@@ -120,6 +120,40 @@ static std::string FindGameInstallPath(const std::string& steamPath, uint32_t ap
     return {};
 }
 
+// Find the compatdata directory for an app across every configured Steam
+// library. The Proton prefix lives in the library that holds the game, which
+// is not necessarily the default Steam root.
+static std::string FindCompatdataBase(const std::string& steamPath, uint32_t appId) {
+    const std::string rel = "steamapps/compatdata/" + std::to_string(appId);
+    std::error_code ec;
+    for (const auto& libPath : GetSteamLibraryPaths(steamPath)) {
+        auto candidate = libPath / FileUtil::Utf8ToPath(rel);
+        if (std::filesystem::is_directory(candidate, ec) && !ec) {
+            std::string found = FileUtil::PathToUtf8(candidate);
+            if (!found.empty() && found.back() == '/') found.pop_back();
+            return found;
+        }
+    }
+    // Fallback: default Steam root (may not exist).
+    std::string base = steamPath;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    return base + "/" + rel;
+}
+
+// Prefer the modern AppData paths in a Proton prefix; fall back to the legacy
+// junction names if the modern directory does not exist. Wine/Proton populates
+// AppData/Local and AppData/Roaming, while "Local Settings/Application Data"
+// and "Application Data" are legacy junctions that may be empty.
+static std::string PickExistingPrefixDir(const std::string& pfxBase, const char* modern,
+                                         const char* legacy) {
+    std::error_code ec;
+    auto modernPath = FileUtil::Utf8ToPath(pfxBase + modern);
+    if (std::filesystem::is_directory(modernPath, ec) && !ec) return pfxBase + modern;
+    auto legacyPath = FileUtil::Utf8ToPath(pfxBase + legacy);
+    if (std::filesystem::is_directory(legacyPath, ec) && !ec) return pfxBase + legacy;
+    return pfxBase + modern;
+}
+
 static std::string GetAccountNameFromLoginUsers(const std::string& steamPath, uint32_t accountId) {
     auto vdfPath = FileUtil::Utf8ToPath(steamPath) / "config" / "loginusers.vdf";
     std::ifstream f(vdfPath);
@@ -323,7 +357,8 @@ static AutoCloudEffectivePlatform DetectEffectivePlatform(const std::string& ste
     }
 
     // No compat.vdf; check pfx as fallback.
-    std::string pfxPath = steamPath + "/steamapps/compatdata/" + std::to_string(appId) + "/pfx";
+    std::string compatdataBase = FindCompatdataBase(steamPath, appId);
+    std::string pfxPath = compatdataBase + "/pfx";
     if (std::filesystem::exists(pfxPath, ec) && !ec) {
         LOG("DetectEffectivePlatform: app %u has compatdata/pfx folder = Proton (no compat.vdf)",
             appId);
@@ -786,14 +821,17 @@ ScanResult GetFileList(const std::string& steamPath,
     std::string programData = "/usr/share/";
     std::string windowsHome = home + "/";
 
-    // Proton: override Windows roots to compatdata prefix paths.
-    std::string compatdataBase = steamPath + "/steamapps/compatdata/" + std::to_string(appId);
+    // Proton: override Windows roots to compatdata prefix paths. The prefix
+    // lives in the library that holds the game, so search every library.
+    std::string compatdataBase = FindCompatdataBase(steamPath, appId);
     std::string pfxBase = compatdataBase + "/pfx/drive_c/users/steamuser/";
     if (effectivePlatform == AutoCloudEffectivePlatform::Windows) {
         LOG("GetAutoCloudFileList: app %u has Proton prefix, using compatdata paths", appId);
-        localAppData = pfxBase + "Local Settings/Application Data/";
+        localAppData = PickExistingPrefixDir(pfxBase, "AppData/Local/",
+                                             "Local Settings/Application Data/");
         localLow = pfxBase + "AppData/LocalLow/";
-        roamingAppData = pfxBase + "Application Data/";
+        roamingAppData = PickExistingPrefixDir(pfxBase, "AppData/Roaming/",
+                                               "Application Data/");
         myDocuments = pfxBase + "My Documents/";
         savedGames = pfxBase + "Saved Games/";
         programData = compatdataBase + "/pfx/drive_c/ProgramData/";
@@ -874,7 +912,7 @@ ScanResult GetFileList(const std::string& steamPath,
     };
 
     std::unordered_map<std::string, std::string> seenRootsByCloudPath;
-    // Sibling dedupe; separate from primary so siblings can't trip the abort.
+    // Native sibling-expansion dedupe (rule.siblings probe files).
     std::unordered_set<std::string> emittedSiblings;
 
     bool hasRootCollision = false;
@@ -975,9 +1013,10 @@ ScanResult GetFileList(const std::string& steamPath,
             appId, rule.root.c_str(), rule.path.c_str(), rule.resolvedPath.c_str(),
             rule.pattern.c_str(), rule.recursive ? 1 : 0, scanRootUtf8.c_str());
 
-        std::string scanRootPrefix = FileUtil::MakePathPrefix(scanRootUtf8);
 
-        auto considerFile = [&](const std::filesystem::directory_entry& entry) {
+        auto considerFile = [&](const std::filesystem::directory_entry& entry,
+                                const std::string& rootPrefix,
+                                const std::string& cloudPrefix) {
             std::error_code fileEc;
             // Junction/symlink gate before is_regular_file.
             std::string entryUtf8 = FileUtil::PathToUtf8(entry.path());
@@ -990,7 +1029,7 @@ ScanResult GetFileList(const std::string& steamPath,
             ++visitedFiles;
             std::string entryNorm = NormalizeSlashes(entryUtf8);
             std::string relFromRoot;
-            if (!FileUtil::RelativeUtf8Path(entryNorm, scanRootPrefix, &relFromRoot)) {
+            if (!FileUtil::RelativeUtf8Path(entryNorm, rootPrefix, &relFromRoot)) {
 
                 relFromRoot = NormalizeSlashes(FileUtil::PathToUtf8(entry.path().filename()));
             }
@@ -1006,7 +1045,7 @@ ScanResult GetFileList(const std::string& steamPath,
                 if (WildcardMatchInsensitive(exPat, exTarget)) return;
             }
 
-            std::string cloudPath = normalizedCloudPath.empty() ? relFromRoot : normalizedCloudPath + "/" + relFromRoot;
+            std::string cloudPath = cloudPrefix.empty() ? relFromRoot : cloudPrefix + "/" + relFromRoot;
             std::string collisionKey = ToLowerAscii(NormalizeSlashes(cloudPath));
             auto seenIt = seenRootsByCloudPath.find(collisionKey);
             if (seenIt != seenRootsByCloudPath.end()) {
@@ -1037,13 +1076,13 @@ ScanResult GetFileList(const std::string& steamPath,
                 if (!std::filesystem::is_regular_file(siblingPath, sibEc) || sibEc) continue;
                 std::string siblingNorm = NormalizeSlashes(siblingPathUtf8);
                 std::string siblingRel;
-                if (!FileUtil::RelativeUtf8Path(siblingNorm, scanRootPrefix, &siblingRel)) {
+                if (!FileUtil::RelativeUtf8Path(siblingNorm, rootPrefix, &siblingRel)) {
                     siblingRel = NormalizeSlashes(FileUtil::PathToUtf8(siblingPath.filename()));
                 }
                 if (!IsSafeRelativePath(siblingRel)) continue;
-                std::string siblingCloudPath = normalizedCloudPath.empty()
+                std::string siblingCloudPath = cloudPrefix.empty()
                     ? siblingRel
-                    : normalizedCloudPath + "/" + siblingRel;
+                    : cloudPrefix + "/" + siblingRel;
                 std::string siblingKey = ToLowerAscii(NormalizeSlashes(siblingCloudPath));
                 if (seenRootsByCloudPath.find(siblingKey) != seenRootsByCloudPath.end()) {
                     LOG("GetAutoCloudFileList: sibling %s already claimed by a primary for app %u; skipping",
@@ -1059,33 +1098,36 @@ ScanResult GetFileList(const std::string& steamPath,
             }
         };
 
-        if (rule.recursive) {
-            std::error_code iterEc;
-            std::filesystem::recursive_directory_iterator it(
-                scanRoot, std::filesystem::directory_options::skip_permission_denied, iterEc);
-            std::filesystem::recursive_directory_iterator end;
-            for (; !iterEc && it != end; it.increment(iterEc)) {
-                if (scanLimitReached() || hasRootCollision) break;
-                considerFile(*it);
-            }
-            if (iterEc) {
-                LOG("GetAutoCloudFileList: directory iteration error in %s: %s",
-                    FileUtil::PathToUtf8(scanRoot).c_str(), iterEc.message().c_str());
-                scanLimitHit = true;
-            }
-        } else {
-            std::error_code iterEc;
-            std::filesystem::directory_iterator it(
-                scanRoot, std::filesystem::directory_options::skip_permission_denied, iterEc);
-            std::filesystem::directory_iterator end;
-            for (; !iterEc && it != end; it.increment(iterEc)) {
-                if (scanLimitReached() || hasRootCollision) break;
-                considerFile(*it);
-            }
-            if (iterEc) {
-                LOG("GetAutoCloudFileList: directory iteration error in %s: %s",
-                    FileUtil::PathToUtf8(scanRoot).c_str(), iterEc.message().c_str());
-                scanLimitHit = true;
+        {
+            std::string targetPrefix = FileUtil::MakePathPrefix(scanRootUtf8);
+            if (rule.recursive) {
+                std::error_code iterEc;
+                std::filesystem::recursive_directory_iterator it(
+                    scanRoot, std::filesystem::directory_options::skip_permission_denied, iterEc);
+                std::filesystem::recursive_directory_iterator end;
+                for (; !iterEc && it != end; it.increment(iterEc)) {
+                    if (scanLimitReached() || hasRootCollision) break;
+                    considerFile(*it, targetPrefix, normalizedCloudPath);
+                }
+                if (iterEc) {
+                    LOG("GetAutoCloudFileList: directory iteration error in %s: %s",
+                        scanRootUtf8.c_str(), iterEc.message().c_str());
+                    scanLimitHit = true;
+                }
+            } else {
+                std::error_code iterEc;
+                std::filesystem::directory_iterator it(
+                    scanRoot, std::filesystem::directory_options::skip_permission_denied, iterEc);
+                std::filesystem::directory_iterator end;
+                for (; !iterEc && it != end; it.increment(iterEc)) {
+                    if (scanLimitReached() || hasRootCollision) break;
+                    considerFile(*it, targetPrefix, normalizedCloudPath);
+                }
+                if (iterEc) {
+                    LOG("GetAutoCloudFileList: directory iteration error in %s: %s",
+                        scanRootUtf8.c_str(), iterEc.message().c_str());
+                    scanLimitHit = true;
+                }
             }
         }
         if (scanLimitReached() || hasRootCollision) break;
@@ -1313,12 +1355,14 @@ std::unordered_map<std::string, std::string> GetRootTokenDirectories(
     std::string programData = "/usr/share/";
     std::string windowsHome = home + "/";
 
-    std::string compatdataBase = steamPath + "/steamapps/compatdata/" + std::to_string(appId);
+    std::string compatdataBase = FindCompatdataBase(steamPath, appId);
     std::string pfxBase = compatdataBase + "/pfx/drive_c/users/steamuser/";
     if (effectivePlatform == AutoCloudEffectivePlatform::Windows) {
-        localAppData = pfxBase + "Local Settings/Application Data/";
+        localAppData = PickExistingPrefixDir(pfxBase, "AppData/Local/",
+                                             "Local Settings/Application Data/");
         localLow = pfxBase + "AppData/LocalLow/";
-        roamingAppData = pfxBase + "Application Data/";
+        roamingAppData = PickExistingPrefixDir(pfxBase, "AppData/Roaming/",
+                                               "Application Data/");
         myDocuments = pfxBase + "My Documents/";
         savedGames = pfxBase + "Saved Games/";
         programData = compatdataBase + "/pfx/drive_c/ProgramData/";

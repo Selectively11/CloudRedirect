@@ -843,9 +843,14 @@ static std::string ReadSyncPath() {
     fclose(f);
 
     Json::Value root = Json::Parse(json);
-    if (root.type == Json::Type::Object && root.has("sync_path") &&
-        root["sync_path"].type == Json::Type::String)
-        return root["sync_path"].str();
+    if (root.type == Json::Type::Object) {
+        if (root.has("sync_path") && root["sync_path"].type == Json::Type::String &&
+            !root["sync_path"].str().empty())
+            return root["sync_path"].str();
+        // Legacy key the Linux UI used to write.
+        if (root.has("sync_folder_path") && root["sync_folder_path"].type == Json::Type::String)
+            return root["sync_folder_path"].str();
+    }
     return "";
 }
 
