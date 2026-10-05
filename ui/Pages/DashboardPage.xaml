@@ -99,10 +99,21 @@
                            Icon="{ui:SymbolIcon Document24}"
                            Margin="0,0,8,8"
                            Click="OpenLog_Click" />
-                <ui:Button Content="{res:Loc Dashboard_RestartSteam}"
+                <ui:Button x:Name="RestartSteamBtn"
+                           Content="{res:Loc Dashboard_RestartSteam}"
                            Icon="{ui:SymbolIcon ArrowSync24}"
                            Margin="0,0,8,8"
                            Click="RestartSteam_Click" />
+                <ui:Button x:Name="CloseSteamBtn"
+                           Content="{res:Loc Dashboard_CloseSteam}"
+                           Icon="{ui:SymbolIcon Dismiss24}"
+                           Margin="0,0,8,8"
+                           Click="CloseSteam_Click" />
+                <ui:Button x:Name="StartSteamBtn"
+                           Content="{res:Loc Dashboard_StartSteam}"
+                           Icon="{ui:SymbolIcon Play24}"
+                           Margin="0,0,8,8"
+                           Click="StartSteam_Click" />
             </WrapPanel>
         </StackPanel>
     </ScrollViewer>
