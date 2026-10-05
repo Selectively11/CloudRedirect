@@ -94,6 +94,8 @@ set(PROVIDER_SOURCES
     src/providers/google_drive.cpp
     src/providers/onedrive.cpp
     src/providers/local_disk_provider.cpp
+    src/providers/proton_drive.cpp
+    src/providers/proton_pgp.cpp
     src/providers/s3_provider.cpp
     src/providers/r2_provider.cpp
 )
@@ -171,8 +173,9 @@ if(WIN32)
         src/platform/win/cloud760_tool.cpp
     )
 else()
+    find_package(OpenSSL REQUIRED)
     target_include_directories(cloud_redirect PRIVATE src/platform/linux)
-    target_link_libraries(cloud_redirect PRIVATE dl pthread)
+    target_link_libraries(cloud_redirect PRIVATE dl pthread OpenSSL::SSL OpenSSL::Crypto)
     # Steam on Linux is 32-bit; use LINUX_32BIT=ON when cross-compiling on 64-bit host
     # Match Steam's pre-C++11 ABI
     target_compile_definitions(cloud_redirect PRIVATE _GLIBCXX_USE_CXX11_ABI=0 _FILE_OFFSET_BITS=64)
