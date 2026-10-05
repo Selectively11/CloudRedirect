@@ -7,7 +7,8 @@
 //   Linux:   cloud_redirect_cli <command> [args...]
 //
 // Commands:
-// Subcommands: auth-status, authenticate, list-remote-apps, delete-remote-app, list-blobs, delete-blobs
+// Subcommands include provider management plus `save upload`, `save download`, and `save list`
+// for game-named folders containing the original save files.
 //
 // All output is JSON to stdout. Exit code 0 = success, 1 = error.
 
@@ -41,6 +42,14 @@ std::string CmdSyncAllRemoteApps(const std::string& provider, const std::string&
 std::string CmdPruneLocalLegacyMetadata(const std::string& cloudRoot);
 std::string CmdPublishFullManifest(const std::string& provider, const std::string& accountId, const std::string& appId,
                                    const std::string& cloudRoot);
+std::string CmdSaveUpload(const std::string& provider, const std::string& accountId,
+                          const std::string& appId, const std::string& gameName,
+                          const std::string& sourceDirectory);
+std::string CmdSaveDownload(const std::string& provider, const std::string& accountId,
+                            const std::string& appId, const std::string& gameName,
+                            const std::string& outputDirectory);
+std::string CmdSaveList(const std::string& provider, const std::string& accountId,
+                        const std::string& appId, const std::string& gameName);
 
 } // namespace CloudRedirectCli
 
