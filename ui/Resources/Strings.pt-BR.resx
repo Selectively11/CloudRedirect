@@ -1633,6 +1633,18 @@ Tem certeza?</value>
   <data name="CloudProvider_R2CredSaved" xml:space="preserve">
     <value>Credenciais salvas com sucesso</value>
   </data>
+  <data name="CloudProvider_TestConnection" xml:space="preserve">
+    <value>Testar Conexão</value>
+  </data>
+  <data name="CloudProvider_Testing" xml:space="preserve">
+    <value>Testando conexão...</value>
+  </data>
+  <data name="CloudProvider_TestOk" xml:space="preserve">
+    <value>Conectado. O bucket aceitou as credenciais.</value>
+  </data>
+  <data name="CloudProvider_TestFailed" xml:space="preserve">
+    <value>Falha na conexão: {0}</value>
+  </data>
   <data name="CloudProvider_R2CredFound" xml:space="preserve">
     <value>Credenciais configuradas</value>
   </data>

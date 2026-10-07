@@ -207,6 +207,17 @@ internal sealed class CliUiCloudProvider : IUiCloudProvider
         }
     }
 
+    /// <summary>
+    /// Real signed bucket request (lists account 0), so bad keys/endpoint fail --
+    /// unlike auth-status, which only parses the credential file. Null = OK.
+    /// </summary>
+    public async Task<string?> TestConnectionAsync(CancellationToken cancel)
+    {
+        var result = await RunCliAsync($"list-remote-app-ids {_provider} 0", cancel);
+        if (result.ExitCode == 0) return null;
+        return TryGetError(result.Output) ?? $"CLI exited with code {result.ExitCode}";
+    }
+
     private async Task<(int ExitCode, string Output)> RunCliAsync(string arguments, CancellationToken cancel)
     {
         // Entire process lifecycle in Task.Run to avoid UI freeze.

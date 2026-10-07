@@ -589,6 +589,18 @@ Force-kill it?</value>
   <data name="CloudProvider_R2CredSaved" xml:space="preserve">
     <value>Credentials saved successfully</value>
   </data>
+  <data name="CloudProvider_TestConnection" xml:space="preserve">
+    <value>Test Connection</value>
+  </data>
+  <data name="CloudProvider_Testing" xml:space="preserve">
+    <value>Testing connection...</value>
+  </data>
+  <data name="CloudProvider_TestOk" xml:space="preserve">
+    <value>Connected. The bucket accepted the credentials.</value>
+  </data>
+  <data name="CloudProvider_TestFailed" xml:space="preserve">
+    <value>Connection failed: {0}</value>
+  </data>
   <data name="CloudProvider_R2CredFound" xml:space="preserve">
     <value>Credentials configured</value>
   </data>
