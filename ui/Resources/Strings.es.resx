@@ -1629,6 +1629,18 @@ Esto puede causar pérdida de datos en algunos casos.
   <data name="CloudProvider_R2CredSaved" xml:space="preserve">
     <value>Credenciales guardadas correctamente</value>
   </data>
+  <data name="CloudProvider_TestConnection" xml:space="preserve">
+    <value>Probar conexión</value>
+  </data>
+  <data name="CloudProvider_Testing" xml:space="preserve">
+    <value>Probando conexión...</value>
+  </data>
+  <data name="CloudProvider_TestOk" xml:space="preserve">
+    <value>Conectado. El bucket aceptó las credenciales.</value>
+  </data>
+  <data name="CloudProvider_TestFailed" xml:space="preserve">
+    <value>Error de conexión: {0}</value>
+  </data>
   <data name="CloudProvider_R2CredFound" xml:space="preserve">
     <value>Credenciales configuradas</value>
   </data>

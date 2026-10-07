@@ -628,6 +628,54 @@ public partial class CloudProviderPage : Page
 
     private async void R2SaveCreds_Click(object sender, RoutedEventArgs e)
     {
+        if (!await SaveR2CredsAsync()) return;
+
+        // Update status to reflect the saved credentials.
+        UpdateAuthStatus();
+        AuthStatus.Text = S.Get("CloudProvider_R2CredSaved");
+        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+    }
+
+    private async void R2Test_Click(object sender, RoutedEventArgs e) =>
+        await TestConnectionAsync("r2", R2TestButton, SaveR2CredsAsync);
+
+    private async void S3Test_Click(object sender, RoutedEventArgs e) =>
+        await TestConnectionAsync("s3", S3TestButton, SaveS3CredsAsync);
+
+    // Saves the fields first: the CLI reads the credentials file, not the form.
+    private async Task TestConnectionAsync(string provider, Wpf.Ui.Controls.Button button, Func<Task<bool>> save)
+    {
+        if (!await save()) return;
+
+        button.IsEnabled = false;
+        AuthStatus.Text = S.Get("CloudProvider_Testing");
+        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldKeyhole24;
+
+        string? error;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            error = await new Services.Providers.CliUiCloudProvider(provider, null).TestConnectionAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            error = "Timed out";
+        }
+        finally
+        {
+            button.IsEnabled = true;
+        }
+
+        AuthStatus.Text = error == null
+            ? S.Get("CloudProvider_TestOk")
+            : S.Format("CloudProvider_TestFailed", error);
+        AuthIcon.Symbol = error == null
+            ? Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24
+            : Wpf.Ui.Controls.SymbolRegular.ShieldDismiss24;
+    }
+
+    private async Task<bool> SaveR2CredsAsync()
+    {
         var accountId = R2AccountIdBox.Text?.Trim() ?? "";
         var accessKey = R2AccessKeyBox.Text?.Trim() ?? "";
         var secretKey = R2SecretKeyBox.Password?.Trim() ?? "";
@@ -640,7 +688,7 @@ public partial class CloudProviderPage : Page
         {
             await Services.Dialog.ShowWarningAsync(S.Get("CloudProvider_R2CredTitle"),
                 S.Get("CloudProvider_R2FieldsRequired"));
-            return;
+            return false;
         }
 
         var credPath = GetR2CredentialPath();
@@ -669,12 +717,7 @@ public partial class CloudProviderPage : Page
 
         // Point the config at this credentials file.
         TokenPathBox.Text = credPath;
-        await SaveConfigSilent();
-
-        // Update status to reflect the saved credentials.
-        UpdateAuthStatus();
-        AuthStatus.Text = S.Get("CloudProvider_R2CredSaved");
-        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+        return await SaveConfigSilent();
     }
 
     /// <summary>
@@ -764,6 +807,16 @@ public partial class CloudProviderPage : Page
 
     private async void S3SaveCreds_Click(object sender, RoutedEventArgs e)
     {
+        if (!await SaveS3CredsAsync()) return;
+
+        // Update status to reflect the saved credentials.
+        UpdateAuthStatus();
+        AuthStatus.Text = S.Get("CloudProvider_S3CredSaved");
+        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+    }
+
+    private async Task<bool> SaveS3CredsAsync()
+    {
         var accessKey = S3AccessKeyBox.Text?.Trim() ?? "";
         var secretKey = S3SecretKeyBox.Password?.Trim() ?? "";
         var bucket = S3BucketBox.Text?.Trim() ?? "";
@@ -778,7 +831,7 @@ public partial class CloudProviderPage : Page
         {
             await Services.Dialog.ShowWarningAsync(S.Get("CloudProvider_S3CredTitle"),
                 S.Get("CloudProvider_S3FieldsRequired"));
-            return;
+            return false;
         }
 
         var credPath = GetS3CredentialPath();
@@ -816,12 +869,7 @@ public partial class CloudProviderPage : Page
 
         // Point the config at this credentials file.
         TokenPathBox.Text = credPath;
-        await SaveConfigSilent();
-
-        // Update status to reflect the saved credentials.
-        UpdateAuthStatus();
-        AuthStatus.Text = S.Get("CloudProvider_S3CredSaved");
-        AuthIcon.Symbol = Wpf.Ui.Controls.SymbolRegular.ShieldCheckmark24;
+        return await SaveConfigSilent();
     }
 
     /// <summary>Reads upload_inflight_mb from config.json, clamped 24..64.

@@ -121,11 +121,18 @@
                             PlaceholderText="leave blank for &lt;account&gt;.r2.cloudflarestorage.com"
                             Margin="0,0,0,16" />
 
-                <ui:Button x:Name="R2SaveCredsButton"
-                           Content="{res:Loc CloudProvider_R2SaveCreds}"
-                           Appearance="Primary"
-                           Icon="{ui:SymbolIcon Save24}"
-                           Click="R2SaveCreds_Click" />
+                <StackPanel Orientation="Horizontal">
+                    <ui:Button x:Name="R2SaveCredsButton"
+                               Content="{res:Loc CloudProvider_R2SaveCreds}"
+                               Appearance="Primary"
+                               Icon="{ui:SymbolIcon Save24}"
+                               Click="R2SaveCreds_Click"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="R2TestButton"
+                               Content="{res:Loc CloudProvider_TestConnection}"
+                               Icon="{ui:SymbolIcon PlugConnected24}"
+                               Click="R2Test_Click" />
+                </StackPanel>
             </StackPanel>
 
             <!-- S3-Compatible Credential Entry (visible only when S3 is selected) -->
@@ -213,11 +220,18 @@
                                Click="S3BrowseCaCert_Click" />
                 </Grid>
 
-                <ui:Button x:Name="S3SaveCredsButton"
-                           Content="{res:Loc CloudProvider_R2SaveCreds}"
-                           Appearance="Primary"
-                           Icon="{ui:SymbolIcon Save24}"
-                           Click="S3SaveCreds_Click" />
+                <StackPanel Orientation="Horizontal">
+                    <ui:Button x:Name="S3SaveCredsButton"
+                               Content="{res:Loc CloudProvider_R2SaveCreds}"
+                               Appearance="Primary"
+                               Icon="{ui:SymbolIcon Save24}"
+                               Click="S3SaveCreds_Click"
+                               Margin="0,0,8,0" />
+                    <ui:Button x:Name="S3TestButton"
+                               Content="{res:Loc CloudProvider_TestConnection}"
+                               Icon="{ui:SymbolIcon PlugConnected24}"
+                               Click="S3Test_Click" />
+                </StackPanel>
             </StackPanel>
 
             <TextBlock Text="{res:Loc CloudProvider_Authentication}"
